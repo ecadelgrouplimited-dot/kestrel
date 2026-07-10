@@ -101,6 +101,7 @@ enum TreeAction {
 
 struct KestrelApp {
     view: AppView,
+    dark_mode: bool,
     path: String,
     query: String,
     output: String,
@@ -159,6 +160,7 @@ impl Default for KestrelApp {
         let user_email = settings.user.email.clone().unwrap_or_default();
         Self {
             view: AppView::Main,
+            dark_mode: true,
             path,
             query: String::new(),
             output: "Open a project to browse its files. Click a file to view and edit it; use \
@@ -359,6 +361,11 @@ impl KestrelApp {
 
 impl eframe::App for KestrelApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        ctx.set_visuals(if self.dark_mode {
+            egui::Visuals::dark()
+        } else {
+            egui::Visuals::light()
+        });
         self.poll_job(ctx);
         self.poll_chat(ctx);
         self.poll_agent(ctx);
@@ -382,6 +389,14 @@ impl eframe::App for KestrelApp {
                     self.open_project_path(self.project_path());
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let theme_icon = if self.dark_mode { "🌙" } else { "☀" };
+                    if ui
+                        .button(theme_icon)
+                        .on_hover_text("Toggle light / dark theme")
+                        .clicked()
+                    {
+                        self.dark_mode = !self.dark_mode;
+                    }
                     if self.view == AppView::Main {
                         if ui.button("⚙ Settings").clicked() {
                             self.view = AppView::Settings;
@@ -952,6 +967,14 @@ impl KestrelApp {
         }
         ui.separator();
 
+        let language = language_for_path(&path);
+        let dark = ui.visuals().dark_mode;
+        let font = egui::TextStyle::Monospace.resolve(ui.style());
+        let mut layouter = |ui: &egui::Ui, text: &str, wrap_width: f32| {
+            let mut job = code_layout(text, language, dark, font.clone());
+            job.wrap.max_width = wrap_width;
+            ui.fonts(|f| f.layout_job(job))
+        };
         egui::ScrollArea::both()
             .auto_shrink([false, false])
             .show(ui, |ui| {
@@ -959,7 +982,8 @@ impl KestrelApp {
                     egui::TextEdit::multiline(&mut self.editor_text)
                         .code_editor()
                         .desired_width(f32::INFINITY)
-                        .desired_rows(28),
+                        .desired_rows(28)
+                        .layouter(&mut layouter),
                 );
             });
 
@@ -1156,14 +1180,15 @@ impl KestrelApp {
                         }
                     });
                 });
+                let language = language_for(&file.path);
+                let dark = ui.visuals().dark_mode;
+                let font = egui::TextStyle::Monospace.resolve(ui.style());
+                let job = code_layout(&file.contents, language, dark, font);
                 egui::ScrollArea::both()
                     .id_source("agent-file-preview")
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        ui.add(
-                            egui::Label::new(egui::RichText::new(&file.contents).monospace())
-                                .selectable(true),
-                        );
+                        ui.add(egui::Label::new(job).selectable(true));
                     });
             }
         }
@@ -1731,6 +1756,84 @@ fn chat_system_prompt(include: bool, project: &Path, query: &str) -> String {
         }
     }
     prompt
+}
+
+/// The highlighting language for a file path's extension.
+fn language_for_path(path: &Path) -> kestrel_core::Language {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    kestrel_core::language_from_extension(ext)
+}
+
+/// The highlighting language for a (possibly relative) path string.
+fn language_for(path: &str) -> kestrel_core::Language {
+    language_for_path(Path::new(path))
+}
+
+/// The colour for a token kind under the current theme (VS Code-like palettes).
+fn token_color(kind: kestrel_core::TokenKind, dark: bool) -> egui::Color32 {
+    use kestrel_core::TokenKind::*;
+    if dark {
+        match kind {
+            Keyword => egui::Color32::from_rgb(0x56, 0x9C, 0xD6),
+            Type => egui::Color32::from_rgb(0x4E, 0xC9, 0xB0),
+            Function => egui::Color32::from_rgb(0xDC, 0xDC, 0xAA),
+            String => egui::Color32::from_rgb(0xCE, 0x91, 0x78),
+            Comment => egui::Color32::from_rgb(0x6A, 0x99, 0x55),
+            Number => egui::Color32::from_rgb(0xB5, 0xCE, 0xA8),
+        }
+    } else {
+        match kind {
+            Keyword => egui::Color32::from_rgb(0x00, 0x00, 0xFF),
+            Type => egui::Color32::from_rgb(0x26, 0x7F, 0x99),
+            Function => egui::Color32::from_rgb(0x79, 0x5E, 0x26),
+            String => egui::Color32::from_rgb(0xA3, 0x15, 0x15),
+            Comment => egui::Color32::from_rgb(0x00, 0x80, 0x00),
+            Number => egui::Color32::from_rgb(0x09, 0x86, 0x58),
+        }
+    }
+}
+
+/// Build a coloured `LayoutJob` for `source` in `language`, filling the gaps
+/// between highlighted spans with the default text colour.
+fn code_layout(
+    source: &str,
+    language: kestrel_core::Language,
+    dark: bool,
+    font: egui::FontId,
+) -> egui::text::LayoutJob {
+    let default = if dark {
+        egui::Color32::from_rgb(0xD4, 0xD4, 0xD4)
+    } else {
+        egui::Color32::from_rgb(0x24, 0x29, 0x2E)
+    };
+    let mut job = egui::text::LayoutJob::default();
+    let append = |job: &mut egui::text::LayoutJob, text: &str, color: egui::Color32| {
+        job.append(
+            text,
+            0.0,
+            egui::TextFormat {
+                font_id: font.clone(),
+                color,
+                ..Default::default()
+            },
+        );
+    };
+    let mut pos = 0;
+    for span in kestrel_core::highlight(source, language) {
+        if span.start > pos {
+            append(&mut job, &source[pos..span.start], default);
+        }
+        append(
+            &mut job,
+            &source[span.start..span.end],
+            token_color(span.kind, dark),
+        );
+        pos = span.end;
+    }
+    if pos < source.len() {
+        append(&mut job, &source[pos..], default);
+    }
+    job
 }
 
 /// A display label for a provider's API kind.

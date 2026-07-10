@@ -9,6 +9,7 @@ pub mod project;
 pub mod providers;
 pub mod settings;
 pub mod symbols;
+pub mod syntax;
 pub mod verify;
 pub mod workspace;
 
@@ -42,6 +43,7 @@ pub use symbols::{
     extractor_for_language, extractor_for_path, symbols_for_file, FileSymbols, Import, Symbol,
     SymbolExtractor, SymbolKind,
 };
+pub use syntax::{highlight, language_from_extension, Language, Span, TokenKind};
 pub use verify::{plan_verification, run_verification, StepResult, VerificationReport, VerifyStep};
 pub use workspace::{
     create_dir, create_file, delete_entry, read_dir_entries, read_text_file, rename_entry,
