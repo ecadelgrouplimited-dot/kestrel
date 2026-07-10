@@ -696,6 +696,116 @@ fn grep_file(
     }
 }
 
+/// A review of the project's uncommitted changes, for the desktop Diff view.
+#[derive(Debug, Default, Clone)]
+pub struct GitReview {
+    /// Whether the project is a git repository at all.
+    pub is_repo: bool,
+    /// Whether it has at least one commit (so a hard revert is possible).
+    pub has_head: bool,
+    /// A one-line summary, e.g. "3 file(s) changed".
+    pub summary: String,
+    /// The changed entries (`git status --porcelain` lines).
+    pub files: Vec<String>,
+    /// The unified working-tree diff (untracked files included).
+    pub diff: String,
+}
+
+/// Run a git command in `root`, returning (success, stdout, stderr).
+fn git_output(root: &Path, args: &[&str]) -> (bool, String, String) {
+    match Command::new("git").args(args).current_dir(root).output() {
+        Ok(out) => (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        ),
+        Err(err) => (false, String::new(), err.to_string()),
+    }
+}
+
+/// Review the project's uncommitted changes (what the agent just did), as a
+/// unified diff plus a changed-file list. Untracked files are included via an
+/// intent-to-add so new files show up as additions.
+pub fn git_review(root: &Path) -> GitReview {
+    let (is_repo, _, _) = git_output(root, &["rev-parse", "--is-inside-work-tree"]);
+    if !is_repo {
+        return GitReview::default();
+    }
+    let (has_head, _, _) = git_output(root, &["rev-parse", "--verify", "HEAD"]);
+    let _ = git_output(root, &["add", "-N", "--", "."]);
+    let (_, diff, _) = git_output(root, &["--no-pager", "-c", "core.quotepath=false", "diff"]);
+    let (_, status, _) = git_output(root, &["status", "--porcelain"]);
+    let files: Vec<String> = status
+        .lines()
+        .map(|l| l.trim_end().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+    let summary = if files.is_empty() {
+        "No uncommitted changes.".to_string()
+    } else {
+        format!("{} file(s) changed", files.len())
+    };
+    GitReview {
+        is_repo: true,
+        has_head,
+        summary,
+        files,
+        diff,
+    }
+}
+
+/// Initialize a git repository in `root`.
+pub fn git_init(root: &Path) -> Result<(), String> {
+    let (ok, _, err) = git_output(root, &["init"]);
+    if ok {
+        Ok(())
+    } else {
+        Err(err.trim().to_string())
+    }
+}
+
+/// Stage everything and commit it (accept the agent's changes), using a
+/// fallback identity so it works even when git has none configured.
+pub fn git_commit_all(root: &Path, message: &str) -> Result<String, String> {
+    let (ok, _, err) = git_output(root, &["add", "-A"]);
+    if !ok {
+        return Err(err.trim().to_string());
+    }
+    let (ok, out, err) = git_output(
+        root,
+        &[
+            "-c",
+            "user.name=Kestrel",
+            "-c",
+            "user.email=kestrel@local",
+            "commit",
+            "-m",
+            message,
+        ],
+    );
+    if ok {
+        Ok(out.trim().to_string())
+    } else {
+        let msg = if err.trim().is_empty() { out } else { err };
+        Err(msg.trim().to_string())
+    }
+}
+
+/// Discard all uncommitted changes, reverting the working tree to HEAD and
+/// removing new files (reject the agent's changes). Requires a commit to exist.
+pub fn git_revert_all(root: &Path) -> Result<String, String> {
+    let (ok, _, err) = git_output(root, &["reset", "--hard", "HEAD"]);
+    if !ok {
+        return Err(err.trim().to_string());
+    }
+    let (ok, _, err) = git_output(root, &["clean", "-fd"]);
+    if ok {
+        Ok("Reverted to the last commit.".to_string())
+    } else {
+        Err(err.trim().to_string())
+    }
+}
+
 /// Run a git command in `root`, injecting a fallback identity for commits so
 /// they don't fail when git has no configured `user.name`/`user.email`.
 fn run_git(root: &Path, args: &str, timeout: Duration) -> String {

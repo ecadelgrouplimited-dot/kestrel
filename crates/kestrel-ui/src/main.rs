@@ -86,6 +86,7 @@ enum AppView {
 enum CentralView {
     Editor,
     Output,
+    Diff,
 }
 
 /// A pending create/rename operation driving the entry modal.
@@ -130,6 +131,10 @@ struct KestrelApp {
     entry_status: String,
     // Delete confirmation.
     delete_target: Option<PathBuf>,
+    // Diff review state.
+    diff_review: Option<kestrel_core::GitReview>,
+    diff_status: String,
+    confirm_revert: bool,
     // Settings state.
     settings: kestrel_core::Settings,
     user_name: String,
@@ -192,6 +197,9 @@ impl Default for KestrelApp {
             entry_name: String::new(),
             entry_status: String::new(),
             delete_target: None,
+            diff_review: None,
+            diff_status: String::new(),
+            confirm_revert: false,
             settings,
             user_name,
             user_email,
@@ -321,8 +329,9 @@ impl KestrelApp {
                     self.agent_messages = history;
                     self.chat_pending = false;
                     self.agent_job = None;
-                    self.status = "Agent finished.".to_string();
+                    self.status = "Agent finished — review changes in the Diff tab.".to_string();
                     self.save_session();
+                    self.diff_review = None;
                     refresh = true;
                     break;
                 }
@@ -332,6 +341,7 @@ impl KestrelApp {
                     self.chat_pending = false;
                     self.agent_job = None;
                     self.save_session();
+                    self.diff_review = None;
                     // Show whatever the agent managed to write before stopping.
                     refresh = true;
                     break;
@@ -388,6 +398,7 @@ impl eframe::App for KestrelApp {
         self.new_project_modal(ctx);
         self.entry_modal(ctx);
         self.delete_modal(ctx);
+        self.revert_modal(ctx);
 
         egui::TopBottomPanel::top("controls").show(ctx, |ui| {
             ui.add_space(6.0);
@@ -555,6 +566,7 @@ impl eframe::App for KestrelApp {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.central, CentralView::Editor, "Editor");
                 ui.selectable_value(&mut self.central, CentralView::Output, "Output");
+                ui.selectable_value(&mut self.central, CentralView::Diff, "Diff");
             });
             ui.separator();
             match self.central {
@@ -569,6 +581,7 @@ impl eframe::App for KestrelApp {
                             );
                         });
                 }
+                CentralView::Diff => self.diff_ui(ui),
             }
         });
     }
@@ -1041,6 +1054,155 @@ impl KestrelApp {
         }
         if do_format {
             self.format_current_file();
+        }
+    }
+
+    /// The Diff review: a git-diff of everything the agent changed since the
+    /// last commit, with Keep (commit) and Revert (discard) actions.
+    fn diff_ui(&mut self, ui: &mut egui::Ui) {
+        if self.diff_review.is_none() {
+            self.diff_review = Some(kestrel_core::git_review(&self.project_path()));
+        }
+        let mut refresh = false;
+        let mut commit = false;
+        let mut revert = false;
+        let mut init = false;
+
+        {
+            let review = self.diff_review.as_ref().unwrap();
+            if !review.is_repo {
+                ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new(
+                        "This project isn't a git repository. Initialize one to review and \
+                         snapshot the agent's changes at a glance.",
+                    )
+                    .weak(),
+                );
+                ui.add_space(4.0);
+                if ui.button("git init").clicked() {
+                    init = true;
+                }
+            } else {
+                ui.horizontal(|ui| {
+                    ui.strong(&review.summary);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("⟳ Refresh").clicked() {
+                            refresh = true;
+                        }
+                        let has_changes = !review.files.is_empty();
+                        if ui
+                            .add_enabled(has_changes, egui::Button::new("✓ Keep (commit)"))
+                            .on_hover_text("git add -A && commit")
+                            .clicked()
+                        {
+                            commit = true;
+                        }
+                        if review.has_head
+                            && ui
+                                .add_enabled(has_changes, egui::Button::new("⟲ Revert all"))
+                                .on_hover_text("discard all changes since the last commit")
+                                .clicked()
+                        {
+                            revert = true;
+                        }
+                    });
+                });
+                if !self.diff_status.is_empty() {
+                    ui.label(egui::RichText::new(&self.diff_status).weak());
+                }
+                ui.separator();
+
+                if review.files.is_empty() {
+                    ui.add_space(8.0);
+                    ui.label(
+                        egui::RichText::new(
+                            "No changes since the last commit — nothing to review.",
+                        )
+                        .weak(),
+                    );
+                } else {
+                    let text_color = ui.visuals().text_color();
+                    egui::ScrollArea::both()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            for entry in &review.files {
+                                ui.label(egui::RichText::new(entry).monospace().weak());
+                            }
+                            ui.separator();
+                            for line in review.diff.lines() {
+                                let color = diff_line_color(line, text_color);
+                                ui.label(egui::RichText::new(line).monospace().color(color));
+                            }
+                        });
+                }
+            }
+        }
+
+        if init {
+            match kestrel_core::git_init(&self.project_path()) {
+                Ok(()) => self.diff_status = "Initialized a git repository.".to_string(),
+                Err(err) => self.diff_status = format!("git init failed: {err}"),
+            }
+            self.diff_review = None;
+        }
+        if commit {
+            match kestrel_core::git_commit_all(&self.project_path(), "Kestrel: snapshot changes") {
+                Ok(_) => self.diff_status = "Committed — changes kept.".to_string(),
+                Err(err) => self.diff_status = format!("Commit failed: {err}"),
+            }
+            self.diff_review = None;
+        }
+        if revert {
+            self.confirm_revert = true;
+        }
+        if refresh {
+            self.diff_status.clear();
+            self.diff_review = None;
+        }
+    }
+
+    /// Confirm before discarding the agent's changes.
+    fn revert_modal(&mut self, ctx: &egui::Context) {
+        if !self.confirm_revert {
+            return;
+        }
+        let mut open = true;
+        let mut confirm = false;
+        let mut cancel = false;
+        egui::Window::new("Revert all changes")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label("Discard every uncommitted change and remove new files?");
+                ui.colored_label(
+                    egui::Color32::from_rgb(220, 150, 80),
+                    "This resets the project to the last commit and cannot be undone.",
+                );
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Revert").clicked() {
+                        confirm = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        if cancel || !open {
+            self.confirm_revert = false;
+            return;
+        }
+        if confirm {
+            match kestrel_core::git_revert_all(&self.project_path()) {
+                Ok(msg) => self.diff_status = msg,
+                Err(err) => self.diff_status = format!("Revert failed: {err}"),
+            }
+            self.confirm_revert = false;
+            self.diff_review = None;
+            self.reload_tree();
         }
     }
 
@@ -1822,6 +1984,25 @@ fn chat_system_prompt(include: bool, project: &Path, query: &str) -> String {
         }
     }
     prompt
+}
+
+/// The colour for a unified-diff line by its leading marker.
+fn diff_line_color(line: &str, default: egui::Color32) -> egui::Color32 {
+    if line.starts_with("+++")
+        || line.starts_with("---")
+        || line.starts_with("diff ")
+        || line.starts_with("index ")
+    {
+        egui::Color32::from_rgb(150, 150, 150)
+    } else if line.starts_with("@@") {
+        egui::Color32::from_rgb(90, 170, 220)
+    } else if line.starts_with('+') {
+        egui::Color32::from_rgb(90, 190, 110)
+    } else if line.starts_with('-') {
+        egui::Color32::from_rgb(220, 100, 100)
+    } else {
+        default
+    }
 }
 
 /// The highlighting language for a file path's extension.
