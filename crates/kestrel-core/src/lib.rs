@@ -12,7 +12,10 @@ pub mod symbols;
 pub mod verify;
 pub mod workspace;
 
-pub use agent::{agent_system_prompt, apply_file_edits, parse_file_edits, AppliedEdit, FileEdit};
+pub use agent::{
+    agent_loop_system_prompt, agent_system_prompt, apply_file_edits, builtin_tools, describe_call,
+    execute_tool, parse_file_edits, run_agent, AgentEvent, AppliedEdit, FileEdit,
+};
 pub use config::{load_config, Config, ConfigLoad};
 pub use context::{
     assemble_context_prompt, build_context_pack, build_context_pack_for_query, estimate_tokens,
@@ -27,7 +30,10 @@ pub use inspect::{
     LanguageSummary, ProjectInspection, ProjectMarker, SymbolSummary,
 };
 pub use project::{create_project, push_recent, NewProject, MAX_RECENTS};
-pub use providers::{chat, ChatMessage, ChatRequest, ProviderConfig, ProviderKind};
+pub use providers::{
+    chat, run_turn, AgentMessage, ChatMessage, ChatRequest, ProviderConfig, ProviderKind, ToolCall,
+    ToolResult, ToolSpec, TurnResult,
+};
 pub use settings::{
     load_settings, model_suggestions, model_suggestions_for, provider_preset, save_settings,
     ProviderSettings, Settings, UserInfo, PROVIDER_PRESETS,

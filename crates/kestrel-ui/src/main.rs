@@ -48,6 +48,16 @@ enum JobOutcome {
     Tree { root: TreeNode, status: String },
 }
 
+/// A live update streamed from a running agent loop.
+enum AgentUpdate {
+    /// A transcript line (assistant narration or a tool call).
+    Line(String),
+    /// The agent finished with a final summary.
+    Done(String),
+    /// The agent failed.
+    Failed(String),
+}
+
 #[derive(PartialEq, Eq)]
 enum AppView {
     Main,
@@ -121,10 +131,9 @@ struct KestrelApp {
     chat_include_context: bool,
     chat_agent_mode: bool,
     chat_pending: bool,
-    /// Whether the in-flight request is a build-agent request (writes files).
-    chat_agent_pending: bool,
     chat_error: String,
     chat_job: Option<Receiver<Result<String, String>>>,
+    agent_job: Option<Receiver<AgentUpdate>>,
 }
 
 impl Default for KestrelApp {
@@ -173,9 +182,9 @@ impl Default for KestrelApp {
             chat_include_context: false,
             chat_agent_mode: false,
             chat_pending: false,
-            chat_agent_pending: false,
             chat_error: String::new(),
             chat_job: None,
+            agent_job: None,
         }
     }
 }
@@ -222,29 +231,66 @@ impl KestrelApp {
         let Some(rx) = &self.chat_job else { return };
         match rx.try_recv() {
             Ok(Ok(reply)) => {
-                let message = if self.chat_agent_pending {
-                    self.apply_agent_reply(&reply)
-                } else {
-                    reply
-                };
                 self.chat_history
-                    .push(kestrel_core::ChatMessage::assistant(message));
+                    .push(kestrel_core::ChatMessage::assistant(reply));
                 self.chat_pending = false;
-                self.chat_agent_pending = false;
                 self.chat_job = None;
             }
             Ok(Err(err)) => {
                 self.chat_error = err;
                 self.chat_pending = false;
-                self.chat_agent_pending = false;
                 self.chat_job = None;
             }
             Err(TryRecvError::Empty) => ctx.request_repaint(),
             Err(TryRecvError::Disconnected) => {
                 self.chat_error = "The chat request stopped unexpectedly.".to_string();
                 self.chat_pending = false;
-                self.chat_agent_pending = false;
                 self.chat_job = None;
+            }
+        }
+    }
+
+    /// Drain live updates from a running agent loop into the transcript.
+    fn poll_agent(&mut self, ctx: &egui::Context) {
+        if self.agent_job.is_none() {
+            return;
+        }
+        loop {
+            let message = {
+                let rx = self.agent_job.as_ref().unwrap();
+                rx.try_recv()
+            };
+            match message {
+                Ok(AgentUpdate::Line(line)) => {
+                    self.chat_history
+                        .push(kestrel_core::ChatMessage::assistant(line));
+                }
+                Ok(AgentUpdate::Done(summary)) => {
+                    if !summary.trim().is_empty() {
+                        self.chat_history
+                            .push(kestrel_core::ChatMessage::assistant(summary));
+                    }
+                    self.chat_pending = false;
+                    self.agent_job = None;
+                    self.status = "Agent finished.".to_string();
+                    self.reload_tree();
+                    break;
+                }
+                Ok(AgentUpdate::Failed(err)) => {
+                    self.chat_error = err;
+                    self.chat_pending = false;
+                    self.agent_job = None;
+                    break;
+                }
+                Err(TryRecvError::Empty) => {
+                    ctx.request_repaint();
+                    break;
+                }
+                Err(TryRecvError::Disconnected) => {
+                    self.chat_pending = false;
+                    self.agent_job = None;
+                    break;
+                }
             }
         }
     }
@@ -254,6 +300,7 @@ impl eframe::App for KestrelApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_job(ctx);
         self.poll_chat(ctx);
+        self.poll_agent(ctx);
         let busy = self.job.is_some();
         self.new_project_modal(ctx);
         self.entry_modal(ctx);
@@ -569,7 +616,11 @@ impl KestrelApp {
                         .desired_width(320.0)
                         .hint_text(hint),
                 );
-                response.request_focus();
+                // Focus the field once, when nothing else is focused (i.e. on
+                // open); requesting every frame would defeat Enter detection.
+                if ui.memory(|m| m.focused().is_none()) {
+                    response.request_focus();
+                }
                 if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                     confirm = true;
                 }
@@ -1007,8 +1058,8 @@ impl KestrelApp {
                 }
                 if self.chat_pending && ui.button("Stop").clicked() {
                     self.chat_job = None;
+                    self.agent_job = None;
                     self.chat_pending = false;
-                    self.chat_agent_pending = false;
                     self.chat_error = "Cancelled.".to_string();
                 }
             });
@@ -1082,8 +1133,11 @@ impl KestrelApp {
         self.chat_history
             .push(kestrel_core::ChatMessage::user(text.clone()));
         self.chat_pending = true;
-        let agent = self.chat_agent_mode;
-        self.chat_agent_pending = agent;
+
+        if self.chat_agent_mode {
+            self.start_agent(text, provider);
+            return;
+        }
 
         let config = provider.to_config();
         let model = provider.model.clone();
@@ -1093,16 +1147,10 @@ impl KestrelApp {
 
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let system = if agent {
-                agent_system_prompt(include, &project, &text)
-            } else {
-                chat_system_prompt(include, &project, &text)
-            };
-            // Agent replies must fit a whole project's worth of files.
-            let max_tokens = if agent { 8192 } else { 2048 };
+            let system = chat_system_prompt(include, &project, &text);
             let request = kestrel_core::ChatRequest {
                 model,
-                max_tokens,
+                max_tokens: 2048,
                 system: Some(system),
                 messages,
             };
@@ -1115,30 +1163,29 @@ impl KestrelApp {
         self.chat_job = Some(rx);
     }
 
-    /// Apply a build-agent reply: write its files under the project root, reload
-    /// the tree, and return a human summary to show in the transcript.
-    fn apply_agent_reply(&mut self, reply: &str) -> String {
+    /// Start the tool-using agent loop for `prompt` on a worker thread, relaying
+    /// its progress to the transcript via `agent_job`.
+    fn start_agent(&mut self, prompt: String, provider: kestrel_core::ProviderSettings) {
+        let config = provider.to_config();
+        let model = provider.model.clone();
         let root = self.project_path();
-        let edits = kestrel_core::parse_file_edits(reply);
-        if edits.is_empty() {
-            return "The agent produced no file blocks. Its raw reply:\n\n".to_string() + reply;
-        }
-        let applied = kestrel_core::apply_file_edits(&root, &edits);
-        let ok = applied.iter().filter(|a| a.is_ok()).count();
-        let mut summary = format!(
-            "Wrote {ok}/{} file(s) to {}:\n",
-            applied.len(),
-            root.display()
-        );
-        for entry in &applied {
-            match &entry.outcome {
-                Ok(_) => summary.push_str(&format!("  ✓ {}\n", entry.path)),
-                Err(err) => summary.push_str(&format!("  ✗ {} — {err}\n", entry.path)),
-            }
-        }
-        self.reload_tree();
-        self.status = format!("Agent wrote {ok} file(s) to {}.", root.display());
-        summary
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let events = tx.clone();
+        std::thread::spawn(move || {
+            let result = kestrel_core::run_agent(&config, &model, &prompt, &root, 24, |event| {
+                let line = match event {
+                    kestrel_core::AgentEvent::Assistant(text) => text,
+                    kestrel_core::AgentEvent::Tool(call) => format!("↪ {call}"),
+                };
+                let _ = events.send(AgentUpdate::Line(line));
+            });
+            let _ = match result {
+                Ok(summary) => tx.send(AgentUpdate::Done(summary)),
+                Err(err) => tx.send(AgentUpdate::Failed(err)),
+            };
+        });
+        self.agent_job = Some(rx);
     }
 
     /// Run a text-producing action against the current path on a worker thread.
@@ -1514,26 +1561,6 @@ fn chat_system_prompt(include: bool, project: &Path, query: &str) -> String {
                 prompt.push_str(
                     "\n\nThe following files from the user's project are the most relevant to \
                      their message. Use them as ground truth.\n\n",
-                );
-                prompt.push_str(&context);
-            }
-        }
-    }
-    prompt
-}
-
-/// The system prompt for a build-agent turn: the file-manifest protocol, plus
-/// optional project context so the agent can extend an existing codebase.
-fn agent_system_prompt(include: bool, project: &Path, query: &str) -> String {
-    let mut prompt = kestrel_core::agent_system_prompt();
-    if include {
-        if let Ok(graph) = kestrel_core::build_project_graph(project) {
-            let pack = kestrel_core::build_context_pack_for_query(&graph, query, 6000);
-            if !pack.entries.is_empty() {
-                let context = kestrel_core::assemble_context_prompt(&graph.root, &pack);
-                prompt.push_str(
-                    "\n\nThe project already contains these files. Extend or modify them as \
-                     needed, emitting the full new contents of any file you change.\n\n",
                 );
                 prompt.push_str(&context);
             }

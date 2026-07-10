@@ -209,6 +209,312 @@ fn post_json(
     Ok(output.stdout)
 }
 
+// ---------------------------------------------------------------------------
+// Tool-using agent turns.
+//
+// The plain `chat` path above sends text and gets text back. An agent also
+// needs to advertise *tools*, receive the model's requests to call them, run
+// them, and feed the results back over multiple turns. Anthropic and OpenAI
+// represent tool calls differently on the wire, so we keep a provider-agnostic
+// representation here and translate at the edges.
+// ---------------------------------------------------------------------------
+
+/// A tool the model may call, described by a JSON Schema for its input.
+#[derive(Debug, Clone)]
+pub struct ToolSpec {
+    pub name: String,
+    pub description: String,
+    pub input_schema: serde_json::Value,
+}
+
+/// A tool invocation requested by the model.
+#[derive(Debug, Clone)]
+pub struct ToolCall {
+    pub id: String,
+    pub name: String,
+    pub input: serde_json::Value,
+}
+
+/// The result of running a tool, to feed back to the model.
+#[derive(Debug, Clone)]
+pub struct ToolResult {
+    pub id: String,
+    pub name: String,
+    pub content: String,
+}
+
+/// One message in an agent conversation (richer than [`ChatMessage`]).
+#[derive(Debug, Clone)]
+pub enum AgentMessage {
+    User(String),
+    Assistant { text: String, calls: Vec<ToolCall> },
+    ToolResults(Vec<ToolResult>),
+}
+
+/// The outcome of a single model turn in an agent loop.
+#[derive(Debug, Clone)]
+pub struct TurnResult {
+    pub text: String,
+    pub calls: Vec<ToolCall>,
+    pub stop_reason: String,
+}
+
+/// Build the request body for one agent turn (tools + tool-aware messages).
+pub fn build_agent_body(
+    kind: ProviderKind,
+    model: &str,
+    max_tokens: u64,
+    system: Option<&str>,
+    messages: &[AgentMessage],
+    tools: &[ToolSpec],
+) -> serde_json::Value {
+    match kind {
+        ProviderKind::Anthropic => {
+            let msgs: Vec<serde_json::Value> = messages.iter().map(anthropic_message).collect();
+            let tool_defs: Vec<serde_json::Value> = tools
+                .iter()
+                .map(|t| {
+                    serde_json::json!({
+                        "name": t.name,
+                        "description": t.description,
+                        "input_schema": t.input_schema,
+                    })
+                })
+                .collect();
+            let mut body = serde_json::json!({
+                "model": model,
+                "max_tokens": max_tokens,
+                "messages": msgs,
+                "tools": tool_defs,
+            });
+            if let Some(system) = system {
+                body["system"] = serde_json::json!(system);
+            }
+            body
+        }
+        ProviderKind::Openai => {
+            let mut msgs = Vec::new();
+            if let Some(system) = system {
+                msgs.push(serde_json::json!({ "role": "system", "content": system }));
+            }
+            for message in messages {
+                openai_messages(message, &mut msgs);
+            }
+            let tool_defs: Vec<serde_json::Value> = tools
+                .iter()
+                .map(|t| {
+                    serde_json::json!({
+                        "type": "function",
+                        "function": {
+                            "name": t.name,
+                            "description": t.description,
+                            "parameters": t.input_schema,
+                        },
+                    })
+                })
+                .collect();
+            serde_json::json!({
+                "model": model,
+                "max_tokens": max_tokens,
+                "messages": msgs,
+                "tools": tool_defs,
+            })
+        }
+    }
+}
+
+fn anthropic_message(message: &AgentMessage) -> serde_json::Value {
+    match message {
+        AgentMessage::User(text) => serde_json::json!({ "role": "user", "content": text }),
+        AgentMessage::Assistant { text, calls } => {
+            let mut content = Vec::new();
+            if !text.is_empty() {
+                content.push(serde_json::json!({ "type": "text", "text": text }));
+            }
+            for call in calls {
+                content.push(serde_json::json!({
+                    "type": "tool_use",
+                    "id": call.id,
+                    "name": call.name,
+                    "input": call.input,
+                }));
+            }
+            serde_json::json!({ "role": "assistant", "content": content })
+        }
+        AgentMessage::ToolResults(results) => {
+            let content: Vec<serde_json::Value> = results
+                .iter()
+                .map(|r| {
+                    serde_json::json!({
+                        "type": "tool_result",
+                        "tool_use_id": r.id,
+                        "content": r.content,
+                    })
+                })
+                .collect();
+            serde_json::json!({ "role": "user", "content": content })
+        }
+    }
+}
+
+fn openai_messages(message: &AgentMessage, out: &mut Vec<serde_json::Value>) {
+    match message {
+        AgentMessage::User(text) => {
+            out.push(serde_json::json!({ "role": "user", "content": text }))
+        }
+        AgentMessage::Assistant { text, calls } => {
+            let tool_calls: Vec<serde_json::Value> = calls
+                .iter()
+                .map(|call| {
+                    serde_json::json!({
+                        "id": call.id,
+                        "type": "function",
+                        "function": {
+                            "name": call.name,
+                            "arguments": serde_json::to_string(&call.input)
+                                .unwrap_or_else(|_| "{}".to_string()),
+                        },
+                    })
+                })
+                .collect();
+            let mut msg = serde_json::json!({
+                "role": "assistant",
+                "content": if text.is_empty() { serde_json::Value::Null } else { serde_json::json!(text) },
+            });
+            if !tool_calls.is_empty() {
+                msg["tool_calls"] = serde_json::json!(tool_calls);
+            }
+            out.push(msg);
+        }
+        AgentMessage::ToolResults(results) => {
+            for r in results {
+                out.push(serde_json::json!({
+                    "role": "tool",
+                    "tool_call_id": r.id,
+                    "content": r.content,
+                }));
+            }
+        }
+    }
+}
+
+/// Parse a provider response into a [`TurnResult`] (assistant text + calls).
+pub fn parse_turn(kind: ProviderKind, response: &serde_json::Value) -> Result<TurnResult, String> {
+    if let Some(message) = response.pointer("/error/message").and_then(|m| m.as_str()) {
+        return Err(message.to_string());
+    }
+    match kind {
+        ProviderKind::Anthropic => {
+            let stop_reason = response
+                .get("stop_reason")
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .to_string();
+            let mut text = String::new();
+            let mut calls = Vec::new();
+            if let Some(blocks) = response.get("content").and_then(|c| c.as_array()) {
+                for block in blocks {
+                    match block.get("type").and_then(|t| t.as_str()) {
+                        Some("text") => {
+                            text.push_str(block.get("text").and_then(|t| t.as_str()).unwrap_or(""))
+                        }
+                        Some("tool_use") => calls.push(ToolCall {
+                            id: block
+                                .get("id")
+                                .and_then(|i| i.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            name: block
+                                .get("name")
+                                .and_then(|n| n.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            input: block.get("input").cloned().unwrap_or(serde_json::json!({})),
+                        }),
+                        _ => {}
+                    }
+                }
+            }
+            Ok(TurnResult {
+                text,
+                calls,
+                stop_reason,
+            })
+        }
+        ProviderKind::Openai => {
+            let message = response.pointer("/choices/0/message");
+            let text = message
+                .and_then(|m| m.get("content"))
+                .and_then(|c| c.as_str())
+                .unwrap_or("")
+                .to_string();
+            let stop_reason = response
+                .pointer("/choices/0/finish_reason")
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .to_string();
+            let mut calls = Vec::new();
+            if let Some(tool_calls) = message
+                .and_then(|m| m.get("tool_calls"))
+                .and_then(|t| t.as_array())
+            {
+                for call in tool_calls {
+                    let args = call
+                        .pointer("/function/arguments")
+                        .and_then(|a| a.as_str())
+                        .unwrap_or("{}");
+                    calls.push(ToolCall {
+                        id: call
+                            .get("id")
+                            .and_then(|i| i.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        name: call
+                            .pointer("/function/name")
+                            .and_then(|n| n.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        input: serde_json::from_str(args).unwrap_or(serde_json::json!({})),
+                    });
+                }
+            }
+            Ok(TurnResult {
+                text,
+                calls,
+                stop_reason,
+            })
+        }
+    }
+}
+
+/// Run one agent turn: send the tool-aware conversation and parse the reply.
+pub fn run_turn(
+    config: &ProviderConfig,
+    model: &str,
+    max_tokens: u64,
+    system: Option<&str>,
+    messages: &[AgentMessage],
+    tools: &[ToolSpec],
+) -> io::Result<Result<TurnResult, String>> {
+    if config.api_key.trim().is_empty() {
+        return Ok(Err("no API key configured for this provider".to_string()));
+    }
+    let url = endpoint(config.kind, &config.base_url);
+    let header_args = headers(config.kind, &config.api_key);
+    let body = build_agent_body(config.kind, model, max_tokens, system, messages, tools);
+    let raw = post_json(&url, &header_args, &body)?;
+    let response: serde_json::Value = match serde_json::from_slice(&raw) {
+        Ok(value) => value,
+        Err(err) => {
+            return Ok(Err(format!(
+                "unexpected response (not JSON): {err}\n{}",
+                String::from_utf8_lossy(&raw)
+            )))
+        }
+    };
+    Ok(parse_turn(config.kind, &response))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -295,5 +601,71 @@ mod tests {
             parse_response(ProviderKind::Openai, &resp).unwrap_err(),
             "bad key"
         );
+    }
+
+    #[test]
+    fn agent_body_advertises_tools_per_kind() {
+        let tools = vec![ToolSpec {
+            name: "read_file".to_string(),
+            description: "read".to_string(),
+            input_schema: serde_json::json!({"type": "object"}),
+        }];
+        let messages = vec![AgentMessage::User("hi".to_string())];
+        let anthropic = build_agent_body(
+            ProviderKind::Anthropic,
+            "m",
+            100,
+            Some("sys"),
+            &messages,
+            &tools,
+        );
+        assert_eq!(anthropic["tools"][0]["name"], "read_file");
+        assert_eq!(anthropic["system"], "sys");
+
+        let openai = build_agent_body(
+            ProviderKind::Openai,
+            "m",
+            100,
+            Some("sys"),
+            &messages,
+            &tools,
+        );
+        assert_eq!(openai["tools"][0]["type"], "function");
+        assert_eq!(openai["tools"][0]["function"]["name"], "read_file");
+        assert_eq!(openai["messages"][0]["role"], "system");
+    }
+
+    #[test]
+    fn parse_turn_reads_tool_calls_both_shapes() {
+        let anthropic = serde_json::json!({
+            "stop_reason": "tool_use",
+            "content": [
+                {"type": "text", "text": "let me look"},
+                {"type": "tool_use", "id": "t1", "name": "read_file", "input": {"path": "a.rs"}}
+            ]
+        });
+        let turn = parse_turn(ProviderKind::Anthropic, &anthropic).unwrap();
+        assert_eq!(turn.text, "let me look");
+        assert_eq!(turn.calls.len(), 1);
+        assert_eq!(turn.calls[0].name, "read_file");
+        assert_eq!(turn.calls[0].input["path"], "a.rs");
+
+        let openai = serde_json::json!({
+            "choices": [{
+                "finish_reason": "tool_calls",
+                "message": {
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "c1",
+                        "type": "function",
+                        "function": {"name": "read_file", "arguments": "{\"path\": \"a.rs\"}"}
+                    }]
+                }
+            }]
+        });
+        let turn = parse_turn(ProviderKind::Openai, &openai).unwrap();
+        assert_eq!(turn.calls.len(), 1);
+        assert_eq!(turn.calls[0].name, "read_file");
+        assert_eq!(turn.calls[0].input["path"], "a.rs");
     }
 }
