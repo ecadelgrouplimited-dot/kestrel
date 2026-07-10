@@ -93,6 +93,33 @@ cargo run -p kestrel-cli -- edit src\service.ts "add a null check" --apply --ver
 
 That is the full Era-2 loop: the human directs, the agent produces a concrete change, verification proves it, and a failing change is automatically undone.
 
+Show the **host environment** Kestrel can build and run against — OS, shells, WSL/Docker availability, and installed language toolchains with versions (each probed by actually invoking the tool):
+
+```powershell
+cargo run -p kestrel-cli -- env
+```
+
+### Configuration (`kestrel.toml`)
+
+Drop an optional `kestrel.toml` at the project root to set defaults and pin the verification ladder. Everything is optional; CLI flags always override config, and config overrides the built-in defaults.
+
+```toml
+[defaults]
+model = "claude-sonnet-5"   # default model for ask/edit
+budget = 12000              # default context token budget
+max_tokens = 8192           # default answer/edit token cap
+
+[verify]
+# Override the auto-detected ladder with exactly the checks a change must pass.
+steps = [
+  "cargo fmt --all -- --check",
+  "cargo clippy --all-targets -- -D warnings",
+  "cargo test",
+]
+```
+
+`kestrel verify` reports whether it used the detected ladder or your `kestrel.toml`, and `ask`/`edit` fall back to the config's defaults when you omit `--model`/`--budget`/`--max-tokens`.
+
 ### Incremental index cache
 
 The `graph`, `related`, and `context` commands persist their parse results to `<project-root>/.kestrel/index.json`, keyed by each file's size and modification time. On the next run only changed files are re-parsed — the first real step from a re-derived context engine toward a *living*, incrementally updated one. The cache directory is git-ignored; delete `.kestrel/` to force a full rebuild.

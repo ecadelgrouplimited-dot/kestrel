@@ -1,13 +1,17 @@
 pub mod cache;
+pub mod config;
 pub mod context;
+pub mod environment;
 pub mod graph;
 pub mod inspect;
 pub mod symbols;
 pub mod verify;
 
+pub use config::{load_config, Config, ConfigLoad};
 pub use context::{
     build_context_pack, build_context_pack_for_query, estimate_tokens, ContextEntry, ContextPack,
 };
+pub use environment::{discover_environment, EnvironmentReport, ToolInfo, WslInfo};
 pub use graph::{
     build_graph_from_files, build_project_graph, DependencyEdge, FileNode, ProjectGraph,
 };

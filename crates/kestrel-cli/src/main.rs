@@ -1,6 +1,7 @@
 use kestrel_core::{
-    build_project_graph, inspect_project, plan_verification, project_symbols, run_verification,
-    ProjectGraph, ProjectInspection, VerificationReport,
+    build_project_graph, discover_environment, inspect_project, load_config, plan_verification,
+    project_symbols, run_verification, EnvironmentReport, ProjectGraph, ProjectInspection,
+    VerificationReport, VerifyStep,
 };
 use std::env;
 use std::io;
@@ -73,6 +74,9 @@ fn main() -> io::Result<()> {
                 std::process::exit(1);
             }
         }
+        "env" => {
+            print_environment(&discover_environment());
+        }
         "--help" | "-h" | "help" => print_usage(),
         unknown => {
             eprintln!("Unknown command: {unknown}");
@@ -101,6 +105,61 @@ fn print_usage() {
     println!("  kestrel edit <file> \"<instruction>\" [--apply] [--verify] [--model NAME]");
     println!("                            Propose a reviewed diff for a file (write with --apply)");
     println!("  kestrel verify [path]     Run the project's format/test/build ladder");
+    println!("  kestrel env               Show the host environment (shells, WSL, toolchains)");
+    println!();
+    println!("Config: an optional kestrel.toml at the project root sets defaults");
+    println!("(model, budget, max_tokens) and can override the verification ladder.");
+}
+
+fn print_environment(report: &EnvironmentReport) {
+    println!("Kestrel Environment");
+    println!("  OS: {} ({})", report.os, report.arch);
+    println!();
+
+    let show = |label: &str, tools: &[kestrel_core::ToolInfo]| {
+        println!("{label}");
+        for tool in tools {
+            if tool.found {
+                let version = tool.version.as_deref().unwrap_or("(version unknown)");
+                println!("  + {:<10} {version}", tool.name);
+            } else {
+                println!("  - {:<10} not found", tool.name);
+            }
+        }
+        println!();
+    };
+
+    show("Shells", &report.shells);
+    show("Toolchains", &report.toolchains);
+
+    println!("Cross-boundary");
+    if report.wsl.available {
+        println!("  + WSL: {}", report.wsl.distros.join(", "));
+    } else {
+        println!("  - WSL: not installed");
+    }
+    if report.docker.found {
+        let version = report.docker.version.as_deref().unwrap_or("");
+        println!("  + Docker: {version}");
+    } else {
+        println!("  - Docker: not found");
+    }
+}
+
+/// Build verification steps from a list of config command strings, labeling
+/// each with its leading token.
+fn steps_from_commands(commands: &[String]) -> Vec<VerifyStep> {
+    commands
+        .iter()
+        .map(|command| VerifyStep {
+            label: command
+                .split_whitespace()
+                .next()
+                .unwrap_or("step")
+                .to_string(),
+            command: command.clone(),
+        })
+        .collect()
 }
 
 fn print_summary(inspection: &ProjectInspection) {
@@ -629,41 +688,36 @@ const DEFAULT_ASK_MAX_TOKENS: u64 = 4_096;
 struct AskOptions {
     question: String,
     path: Option<PathBuf>,
-    budget: usize,
-    model: String,
-    max_tokens: u64,
+    budget: Option<usize>,
+    model: Option<String>,
+    max_tokens: Option<u64>,
     dry_run: bool,
 }
 
 /// Parse `ask` arguments: `<question>` then an optional path, plus
-/// `--budget`/`-b`, `--model`, `--max-tokens`, and `--dry-run`.
+/// `--budget`/`-b`, `--model`, `--max-tokens`, and `--dry-run`. Unset options
+/// stay `None` so a `kestrel.toml` default can fill them.
 fn parse_ask_args(args: &[String]) -> Option<AskOptions> {
     let mut question = None;
     let mut path = None;
-    let mut budget = DEFAULT_ASK_BUDGET;
-    let mut model = DEFAULT_ASK_MODEL.to_string();
-    let mut max_tokens = DEFAULT_ASK_MAX_TOKENS;
+    let mut budget = None;
+    let mut model = None;
+    let mut max_tokens = None;
     let mut dry_run = false;
     let mut i = 0;
     while i < args.len() {
         let arg = &args[i];
         match arg.as_str() {
             "--budget" | "-b" => {
-                if let Some(v) = args.get(i + 1).and_then(|v| v.parse().ok()) {
-                    budget = v;
-                }
+                budget = args.get(i + 1).and_then(|v| v.parse().ok());
                 i += 2;
             }
             "--model" => {
-                if let Some(v) = args.get(i + 1) {
-                    model = v.clone();
-                }
+                model = args.get(i + 1).cloned();
                 i += 2;
             }
             "--max-tokens" => {
-                if let Some(v) = args.get(i + 1).and_then(|v| v.parse().ok()) {
-                    max_tokens = v;
-                }
+                max_tokens = args.get(i + 1).and_then(|v| v.parse().ok());
                 i += 2;
             }
             "--dry-run" => {
@@ -683,9 +737,9 @@ fn parse_ask_args(args: &[String]) -> Option<AskOptions> {
     Some(AskOptions {
         question: question?,
         path,
-        budget: budget.max(1),
+        budget,
         model,
-        max_tokens: max_tokens.max(1),
+        max_tokens,
         dry_run,
     })
 }
@@ -800,8 +854,25 @@ fn run_ask(opts: AskOptions) -> io::Result<()> {
         Some(p) => p.clone(),
         None => env::current_dir()?,
     };
+    let defaults = load_config(&root).config().defaults;
+    let model = opts
+        .model
+        .clone()
+        .or(defaults.model)
+        .unwrap_or_else(|| DEFAULT_ASK_MODEL.to_string());
+    let budget = opts
+        .budget
+        .or(defaults.budget)
+        .unwrap_or(DEFAULT_ASK_BUDGET)
+        .max(1);
+    let max_tokens = opts
+        .max_tokens
+        .or(defaults.max_tokens)
+        .unwrap_or(DEFAULT_ASK_MAX_TOKENS)
+        .max(1);
+
     let graph = build_project_graph(&root)?;
-    let pack = kestrel_core::build_context_pack_for_query(&graph, &opts.question, opts.budget);
+    let pack = kestrel_core::build_context_pack_for_query(&graph, &opts.question, budget);
 
     if pack.entries.is_empty() {
         eprintln!(
@@ -822,8 +893,8 @@ fn run_ask(opts: AskOptions) -> io::Result<()> {
          the provided context does not contain the answer, say so rather than guessing.";
 
     let body = serde_json::json!({
-        "model": opts.model,
-        "max_tokens": opts.max_tokens,
+        "model": model,
+        "max_tokens": max_tokens,
         "system": system,
         "messages": [{ "role": "user", "content": user_content }],
     });
@@ -831,7 +902,7 @@ fn run_ask(opts: AskOptions) -> io::Result<()> {
 
     eprintln!(
         "Kestrel ask — model {}, {} context files (~{} tokens), seed: {}",
-        opts.model,
+        model,
         pack.entries.len(),
         pack.used_tokens,
         pack.seed
@@ -924,9 +995,9 @@ fn fence_for_path(path: &Path) -> &'static str {
 struct EditOptions {
     file: PathBuf,
     instruction: String,
-    budget: usize,
-    model: String,
-    max_tokens: u64,
+    budget: Option<usize>,
+    model: Option<String>,
+    max_tokens: Option<u64>,
     apply: bool,
     dry_run: bool,
     verify: bool,
@@ -938,9 +1009,9 @@ struct EditOptions {
 fn parse_edit_args(args: &[String]) -> Option<EditOptions> {
     let mut file = None;
     let mut instruction = None;
-    let mut budget = DEFAULT_ASK_BUDGET;
-    let mut model = DEFAULT_ASK_MODEL.to_string();
-    let mut max_tokens = 8_192u64;
+    let mut budget = None;
+    let mut model = None;
+    let mut max_tokens = None;
     let mut apply = false;
     let mut dry_run = false;
     let mut verify = false;
@@ -950,21 +1021,15 @@ fn parse_edit_args(args: &[String]) -> Option<EditOptions> {
         let arg = &args[i];
         match arg.as_str() {
             "--budget" | "-b" => {
-                if let Some(v) = args.get(i + 1).and_then(|v| v.parse().ok()) {
-                    budget = v;
-                }
+                budget = args.get(i + 1).and_then(|v| v.parse().ok());
                 i += 2;
             }
             "--model" => {
-                if let Some(v) = args.get(i + 1) {
-                    model = v.clone();
-                }
+                model = args.get(i + 1).cloned();
                 i += 2;
             }
             "--max-tokens" => {
-                if let Some(v) = args.get(i + 1).and_then(|v| v.parse().ok()) {
-                    max_tokens = v;
-                }
+                max_tokens = args.get(i + 1).and_then(|v| v.parse().ok());
                 i += 2;
             }
             "--apply" => {
@@ -996,9 +1061,9 @@ fn parse_edit_args(args: &[String]) -> Option<EditOptions> {
     Some(EditOptions {
         file: file?,
         instruction: instruction?,
-        budget: budget.max(1),
+        budget,
         model,
-        max_tokens: max_tokens.max(1),
+        max_tokens,
         apply,
         dry_run,
         verify,
@@ -1023,10 +1088,27 @@ fn run_edit(opts: EditOptions) -> io::Result<()> {
         .unwrap_or_else(|| PathBuf::from("."));
     let graph = build_project_graph(&search_root)?;
 
+    let defaults = load_config(&graph.root).config().defaults;
+    let model = opts
+        .model
+        .clone()
+        .or(defaults.model)
+        .unwrap_or_else(|| DEFAULT_ASK_MODEL.to_string());
+    let budget = opts
+        .budget
+        .or(defaults.budget)
+        .unwrap_or(DEFAULT_ASK_BUDGET)
+        .max(1);
+    let max_tokens = opts
+        .max_tokens
+        .or(defaults.max_tokens)
+        .unwrap_or(8_192)
+        .max(1);
+
     // Background context: files related to the target, excluding the target.
     let mut background = String::new();
     if let Some(node) = find_node(&graph, &opts.file) {
-        if let Some(pack) = kestrel_core::build_context_pack(&graph, &node.path, opts.budget) {
+        if let Some(pack) = kestrel_core::build_context_pack(&graph, &node.path, budget) {
             for entry in &pack.entries {
                 if entry.path == node.path {
                     continue;
@@ -1069,15 +1151,15 @@ fn run_edit(opts: EditOptions) -> io::Result<()> {
          unchanged.";
 
     let body = serde_json::json!({
-        "model": opts.model,
-        "max_tokens": opts.max_tokens,
+        "model": model,
+        "max_tokens": max_tokens,
         "system": system,
         "messages": [{ "role": "user", "content": user_content }],
     });
 
     eprintln!(
         "Kestrel edit — model {}, target {} (+{} context bytes)",
-        opts.model,
+        model,
         display_path,
         background.len()
     );
@@ -1133,7 +1215,12 @@ fn verify_after_edit(
         return Ok(());
     }
     let inspection = inspect_project(root)?;
-    let steps = plan_verification(&inspection.markers);
+    let configured = load_config(root).config().verify.steps;
+    let steps = if configured.is_empty() {
+        plan_verification(&inspection.markers)
+    } else {
+        steps_from_commands(&configured)
+    };
     if steps.is_empty() {
         eprintln!("No verification commands detected for this project — skipping verification.");
         return Ok(());
@@ -1162,13 +1249,22 @@ fn verify_after_edit(
 /// Returns whether verification passed (or there was nothing to run).
 fn run_verify(path: PathBuf) -> io::Result<bool> {
     let inspection = inspect_project(&path)?;
-    let steps = plan_verification(&inspection.markers);
+    let load = load_config(&inspection.project_root);
+    if let kestrel_core::ConfigLoad::Invalid(err) = &load {
+        eprintln!("Warning: ignoring invalid kestrel.toml ({err}).");
+    }
+    let configured = load.config().verify.steps;
+    let (source, steps) = if configured.is_empty() {
+        ("detected", plan_verification(&inspection.markers))
+    } else {
+        ("kestrel.toml", steps_from_commands(&configured))
+    };
     if steps.is_empty() {
         eprintln!("No verification commands detected for this project.");
         return Ok(true);
     }
     eprintln!(
-        "Kestrel verify — {} step(s) in {}",
+        "Kestrel verify — {} step(s) ({source}) in {}",
         steps.len(),
         inspection.project_root.display()
     );
