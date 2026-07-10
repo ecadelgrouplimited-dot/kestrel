@@ -99,6 +99,14 @@ Show the **host environment** Kestrel can build and run against — OS, shells, 
 cargo run -p kestrel-cli -- env
 ```
 
+Run a command in a chosen shell from the project root, with its output streamed live and its exit code propagated:
+
+```powershell
+cargo run -p kestrel-cli -- run "cargo test" --shell powershell
+```
+
+`--shell` accepts `default` (the platform shell), `powershell`, `pwsh`, `cmd`, `bash`, or `sh`. This is Kestrel's shell-integration layer — the same execution path `verify` uses, exposed directly.
+
 ### Configuration (`kestrel.toml`)
 
 Drop an optional `kestrel.toml` at the project root to set defaults and pin the verification ladder. Everything is optional; CLI flags always override config, and config overrides the built-in defaults.

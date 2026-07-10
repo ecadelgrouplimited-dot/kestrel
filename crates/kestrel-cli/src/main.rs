@@ -77,6 +77,16 @@ fn main() -> io::Result<()> {
         "env" => {
             print_environment(&discover_environment());
         }
+        "run" => {
+            let rest: Vec<String> = args.collect();
+            let Some((command, path, shell)) = parse_run_args(&rest) else {
+                eprintln!("Usage: kestrel run \"<command>\" [path] [--shell default|powershell|pwsh|cmd|bash]");
+                std::process::exit(2);
+            };
+            let root = path.unwrap_or(env::current_dir()?);
+            eprintln!("Kestrel run [{shell}] in {}\n$ {command}", root.display());
+            std::process::exit(run_shell_command(&shell, &command, &root)?);
+        }
         "--help" | "-h" | "help" => print_usage(),
         unknown => {
             eprintln!("Unknown command: {unknown}");
@@ -106,6 +116,8 @@ fn print_usage() {
     println!("                            Propose a reviewed diff for a file (write with --apply)");
     println!("  kestrel verify [path]     Run the project's format/test/build ladder");
     println!("  kestrel env               Show the host environment (shells, WSL, toolchains)");
+    println!("  kestrel run \"<command>\" [path] [--shell ...]");
+    println!("                            Run a command in a chosen shell, streaming output");
     println!();
     println!("Config: an optional kestrel.toml at the project root sets defaults");
     println!("(model, budget, max_tokens) and can override the verification ladder.");
@@ -144,6 +156,61 @@ fn print_environment(report: &EnvironmentReport) {
     } else {
         println!("  - Docker: not found");
     }
+}
+
+/// Parse `run` arguments: `<command>` (positional), an optional path, and
+/// `--shell NAME`. Returns `(command, path, shell)`.
+fn parse_run_args(args: &[String]) -> Option<(String, Option<PathBuf>, String)> {
+    let mut command = None;
+    let mut path = None;
+    let mut shell = "default".to_string();
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        match arg.as_str() {
+            "--shell" => {
+                if let Some(v) = args.get(i + 1) {
+                    shell = v.clone();
+                }
+                i += 2;
+            }
+            _ => {
+                if command.is_none() {
+                    command = Some(arg.clone());
+                } else if path.is_none() {
+                    path = Some(PathBuf::from(arg));
+                }
+                i += 1;
+            }
+        }
+    }
+    Some((command?, path, shell))
+}
+
+/// Map a shell name to its program and the argument(s) that precede a command
+/// string (e.g. `("cmd", ["/C"])`). `default` picks the platform shell.
+fn shell_invocation(shell: &str) -> (&'static str, &'static [&'static str]) {
+    match shell {
+        "powershell" => ("powershell", &["-NoProfile", "-Command"]),
+        "pwsh" => ("pwsh", &["-NoProfile", "-Command"]),
+        "cmd" => ("cmd", &["/C"]),
+        "bash" => ("bash", &["-c"]),
+        "sh" => ("sh", &["-c"]),
+        _ if cfg!(windows) => ("cmd", &["/C"]),
+        _ => ("sh", &["-c"]),
+    }
+}
+
+/// Run a command in the chosen shell from `root`, inheriting stdio so its
+/// output streams live. Returns the command's exit code.
+fn run_shell_command(shell: &str, command: &str, root: &Path) -> io::Result<i32> {
+    let (program, prefix) = shell_invocation(shell);
+    let status = std::process::Command::new(program)
+        .args(prefix)
+        .arg(command)
+        .current_dir(root)
+        .status()?;
+    Ok(status.code().unwrap_or(1))
 }
 
 /// Build verification steps from a list of config command strings, labeling
@@ -1371,5 +1438,33 @@ mod tests {
         assert_eq!(fence_for_path(Path::new("x.tsx")), "typescript");
         assert_eq!(fence_for_path(Path::new("x.py")), "python");
         assert_eq!(fence_for_path(Path::new("x.txt")), "");
+    }
+
+    #[test]
+    fn shell_invocation_maps_known_shells() {
+        assert_eq!(shell_invocation("cmd"), ("cmd", &["/C"][..]));
+        assert_eq!(
+            shell_invocation("powershell"),
+            ("powershell", &["-NoProfile", "-Command"][..])
+        );
+        assert_eq!(shell_invocation("bash"), ("bash", &["-c"][..]));
+        // Unknown shells fall back to the platform default.
+        let (prog, _) = shell_invocation("nonsense");
+        assert!(prog == "cmd" || prog == "sh");
+    }
+
+    #[test]
+    fn parse_run_args_extracts_command_path_and_shell() {
+        let args = vec![
+            "cargo test".to_string(),
+            "src".to_string(),
+            "--shell".to_string(),
+            "powershell".to_string(),
+        ];
+        let (command, path, shell) = parse_run_args(&args).unwrap();
+        assert_eq!(command, "cargo test");
+        assert_eq!(path, Some(PathBuf::from("src")));
+        assert_eq!(shell, "powershell");
+        assert!(parse_run_args(&[]).is_none());
     }
 }
