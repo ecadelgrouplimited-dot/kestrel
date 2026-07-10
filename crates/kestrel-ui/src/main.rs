@@ -38,7 +38,14 @@ enum JobOutcome {
     },
 }
 
+#[derive(PartialEq, Eq)]
+enum AppView {
+    Main,
+    Settings,
+}
+
 struct KestrelApp {
+    view: AppView,
     path: String,
     query: String,
     output: String,
@@ -46,6 +53,13 @@ struct KestrelApp {
     files: Vec<(PathBuf, FileSymbols)>,
     selected: Option<usize>,
     job: Option<Receiver<JobOutcome>>,
+    // Settings state.
+    settings: kestrel_core::Settings,
+    user_name: String,
+    user_email: String,
+    new_provider_name: String,
+    new_provider_preset: String,
+    settings_status: String,
 }
 
 impl Default for KestrelApp {
@@ -53,7 +67,11 @@ impl Default for KestrelApp {
         let path = std::env::current_dir()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| ".".to_string());
+        let settings = kestrel_core::load_settings();
+        let user_name = settings.user.name.clone().unwrap_or_default();
+        let user_email = settings.user.email.clone().unwrap_or_default();
         Self {
+            view: AppView::Main,
             path,
             query: String::new(),
             output: "Set a project folder and press Open to load its files, or use the action \
@@ -69,6 +87,12 @@ impl Default for KestrelApp {
             files: Vec::new(),
             selected: None,
             job: None,
+            settings,
+            user_name,
+            user_email,
+            new_provider_name: String::new(),
+            new_provider_preset: "anthropic".to_string(),
+            settings_status: String::new(),
         }
     }
 }
@@ -128,42 +152,59 @@ impl eframe::App for KestrelApp {
                         .desired_width(440.0)
                         .hint_text("path to a repository"),
                 );
-            });
-            ui.add_space(4.0);
-            ui.add_enabled_ui(!busy, |ui| {
-                ui.horizontal(|ui| {
-                    if ui.button("Open").clicked() {
-                        let path = self.project_path();
-                        self.spawn(move || load_files(&path));
-                    }
-                    if ui.button("Inspect").clicked() {
-                        self.run_text(inspect);
-                    }
-                    if ui.button("Graph").clicked() {
-                        self.run_text(graph);
-                    }
-                    if ui.button("Verify").clicked() {
-                        self.run_text(verify);
-                    }
-                    if ui.button("Env").clicked() {
-                        self.spawn(environment);
-                    }
-                    ui.separator();
-                    ui.label("Query:");
-                    let enter = ui
-                        .add(
-                            egui::TextEdit::singleline(&mut self.query)
-                                .desired_width(260.0)
-                                .hint_text("e.g. dependency graph edges"),
-                        )
-                        .lost_focus()
-                        && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                    if ui.button("Context").clicked() || enter {
-                        let query = self.query.clone();
-                        self.run_text(move |path| context(path, &query));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let in_settings = self.view == AppView::Settings;
+                    let label = if in_settings {
+                        "← Back"
+                    } else {
+                        "⚙ Settings"
+                    };
+                    if ui.button(label).clicked() {
+                        self.view = if in_settings {
+                            AppView::Main
+                        } else {
+                            AppView::Settings
+                        };
                     }
                 });
             });
+            if self.view == AppView::Main {
+                ui.add_space(4.0);
+                ui.add_enabled_ui(!busy, |ui| {
+                    ui.horizontal(|ui| {
+                        if ui.button("Open").clicked() {
+                            let path = self.project_path();
+                            self.spawn(move || load_files(&path));
+                        }
+                        if ui.button("Inspect").clicked() {
+                            self.run_text(inspect);
+                        }
+                        if ui.button("Graph").clicked() {
+                            self.run_text(graph);
+                        }
+                        if ui.button("Verify").clicked() {
+                            self.run_text(verify);
+                        }
+                        if ui.button("Env").clicked() {
+                            self.spawn(environment);
+                        }
+                        ui.separator();
+                        ui.label("Query:");
+                        let enter = ui
+                            .add(
+                                egui::TextEdit::singleline(&mut self.query)
+                                    .desired_width(260.0)
+                                    .hint_text("e.g. dependency graph edges"),
+                            )
+                            .lost_focus()
+                            && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        if ui.button("Context").clicked() || enter {
+                            let query = self.query.clone();
+                            self.run_text(move |path| context(path, &query));
+                        }
+                    });
+                });
+            }
             ui.add_space(6.0);
         });
 
@@ -176,6 +217,17 @@ impl eframe::App for KestrelApp {
             });
             ui.add_space(2.0);
         });
+
+        if self.view == AppView::Settings {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        self.settings_ui(ui);
+                    });
+            });
+            return;
+        }
 
         egui::SidePanel::left("files")
             .resizable(true)
@@ -239,6 +291,231 @@ impl KestrelApp {
                 },
             }
         });
+    }
+
+    /// The Settings screen: your details, model providers, and the active one.
+    fn settings_ui(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(6.0);
+        ui.heading("Settings");
+        ui.label(
+            egui::RichText::new(
+                "Stored per-user in your config directory (never in the project), \
+                 because it holds API keys.",
+            )
+            .weak(),
+        );
+        ui.add_space(8.0);
+
+        // --- Your details -------------------------------------------------
+        ui.group(|ui| {
+            ui.strong("Your details");
+            ui.add_space(4.0);
+            egui::Grid::new("user-grid")
+                .num_columns(2)
+                .spacing([12.0, 6.0])
+                .show(ui, |ui| {
+                    ui.label("Name");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.user_name)
+                            .desired_width(320.0)
+                            .hint_text("your name"),
+                    );
+                    ui.end_row();
+                    ui.label("Email");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.user_email)
+                            .desired_width(320.0)
+                            .hint_text("you@example.com"),
+                    );
+                    ui.end_row();
+                });
+        });
+        ui.add_space(10.0);
+
+        // --- Add a provider ----------------------------------------------
+        ui.group(|ui| {
+            ui.strong("Add a provider");
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                egui::ComboBox::from_id_source("new-provider-preset")
+                    .selected_text(&self.new_provider_preset)
+                    .show_ui(ui, |ui| {
+                        for preset in kestrel_core::PROVIDER_PRESETS {
+                            ui.selectable_value(
+                                &mut self.new_provider_preset,
+                                preset.to_string(),
+                                preset,
+                            );
+                        }
+                    });
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.new_provider_name)
+                        .desired_width(200.0)
+                        .hint_text("name (defaults to preset)"),
+                );
+                if ui.button("Add").clicked() {
+                    if let Some(preset) = kestrel_core::provider_preset(&self.new_provider_preset) {
+                        let name = if self.new_provider_name.trim().is_empty() {
+                            self.new_provider_preset.clone()
+                        } else {
+                            self.new_provider_name.trim().to_string()
+                        };
+                        let first = self.settings.providers.is_empty();
+                        self.settings.providers.insert(name.clone(), preset);
+                        if first {
+                            self.settings.active_provider = Some(name);
+                        }
+                        self.new_provider_name.clear();
+                    }
+                }
+            });
+        });
+        ui.add_space(10.0);
+
+        // --- Configured providers ----------------------------------------
+        ui.strong("Providers");
+        ui.add_space(4.0);
+        if self.settings.providers.is_empty() {
+            ui.label(egui::RichText::new("No providers yet — add one above.").weak());
+        }
+        let names: Vec<String> = self.settings.providers.keys().cloned().collect();
+        let active = self.settings.active_provider.clone();
+        let mut make_active: Option<String> = None;
+        let mut remove: Option<String> = None;
+        for name in &names {
+            let is_active = active.as_deref() == Some(name.as_str());
+            let Some(provider) = self.settings.providers.get_mut(name) else {
+                continue;
+            };
+            ui.group(|ui| {
+                ui.horizontal(|ui| {
+                    if is_active {
+                        ui.label(egui::RichText::new("● active").strong());
+                    } else if ui.button("Set active").clicked() {
+                        make_active = Some(name.clone());
+                    }
+                    ui.strong(name);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Remove").clicked() {
+                            remove = Some(name.clone());
+                        }
+                    });
+                });
+                ui.add_space(4.0);
+                let suggestions = kestrel_core::model_suggestions_for(provider);
+                egui::Grid::new(format!("provider-grid-{name}"))
+                    .num_columns(2)
+                    .spacing([12.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label("API kind");
+                        egui::ComboBox::from_id_source(format!("kind-{name}"))
+                            .selected_text(kind_label(provider.kind))
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut provider.kind,
+                                    kestrel_core::ProviderKind::Anthropic,
+                                    "Anthropic",
+                                );
+                                ui.selectable_value(
+                                    &mut provider.kind,
+                                    kestrel_core::ProviderKind::Openai,
+                                    "OpenAI-compatible",
+                                );
+                            });
+                        ui.end_row();
+
+                        ui.label("Base URL");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut provider.base_url).desired_width(360.0),
+                        );
+                        ui.end_row();
+
+                        ui.label("API key");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut provider.api_key)
+                                .password(true)
+                                .desired_width(360.0)
+                                .hint_text("stored locally only"),
+                        );
+                        ui.end_row();
+
+                        ui.label("Model");
+                        ui.horizontal(|ui| {
+                            egui::ComboBox::from_id_source(format!("model-{name}"))
+                                .selected_text(if provider.model.is_empty() {
+                                    "choose…".to_string()
+                                } else {
+                                    provider.model.clone()
+                                })
+                                .show_ui(ui, |ui| {
+                                    for model in suggestions {
+                                        ui.selectable_value(
+                                            &mut provider.model,
+                                            model.to_string(),
+                                            *model,
+                                        );
+                                    }
+                                });
+                            ui.add(
+                                egui::TextEdit::singleline(&mut provider.model)
+                                    .desired_width(220.0)
+                                    .hint_text("or type any model ID"),
+                            );
+                        });
+                        ui.end_row();
+                    });
+            });
+            ui.add_space(6.0);
+        }
+        if let Some(name) = make_active {
+            self.settings.active_provider = Some(name);
+        }
+        if let Some(name) = remove {
+            self.settings.providers.remove(&name);
+            if self.settings.active_provider.as_deref() == Some(name.as_str()) {
+                self.settings.active_provider = self.settings.providers.keys().next().cloned();
+            }
+        }
+
+        ui.add_space(6.0);
+        ui.separator();
+        ui.horizontal(|ui| {
+            if ui.button("💾 Save").clicked() {
+                self.settings.user.name = non_empty(&self.user_name);
+                self.settings.user.email = non_empty(&self.user_email);
+                match kestrel_core::save_settings(&self.settings) {
+                    Ok(()) => {
+                        self.settings_status = format!(
+                            "Saved to {}.",
+                            kestrel_core::settings::settings_path().display()
+                        );
+                    }
+                    Err(err) => self.settings_status = format!("Save failed: {err}"),
+                }
+            }
+            if !self.settings_status.is_empty() {
+                ui.label(&self.settings_status);
+            }
+        });
+        ui.add_space(8.0);
+    }
+}
+
+/// A display label for a provider's API kind.
+fn kind_label(kind: kestrel_core::ProviderKind) -> &'static str {
+    match kind {
+        kestrel_core::ProviderKind::Anthropic => "Anthropic",
+        kestrel_core::ProviderKind::Openai => "OpenAI-compatible",
+    }
+}
+
+/// `Some(trimmed)` if the string has non-whitespace content, else `None`.
+fn non_empty(s: &str) -> Option<String> {
+    let t = s.trim();
+    if t.is_empty() {
+        None
+    } else {
+        Some(t.to_string())
     }
 }
 

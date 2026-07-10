@@ -23,9 +23,14 @@ cargo run -p kestrel-ui
 
 - **File-tree navigator** — press Open to load the project's source files; click a file to see its symbols.
 - **Action bar** — Inspect, Graph, a Context query box, plus **Verify** (runs the project's verification ladder) and **Env** (host shells/toolchains/WSL/Docker).
+- **Settings** (⚙, top-right) — your name/email and one or more **model providers**. Pick a preset (Anthropic, OpenAI, DeepSeek, or Kimi) to prefill its API kind, base URL, and a current default model, then paste your API key and choose which provider is active. Settings are written to your per-user config directory (`%APPDATA%\kestrel\settings.toml` on Windows), **never** into the project — because they hold secrets.
 - **Never freezes** — slow work (verification, indexing) runs on a background thread; the window stays responsive.
 
 It calls `kestrel-core` directly (no subprocess, no web view). Model-backed actions (`ask`/`edit`) currently live in the CLI.
+
+#### Choosing a model
+
+Each provider ships a short list of **suggested** models (latest/best first) that you can pick from a dropdown — but the model field is free text, so you can also type any model ID the provider currently supports. The suggestions are only a convenience; they intentionally don't lock you to one model. Provider APIs move fast (e.g. DeepSeek's v4 line, OpenAI's GPT-5 line), so if a newer model isn't in the list yet, just type its ID.
 
 ## Commands
 

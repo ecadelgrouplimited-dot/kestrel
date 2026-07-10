@@ -23,8 +23,8 @@ pub use inspect::{
 };
 pub use providers::{chat, ChatMessage, ChatRequest, ProviderConfig, ProviderKind};
 pub use settings::{
-    load_settings, provider_preset, save_settings, ProviderSettings, Settings, UserInfo,
-    PROVIDER_PRESETS,
+    load_settings, model_suggestions, model_suggestions_for, provider_preset, save_settings,
+    ProviderSettings, Settings, UserInfo, PROVIDER_PRESETS,
 };
 pub use symbols::{
     extractor_for_language, extractor_for_path, symbols_for_file, FileSymbols, Import, Symbol,

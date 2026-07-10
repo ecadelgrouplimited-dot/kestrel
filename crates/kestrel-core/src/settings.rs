@@ -61,33 +61,69 @@ impl Settings {
 }
 
 /// A starter provider configuration for one of the built-in presets:
-/// `"anthropic"`, `"openai"`, `"deepseek"`, or `"kimi"`.
+/// `"anthropic"`, `"openai"`, `"deepseek"`, or `"kimi"`. The default model is
+/// the first (latest) suggestion for that provider.
 pub fn provider_preset(name: &str) -> Option<ProviderSettings> {
-    let (kind, base_url, model) = match name {
-        "anthropic" => (
-            ProviderKind::Anthropic,
-            "https://api.anthropic.com",
-            "claude-opus-4-8",
-        ),
-        "openai" => (ProviderKind::Openai, "https://api.openai.com/v1", "gpt-4o"),
-        "deepseek" => (
-            ProviderKind::Openai,
-            "https://api.deepseek.com/v1",
-            "deepseek-chat",
-        ),
-        "kimi" => (
-            ProviderKind::Openai,
-            "https://api.moonshot.ai/v1",
-            "kimi-k2",
-        ),
+    let (kind, base_url) = match name {
+        "anthropic" => (ProviderKind::Anthropic, "https://api.anthropic.com"),
+        "openai" => (ProviderKind::Openai, "https://api.openai.com/v1"),
+        "deepseek" => (ProviderKind::Openai, "https://api.deepseek.com/v1"),
+        "kimi" => (ProviderKind::Openai, "https://api.moonshot.ai/v1"),
         _ => return None,
     };
+    let model = model_suggestions(name)
+        .first()
+        .copied()
+        .unwrap_or("")
+        .to_string();
     Some(ProviderSettings {
         kind,
         base_url: base_url.to_string(),
         api_key: String::new(),
-        model: model.to_string(),
+        model,
     })
+}
+
+/// Suggested model IDs for a preset name, latest/best first. These are only
+/// suggestions — the model field is free text, so a user can enter any ID the
+/// provider currently supports.
+pub fn model_suggestions(name: &str) -> &'static [&'static str] {
+    match name {
+        "anthropic" => &[
+            "claude-opus-4-8",
+            "claude-sonnet-5",
+            "claude-fable-5",
+            "claude-haiku-4-5",
+        ],
+        "openai" => &["gpt-5", "gpt-5-mini", "gpt-4.1", "gpt-4o", "o3"],
+        "deepseek" => &[
+            "deepseek-v4-pro",
+            "deepseek-v4-preview",
+            "deepseek-reasoner",
+        ],
+        "kimi" => &["kimi-k2", "kimi-k2-turbo", "moonshot-v1-128k"],
+        _ => &[],
+    }
+}
+
+/// Suggested model IDs for an already-configured provider, inferred from its
+/// base URL (falling back to its API kind).
+pub fn model_suggestions_for(provider: &ProviderSettings) -> &'static [&'static str] {
+    let base = provider.base_url.to_lowercase();
+    if base.contains("anthropic") {
+        model_suggestions("anthropic")
+    } else if base.contains("deepseek") {
+        model_suggestions("deepseek")
+    } else if base.contains("moonshot") {
+        model_suggestions("kimi")
+    } else if base.contains("openai") {
+        model_suggestions("openai")
+    } else {
+        match provider.kind {
+            ProviderKind::Anthropic => model_suggestions("anthropic"),
+            ProviderKind::Openai => model_suggestions("openai"),
+        }
+    }
 }
 
 /// The known preset names, for a settings UI dropdown.
@@ -160,6 +196,20 @@ mod tests {
             provider_preset("anthropic").unwrap().kind,
             ProviderKind::Anthropic
         );
+        // Preset default model is the latest suggestion, not "deepseek-chat".
+        assert_eq!(
+            provider_preset("deepseek").unwrap().model,
+            "deepseek-v4-pro"
+        );
+        assert_eq!(provider_preset("openai").unwrap().model, "gpt-5");
+    }
+
+    #[test]
+    fn model_suggestions_infer_from_base_url() {
+        let ds = provider_preset("deepseek").unwrap();
+        assert_eq!(model_suggestions_for(&ds), model_suggestions("deepseek"));
+        let oa = provider_preset("openai").unwrap();
+        assert_eq!(model_suggestions_for(&oa), model_suggestions("openai"));
     }
 
     #[test]
@@ -186,7 +236,7 @@ mod tests {
         let active = loaded.active().unwrap();
         assert_eq!(active.kind, ProviderKind::Openai);
         assert_eq!(active.api_key, "sk-secret");
-        assert_eq!(active.model, "deepseek-chat");
+        assert_eq!(active.model, "deepseek-v4-pro");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
