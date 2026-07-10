@@ -67,6 +67,9 @@ impl DependencyEdge {
 /// The whole-project graph: every contributing file and the inferred edges.
 #[derive(Debug, Clone)]
 pub struct ProjectGraph {
+    /// Absolute project root the file paths are relative to (empty for graphs
+    /// built directly from in-memory nodes, e.g. in tests).
+    pub root: PathBuf,
     pub files: Vec<FileNode>,
     pub edges: Vec<DependencyEdge>,
 }
@@ -168,9 +171,9 @@ pub fn build_graph_from_files(files: Vec<FileNode>) -> ProjectGraph {
 
     // Import evidence: a specifier resolves to a concrete project file.
     for (i, file) in files.iter().enumerate() {
-        let from_dir = parent_dir(&norm_path(&file.path)).to_string();
+        let from_file = norm_path(&file.path);
         for import in &file.imports {
-            for j in resolve_import(&file.language, import, &from_dir, &path_index) {
+            for j in resolve_import(&file.language, import, &from_file, &path_index) {
                 if j != i {
                     edges
                         .entry((i, j))
@@ -198,7 +201,11 @@ pub fn build_graph_from_files(files: Vec<FileNode>) -> ProjectGraph {
             .then_with(|| a.to.cmp(&b.to))
     });
 
-    ProjectGraph { files, edges }
+    ProjectGraph {
+        root: PathBuf::new(),
+        files,
+        edges,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -246,19 +253,124 @@ const TS_EXTENSIONS: &[&str] = &["ts", "tsx", "d.ts", "js", "jsx", "mjs", "cjs"]
 
 /// Dispatch import resolution by language, returning the file indices the
 /// import points at (empty for external packages or unresolved specifiers).
+/// `from_file` is the importing file's normalized relative path.
 fn resolve_import(
     language: &str,
     import: &Import,
-    from_dir: &str,
+    from_file: &str,
     index: &BTreeMap<String, usize>,
 ) -> Vec<usize> {
+    let from_dir = parent_dir(from_file);
     match language {
         "TypeScript/JavaScript" => resolve_ts(&import.module, from_dir, index)
             .into_iter()
             .collect(),
         "Python" => resolve_python(&import.module, &import.names, from_dir, index),
+        "Rust" => resolve_rust(&import.module, from_file, index)
+            .into_iter()
+            .collect(),
         _ => Vec::new(),
     }
+}
+
+/// Join a directory and file name, avoiding a leading slash at the root.
+fn join_dir(dir: &str, file: &str) -> String {
+    if dir.is_empty() {
+        file.to_string()
+    } else {
+        format!("{dir}/{file}")
+    }
+}
+
+/// Resolve a Rust `use` path beginning with `crate`/`self`/`super` to a file in
+/// the same crate, using conventional module-to-file layout (`name.rs` or
+/// `name/mod.rs`). External crates and `std` return `None` — reference edges
+/// already cover cross-crate usage. `module` is the path with the item removed.
+fn resolve_rust(module: &str, from_file: &str, index: &BTreeMap<String, usize>) -> Option<usize> {
+    let segments: Vec<&str> = module.split("::").filter(|s| !s.is_empty()).collect();
+    let first = *segments.first()?;
+    let src_root = crate_src_root(from_file, index)?;
+
+    let parts: Vec<String> = match first {
+        "crate" => segments[1..].iter().map(|s| s.to_string()).collect(),
+        "self" => {
+            let mut parts = current_module_segments(&src_root, from_file);
+            parts.extend(segments[1..].iter().map(|s| s.to_string()));
+            parts
+        }
+        "super" => {
+            let supers = segments.iter().take_while(|s| **s == "super").count();
+            let mut parts = current_module_segments(&src_root, from_file);
+            if supers > parts.len() {
+                return None;
+            }
+            parts.truncate(parts.len() - supers);
+            parts.extend(segments[supers..].iter().map(|s| s.to_string()));
+            parts
+        }
+        // External crate (including another workspace crate) or `std`.
+        _ => return None,
+    };
+
+    rust_module_file(&src_root, &parts, index)
+}
+
+/// Find the crate's `src` root for `from_file`: the nearest ancestor directory
+/// that directly contains `lib.rs` or `main.rs`.
+fn crate_src_root(from_file: &str, index: &BTreeMap<String, usize>) -> Option<String> {
+    let mut dir = parent_dir(from_file).to_string();
+    loop {
+        if index.contains_key(&join_dir(&dir, "lib.rs"))
+            || index.contains_key(&join_dir(&dir, "main.rs"))
+        {
+            return Some(dir);
+        }
+        if dir.is_empty() {
+            return None;
+        }
+        dir = parent_dir(&dir).to_string();
+    }
+}
+
+/// The module path of `from_file` relative to its crate `src` root, e.g.
+/// `src/a/b.rs` -> `[a, b]`, and `src/a/mod.rs` -> `[a]`.
+fn current_module_segments(src_root: &str, from_file: &str) -> Vec<String> {
+    let rel = from_file
+        .strip_prefix(src_root)
+        .map(|s| s.trim_start_matches('/'))
+        .unwrap_or(from_file);
+    let mut comps: Vec<&str> = rel.split('/').filter(|s| !s.is_empty()).collect();
+    let file = comps.pop().unwrap_or("");
+    let mut segments: Vec<String> = comps.iter().map(|s| s.to_string()).collect();
+    let stem = file.strip_suffix(".rs").unwrap_or(file);
+    if !matches!(stem, "mod" | "lib" | "main") {
+        segments.push(stem.to_string());
+    }
+    segments
+}
+
+/// Resolve a module path (relative to `src_root`) to a file index, trying both
+/// `parts.rs` and `parts/mod.rs`; empty parts resolve to the crate root file.
+fn rust_module_file(
+    src_root: &str,
+    parts: &[String],
+    index: &BTreeMap<String, usize>,
+) -> Option<usize> {
+    if parts.is_empty() {
+        for root in ["lib.rs", "main.rs"] {
+            if let Some(&i) = index.get(&join_dir(src_root, root)) {
+                return Some(i);
+            }
+        }
+        return None;
+    }
+    let base = join_dir(src_root, &parts.join("/"));
+    for candidate in [format!("{base}.rs"), format!("{base}/mod.rs")] {
+        if let Some(&i) = index.get(&candidate) {
+            return Some(i);
+        }
+    }
+    None
 }
 
 /// Resolve a relative ES-module specifier to a project file, trying the usual
@@ -343,45 +455,73 @@ fn py_candidates(parts: &[String], index: &BTreeMap<String, usize>, out: &mut Ve
 }
 
 /// Walk a project, extract per-file structure, and build its dependency graph.
+///
+/// Extraction is incremental: files whose size and modification time match the
+/// persisted `.kestrel/index.json` cache are served from it, and only changed
+/// or new files are re-parsed. The refreshed cache is written back afterwards.
 pub fn build_project_graph(path: impl AsRef<Path>) -> io::Result<ProjectGraph> {
     let (project_root, files) = crate::inspect::walk_project(path)?;
 
+    let old_cache = crate::cache::IndexCache::load(&project_root);
+    let mut new_cache = crate::cache::IndexCache::default();
     let mut nodes = Vec::new();
+
     for file_path in files {
-        if std::fs::metadata(&file_path)?.len() > crate::inspect::SYMBOL_FILE_SIZE_CAP {
-            continue;
-        }
         let Some(extractor) = crate::symbols::extractor_for_path(&file_path) else {
             continue;
         };
-        let Ok(source) = std::fs::read_to_string(&file_path) else {
-            continue;
-        };
-
-        let symbols = extractor.extract(&source);
-        let imports = extractor.imports(&source);
-        if symbols.is_empty() && imports.is_empty() {
+        let meta = std::fs::metadata(&file_path)?;
+        if meta.len() > crate::inspect::SYMBOL_FILE_SIZE_CAP {
             continue;
         }
-        let references = extractor.referenced_identifiers(&source);
-        let source_bytes = source.chars().count();
+        let (size, mtime_ns) = crate::cache::file_signature(&meta);
         let relative = file_path
             .strip_prefix(&project_root)
             .unwrap_or(&file_path)
             .to_path_buf();
+        let key = norm_path(&relative);
 
+        // Reuse the cached extraction when the file is unchanged.
+        let cached = if let Some(hit) = old_cache.get_fresh(&key, size, mtime_ns) {
+            hit.clone()
+        } else {
+            let Ok(source) = std::fs::read_to_string(&file_path) else {
+                continue;
+            };
+            crate::cache::CachedFile {
+                size,
+                mtime_ns,
+                language: extractor.language().to_string(),
+                symbols: extractor.extract(&source),
+                imports: extractor.imports(&source),
+                references: extractor.referenced_identifiers(&source),
+                source_bytes: source.chars().count(),
+            }
+        };
+
+        // Cache every parsed file (even empty ones) so the next run can skip
+        // re-reading them, but only files with structure become graph nodes.
+        new_cache.insert(key, cached.clone());
+        if cached.symbols.is_empty() && cached.imports.is_empty() {
+            continue;
+        }
         nodes.push(FileNode {
             path: relative,
-            language: extractor.language().to_string(),
-            symbols,
-            imports,
-            references,
-            source_bytes,
+            language: cached.language,
+            symbols: cached.symbols,
+            imports: cached.imports,
+            references: cached.references,
+            source_bytes: cached.source_bytes,
         });
     }
 
+    // Best-effort persist; a read-only tree simply runs without a cache.
+    let _ = new_cache.save(&project_root);
+
     nodes.sort_by(|a, b| a.path.cmp(&b.path));
-    Ok(build_graph_from_files(nodes))
+    let mut graph = build_graph_from_files(nodes);
+    graph.root = project_root;
+    Ok(graph)
 }
 
 #[cfg(test)]
@@ -575,6 +715,90 @@ mod tests {
         let deps = graph.dependencies_of(Path::new("pkg/__init__.py"));
         assert_eq!(deps.len(), 1);
         assert_eq!(deps[0].to, PathBuf::from("pkg/sub.py"));
+    }
+
+    #[test]
+    fn rust_crate_import_resolves_via_module_tree() {
+        let rs = "Rust";
+        let files = vec![
+            lang_node(
+                "crates/x/src/lib.rs",
+                rs,
+                vec![sym("r", SymbolKind::Module)],
+                vec![],
+            ),
+            lang_node(
+                "crates/x/src/symbols.rs",
+                rs,
+                vec![sym("Foo", SymbolKind::Struct)],
+                vec![],
+            ),
+            lang_node(
+                "crates/x/src/graph.rs",
+                rs,
+                vec![sym("bar", SymbolKind::Function)],
+                vec![imp("crate::symbols", &["Foo"])],
+            ),
+        ];
+        let graph = build_graph_from_files(files);
+        let deps = graph.dependencies_of(Path::new("crates/x/src/graph.rs"));
+        let edge = deps
+            .iter()
+            .find(|e| e.to == Path::new("crates/x/src/symbols.rs"))
+            .expect("edge to symbols.rs");
+        assert!(edge.is_import_backed());
+        assert!(edge.imports.contains(&"crate::symbols".to_string()));
+    }
+
+    #[test]
+    fn rust_super_import_resolves_relative_to_module() {
+        let rs = "Rust";
+        let files = vec![
+            lang_node(
+                "crates/x/src/lib.rs",
+                rs,
+                vec![sym("r", SymbolKind::Module)],
+                vec![],
+            ),
+            lang_node(
+                "crates/x/src/a/c.rs",
+                rs,
+                vec![sym("Ctype", SymbolKind::Struct)],
+                vec![],
+            ),
+            lang_node(
+                "crates/x/src/a/b.rs",
+                rs,
+                vec![sym("bfn", SymbolKind::Function)],
+                vec![imp("super::c", &["Ctype"])],
+            ),
+        ];
+        let graph = build_graph_from_files(files);
+        let deps = graph.dependencies_of(Path::new("crates/x/src/a/b.rs"));
+        assert!(deps
+            .iter()
+            .any(|e| e.to == Path::new("crates/x/src/a/c.rs") && e.is_import_backed()));
+    }
+
+    #[test]
+    fn rust_external_crate_import_does_not_resolve() {
+        let rs = "Rust";
+        let files = vec![
+            lang_node(
+                "crates/x/src/lib.rs",
+                rs,
+                vec![sym("r", SymbolKind::Module)],
+                vec![],
+            ),
+            lang_node(
+                "crates/x/src/thing.rs",
+                rs,
+                vec![sym("bar", SymbolKind::Function)],
+                vec![imp("std::collections", &["BTreeMap"])],
+            ),
+        ];
+        let graph = build_graph_from_files(files);
+        assert!(graph.edges.is_empty());
     }
 
     #[test]

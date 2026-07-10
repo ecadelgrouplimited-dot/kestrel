@@ -44,9 +44,17 @@ Build a **context pack**: a ranked, token-budget-bounded selection of the files 
 cargo run -p kestrel-cli -- context E:\Projects\some-repo\src\service.ts --budget 8000
 ```
 
-Relevance spreads outward from the seed across dependency edges (both directions) with per-hop decay; the budget is filled greedily by relevance, and files that don't fit are listed as omitted so the selection stays transparent.
+Relevance spreads outward from the seed across dependency edges (both directions) with per-hop decay; the budget is filled greedily by relevance, and files that don't fit are listed as omitted so the selection stays transparent. Add `--format prompt` to emit the pack as assembled, ready-to-paste prompt text (each included file's full source in a fenced block):
 
-Extraction runs behind a swappable `SymbolExtractor` trait, with dependency-free heuristic extractors for Rust, TypeScript/JavaScript, and Python that resolve symbols, imports, and cross-file references. The scanners are string- and comment-aware (block comments, raw strings, multi-line strings, BOMs, Rust lifetimes vs char literals). Dependency edges fuse two kinds of evidence: shared symbol references, and import specifiers resolved to concrete files (TS/JS relative imports with extension and `index.*` conventions; Python relative and absolute-from-root module resolution). The trait boundary is deliberate: a full tree-sitter backend can replace any extractor later without changing a single caller. Together the symbol index and the `ProjectGraph`/`DependencyEdge` structures are the Phase 0 substrate of the Living System Model described in [docs/vision-horizon.md](docs/vision-horizon.md).
+```powershell
+cargo run -p kestrel-cli -- context E:\Projects\some-repo\src\service.ts --format prompt
+```
+
+Extraction runs behind a swappable `SymbolExtractor` trait, with dependency-free heuristic extractors for Rust, TypeScript/JavaScript, and Python that resolve symbols, imports, and cross-file references. The scanners are string- and comment-aware (block comments, raw strings, multi-line strings, BOMs, Rust lifetimes vs char literals). Dependency edges fuse two kinds of evidence: shared symbol references, and import specifiers resolved to concrete files (Rust `crate::`/`self::`/`super::` module-tree resolution; TS/JS relative imports with extension and `index.*` conventions; Python relative and absolute-from-root module resolution). The trait boundary is deliberate: a full tree-sitter backend can replace any extractor later without changing a single caller. Together the symbol index and the `ProjectGraph`/`DependencyEdge` structures are the Phase 0 substrate of the Living System Model described in [docs/vision-horizon.md](docs/vision-horizon.md).
+
+### Incremental index cache
+
+The `graph`, `related`, and `context` commands persist their parse results to `<project-root>/.kestrel/index.json`, keyed by each file's size and modification time. On the next run only changed files are re-parsed — the first real step from a re-derived context engine toward a *living*, incrementally updated one. The cache directory is git-ignored; delete `.kestrel/` to force a full rebuild.
 
 ## Building, testing, and running it yourself
 

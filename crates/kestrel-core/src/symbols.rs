@@ -12,12 +12,13 @@
 //! architecture, the MVP component must be the literal substrate of its
 //! horizon successor (the Living System Model), not throwaway scaffolding.
 
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::Path;
 
 /// The category of a declaration. This is an intentionally small, mostly
 /// cross-language set; language-specific concepts map onto the nearest kind.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SymbolKind {
     Function,
     Method,
@@ -55,7 +56,7 @@ impl SymbolKind {
 }
 
 /// A single declaration discovered in a source file.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Symbol {
     pub name: String,
     pub kind: SymbolKind,
@@ -72,7 +73,7 @@ pub struct Symbol {
 
 /// A dependency brought into a file: `use`/`import`/`from … import` and
 /// friends. This is the raw edge material for the project dependency graph.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Import {
     /// The module path or specifier as written, e.g. `std::collections`,
     /// `./service`, or `os.path`.

@@ -44,12 +44,12 @@ fn main() -> io::Result<()> {
         }
         "context" => {
             let rest: Vec<String> = args.collect();
-            let (target, budget) = parse_context_args(&rest);
+            let (target, budget, format) = parse_context_args(&rest);
             let Some(target) = target else {
-                eprintln!("Usage: kestrel context <file> [--budget N]");
+                eprintln!("Usage: kestrel context <file> [--budget N] [--format summary|prompt]");
                 std::process::exit(2);
             };
-            print_context(target, budget)?;
+            print_context(target, budget, format)?;
         }
         "--help" | "-h" | "help" => print_usage(),
         unknown => {
@@ -70,7 +70,7 @@ fn print_usage() {
     println!("  kestrel symbols [path]    List structural symbols per file");
     println!("  kestrel graph [path]      Show the file dependency graph");
     println!("  kestrel related <file>    Show a file's dependencies and dependents");
-    println!("  kestrel context <file> [--budget N]");
+    println!("  kestrel context <file> [--budget N] [--format summary|prompt]");
     println!("                            Build a ranked, budget-bounded context pack");
 }
 
@@ -344,11 +344,22 @@ fn print_related(target: PathBuf) -> io::Result<()> {
 /// Default token budget for a context pack when none is supplied.
 const DEFAULT_CONTEXT_BUDGET: usize = 8_000;
 
-/// Parse `context` arguments: the target file plus an optional
-/// `--budget N` / `--budget=N` / `-b N`.
-fn parse_context_args(args: &[String]) -> (Option<PathBuf>, usize) {
+/// How a context pack is rendered.
+#[derive(Clone, Copy, PartialEq)]
+enum ContextFormat {
+    /// Human-readable ranked summary (default).
+    Summary,
+    /// Assembled prompt text with file contents, ready to feed a model.
+    Prompt,
+}
+
+/// Parse `context` arguments: the target file, an optional
+/// `--budget N` / `--budget=N` / `-b N`, and `--format summary|prompt`
+/// (`--prompt` as a shorthand).
+fn parse_context_args(args: &[String]) -> (Option<PathBuf>, usize, ContextFormat) {
     let mut target = None;
     let mut budget = DEFAULT_CONTEXT_BUDGET;
+    let mut format = ContextFormat::Summary;
     let mut i = 0;
     while i < args.len() {
         let arg = &args[i];
@@ -366,15 +377,43 @@ fn parse_context_args(args: &[String]) -> (Option<PathBuf>, usize) {
             i += 1;
             continue;
         }
+        if arg == "--prompt" {
+            format = ContextFormat::Prompt;
+            i += 1;
+            continue;
+        }
+        if arg == "--format" || arg == "--format=summary" || arg == "--format=prompt" {
+            let value = arg
+                .strip_prefix("--format=")
+                .map(str::to_string)
+                .or_else(|| args.get(i + 1).cloned());
+            if value.as_deref() == Some("prompt") {
+                format = ContextFormat::Prompt;
+            } else {
+                format = ContextFormat::Summary;
+            }
+            i += if arg == "--format" { 2 } else { 1 };
+            continue;
+        }
         if target.is_none() {
             target = Some(PathBuf::from(arg));
         }
         i += 1;
     }
-    (target, budget.max(1))
+    (target, budget.max(1), format)
 }
 
-fn print_context(target: PathBuf, budget: usize) -> io::Result<()> {
+/// Map a language label to a Markdown code-fence language tag.
+fn fence_tag(language: &str) -> &str {
+    match language {
+        "Rust" => "rust",
+        "TypeScript/JavaScript" => "typescript",
+        "Python" => "python",
+        _ => "",
+    }
+}
+
+fn print_context(target: PathBuf, budget: usize, format: ContextFormat) -> io::Result<()> {
     let search_root = if target.is_dir() {
         target.clone()
     } else {
@@ -399,6 +438,10 @@ fn print_context(target: PathBuf, budget: usize) -> io::Result<()> {
         println!("Could not build a context pack for {}.", seed.display());
         return Ok(());
     };
+
+    if format == ContextFormat::Prompt {
+        return print_context_prompt(&graph, &pack);
+    }
 
     println!("Kestrel Context Pack — seed: {}", pack.seed.display());
     println!(
@@ -439,6 +482,56 @@ fn print_context(target: PathBuf, budget: usize) -> io::Result<()> {
                 entry.reason
             );
         }
+    }
+
+    Ok(())
+}
+
+/// Render a context pack as assembled prompt text: a header plus each included
+/// file's full source in a fenced block, ready to paste or pipe into a model.
+fn print_context_prompt(graph: &ProjectGraph, pack: &kestrel_core::ContextPack) -> io::Result<()> {
+    println!(
+        "# Context for {} ({} files, ~{} tokens)",
+        pack.seed.display(),
+        pack.entries.len(),
+        pack.used_tokens
+    );
+    println!();
+    println!(
+        "The following files were selected as the most relevant context for `{}`.",
+        pack.seed.display()
+    );
+    println!();
+
+    for entry in &pack.entries {
+        println!("## {} — {}", entry.path.display(), entry.reason);
+        let absolute = graph.root.join(&entry.path);
+        match std::fs::read_to_string(&absolute) {
+            Ok(source) => {
+                println!("```{}", fence_tag(&entry.language));
+                print!("{}", source);
+                if !source.ends_with('\n') {
+                    println!();
+                }
+                println!("```");
+            }
+            Err(err) => {
+                println!("_(could not read file: {err})_");
+            }
+        }
+        println!();
+    }
+
+    if !pack.omitted.is_empty() {
+        println!("<!-- Omitted for budget:");
+        for entry in &pack.omitted {
+            println!(
+                "  {} (~{} tok)",
+                entry.path.display(),
+                entry.estimated_tokens
+            );
+        }
+        println!("-->");
     }
 
     Ok(())
