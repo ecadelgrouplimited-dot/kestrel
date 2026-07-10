@@ -4,6 +4,8 @@ pub mod context;
 pub mod environment;
 pub mod graph;
 pub mod inspect;
+pub mod providers;
+pub mod settings;
 pub mod symbols;
 pub mod verify;
 
@@ -18,6 +20,11 @@ pub use graph::{
 pub use inspect::{
     inspect_project, project_symbols, CommandKind, CommandSuggestion, FileInventory,
     LanguageSummary, ProjectInspection, ProjectMarker, SymbolSummary,
+};
+pub use providers::{chat, ChatMessage, ChatRequest, ProviderConfig, ProviderKind};
+pub use settings::{
+    load_settings, provider_preset, save_settings, ProviderSettings, Settings, UserInfo,
+    PROVIDER_PRESETS,
 };
 pub use symbols::{
     extractor_for_language, extractor_for_path, symbols_for_file, FileSymbols, Import, Symbol,
