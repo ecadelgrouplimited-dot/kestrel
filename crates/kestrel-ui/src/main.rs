@@ -42,6 +42,7 @@ enum JobOutcome {
 enum AppView {
     Main,
     Settings,
+    Chat,
 }
 
 struct KestrelApp {
@@ -65,6 +66,13 @@ struct KestrelApp {
     new_project_parent: String,
     new_project_name: String,
     new_project_status: String,
+    // Chat state.
+    chat_input: String,
+    chat_history: Vec<kestrel_core::ChatMessage>,
+    chat_include_context: bool,
+    chat_pending: bool,
+    chat_error: String,
+    chat_job: Option<Receiver<Result<String, String>>>,
 }
 
 impl Default for KestrelApp {
@@ -102,6 +110,12 @@ impl Default for KestrelApp {
             new_project_parent: String::new(),
             new_project_name: String::new(),
             new_project_status: String::new(),
+            chat_input: String::new(),
+            chat_history: Vec::new(),
+            chat_include_context: false,
+            chat_pending: false,
+            chat_error: String::new(),
+            chat_job: None,
         }
     }
 }
@@ -143,11 +157,36 @@ impl KestrelApp {
             }
         }
     }
+
+    /// Poll the in-flight chat request, if any, and append the reply.
+    fn poll_chat(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.chat_job else { return };
+        match rx.try_recv() {
+            Ok(Ok(reply)) => {
+                self.chat_history
+                    .push(kestrel_core::ChatMessage::assistant(reply));
+                self.chat_pending = false;
+                self.chat_job = None;
+            }
+            Ok(Err(err)) => {
+                self.chat_error = err;
+                self.chat_pending = false;
+                self.chat_job = None;
+            }
+            Err(TryRecvError::Empty) => ctx.request_repaint(),
+            Err(TryRecvError::Disconnected) => {
+                self.chat_error = "The chat request stopped unexpectedly.".to_string();
+                self.chat_pending = false;
+                self.chat_job = None;
+            }
+        }
+    }
 }
 
 impl eframe::App for KestrelApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_job(ctx);
+        self.poll_chat(ctx);
         let busy = self.job.is_some();
         self.new_project_modal(ctx);
 
@@ -166,18 +205,15 @@ impl eframe::App for KestrelApp {
                     self.open_project_path(self.project_path());
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let in_settings = self.view == AppView::Settings;
-                    let label = if in_settings {
-                        "← Back"
-                    } else {
-                        "⚙ Settings"
-                    };
-                    if ui.button(label).clicked() {
-                        self.view = if in_settings {
-                            AppView::Main
-                        } else {
-                            AppView::Settings
-                        };
+                    if self.view == AppView::Main {
+                        if ui.button("⚙ Settings").clicked() {
+                            self.view = AppView::Settings;
+                        }
+                        if ui.button("💬 Chat").clicked() {
+                            self.view = AppView::Chat;
+                        }
+                    } else if ui.button("← Back").clicked() {
+                        self.view = AppView::Main;
                     }
                 });
             });
@@ -264,6 +300,21 @@ impl eframe::App for KestrelApp {
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         self.settings_ui(ui);
+                    });
+            });
+            return;
+        }
+
+        if self.view == AppView::Chat {
+            egui::TopBottomPanel::bottom("chat-compose").show(ctx, |ui| {
+                self.chat_compose_ui(ui);
+            });
+            egui::CentralPanel::default().show(ctx, |ui| {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .stick_to_bottom(true)
+                    .show(ui, |ui| {
+                        self.chat_history_ui(ui);
                     });
             });
             return;
@@ -413,6 +464,151 @@ impl KestrelApp {
             return;
         }
         self.new_project_open = open;
+    }
+
+    /// Render the scrollable chat transcript.
+    fn chat_history_ui(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(6.0);
+        if self.chat_history.is_empty() {
+            ui.label(
+                egui::RichText::new(
+                    "Ask about your project, or anything else. Turn on “Include project \
+                     context” below to attach the most relevant files to your question.",
+                )
+                .weak(),
+            );
+        }
+        for message in &self.chat_history {
+            let (who, color) = if message.role == "user" {
+                ("You", egui::Color32::from_rgb(120, 170, 255))
+            } else {
+                ("Kestrel", egui::Color32::from_rgb(150, 210, 150))
+            };
+            ui.add_space(6.0);
+            ui.label(egui::RichText::new(who).strong().color(color));
+            ui.add(
+                egui::Label::new(egui::RichText::new(&message.content).monospace())
+                    .selectable(true),
+            );
+        }
+        if self.chat_pending {
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(egui::RichText::new("Kestrel is thinking…").weak());
+            });
+        }
+    }
+
+    /// Render the compose bar: provider status, context toggle, and input.
+    fn chat_compose_ui(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            match self.settings.active() {
+                Some(p) => {
+                    ui.label(egui::RichText::new("Model:").weak());
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{} ({})",
+                            p.model,
+                            self.settings.active_provider.as_deref().unwrap_or("?")
+                        ))
+                        .strong(),
+                    );
+                }
+                None => {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(220, 150, 80),
+                        "No active provider — set one in Settings.",
+                    );
+                }
+            }
+            ui.separator();
+            ui.checkbox(&mut self.chat_include_context, "Include project context");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Clear").clicked() {
+                    self.chat_history.clear();
+                    self.chat_error.clear();
+                }
+            });
+        });
+
+        if !self.chat_error.is_empty() {
+            ui.colored_label(egui::Color32::from_rgb(220, 90, 90), &self.chat_error);
+        }
+
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            let hint = if self.chat_include_context {
+                "Ask about this project… (Ctrl+Enter to send)"
+            } else {
+                "Message… (Ctrl+Enter to send)"
+            };
+            let input = ui.add(
+                egui::TextEdit::multiline(&mut self.chat_input)
+                    .desired_rows(2)
+                    .desired_width(f32::INFINITY)
+                    .hint_text(hint),
+            );
+            let ctrl_enter = input.has_focus()
+                && ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter));
+            let send = ui
+                .add_enabled(!self.chat_pending, egui::Button::new("Send"))
+                .clicked();
+            if send || ctrl_enter {
+                self.send_chat();
+            }
+        });
+        ui.add_space(4.0);
+    }
+
+    /// Send the composed message to the active provider on a worker thread.
+    fn send_chat(&mut self) {
+        let text = self.chat_input.trim().to_string();
+        if text.is_empty() || self.chat_pending {
+            return;
+        }
+        let provider = match self.settings.active() {
+            Some(p) => p.clone(),
+            None => {
+                self.chat_error = "No active provider — set one in Settings.".to_string();
+                return;
+            }
+        };
+        if provider.api_key.trim().is_empty() {
+            self.chat_error =
+                "The active provider has no API key — add one in Settings.".to_string();
+            return;
+        }
+
+        self.chat_error.clear();
+        self.chat_input.clear();
+        self.chat_history
+            .push(kestrel_core::ChatMessage::user(text.clone()));
+        self.chat_pending = true;
+
+        let config = provider.to_config();
+        let model = provider.model.clone();
+        let messages = self.chat_history.clone();
+        let include = self.chat_include_context;
+        let project = self.project_path();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let system = chat_system_prompt(include, &project, &text);
+            let request = kestrel_core::ChatRequest {
+                model,
+                max_tokens: 2048,
+                system: Some(system),
+                messages,
+            };
+            let result = match kestrel_core::chat(&config, &request) {
+                Ok(inner) => inner,
+                Err(err) => Err(err.to_string()),
+            };
+            let _ = tx.send(result);
+        });
+        self.chat_job = Some(rx);
     }
 
     /// Run a text-producing action against the current path on a worker thread.
@@ -639,6 +835,31 @@ impl KestrelApp {
         });
         ui.add_space(8.0);
     }
+}
+
+/// Build the system prompt for a chat turn. When `include` is set and the
+/// project graph builds, the most relevant files for `query` are attached as
+/// background context. Runs on the chat worker thread (graph building is slow),
+/// so the window stays responsive.
+fn chat_system_prompt(include: bool, project: &Path, query: &str) -> String {
+    let mut prompt = "You are Kestrel, an expert software-engineering assistant embedded in a \
+         local coding tool. Be concise, correct, and concrete. When you reference code, cite \
+         the file path."
+        .to_string();
+    if include {
+        if let Ok(graph) = kestrel_core::build_project_graph(project) {
+            let pack = kestrel_core::build_context_pack_for_query(&graph, query, 6000);
+            if !pack.entries.is_empty() {
+                let context = kestrel_core::assemble_context_prompt(&graph.root, &pack);
+                prompt.push_str(
+                    "\n\nThe following files from the user's project are the most relevant to \
+                     their message. Use them as ground truth.\n\n",
+                );
+                prompt.push_str(&context);
+            }
+        }
+    }
+    prompt
 }
 
 /// A display label for a provider's API kind.

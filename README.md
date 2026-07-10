@@ -25,9 +25,10 @@ cargo run -p kestrel-ui
 - **File-tree navigator** — the file tree loads automatically when you open a project; click a file to see its symbols.
 - **Action bar** — Inspect, Graph, a Context query box, plus **Verify** (runs the project's verification ladder) and **Env** (host shells/toolchains/WSL/Docker).
 - **Settings** (⚙, top-right) — your name/email and one or more **model providers**. Pick a preset (Anthropic, OpenAI, DeepSeek, or Kimi) to prefill its API kind, base URL, and a current default model, then paste your API key and choose which provider is active. Settings are written to your per-user config directory (`%APPDATA%\kestrel\settings.toml` on Windows), **never** into the project — because they hold secrets.
-- **Never freezes** — slow work (verification, indexing) runs on a background thread; the window stays responsive.
+- **Chat** (💬, top-right) — a conversation with your **active provider** (configured in Settings). Toggle **Include project context** to attach the files most relevant to your message — Kestrel seeds a context pack from your question, spreads relevance across the dependency graph, and sends the top files' source as grounding. The request runs on a background thread (Ctrl+Enter or Send), so the window never freezes while the model replies.
+- **Never freezes** — slow work (verification, indexing, model calls) runs on a background thread; the window stays responsive.
 
-It calls `kestrel-core` directly (no subprocess, no web view). Model-backed actions (`ask`/`edit`) currently live in the CLI.
+It calls `kestrel-core` directly (no subprocess, no web view). The CLI still hosts the scriptable model actions (`ask`/`edit`) with diff review and verification; the desktop Chat is the interactive counterpart.
 
 #### Choosing a model
 

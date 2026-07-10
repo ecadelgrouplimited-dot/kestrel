@@ -12,7 +12,8 @@ pub mod verify;
 
 pub use config::{load_config, Config, ConfigLoad};
 pub use context::{
-    build_context_pack, build_context_pack_for_query, estimate_tokens, ContextEntry, ContextPack,
+    assemble_context_prompt, build_context_pack, build_context_pack_for_query, estimate_tokens,
+    ContextEntry, ContextPack,
 };
 pub use environment::{discover_environment, EnvironmentReport, ToolInfo, WslInfo};
 pub use graph::{

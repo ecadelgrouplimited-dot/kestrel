@@ -65,6 +65,40 @@ pub struct ContextPack {
     pub omitted: Vec<ContextEntry>,
 }
 
+/// Assemble a pack's included files into a single prompt-ready context blob:
+/// each file's full source in a fenced, language-tagged block, read from
+/// `root`. Unreadable files are skipped. This is what a chat or ask flow feeds
+/// the model as background.
+pub fn assemble_context_prompt(root: &Path, pack: &ContextPack) -> String {
+    let mut out = String::new();
+    for entry in &pack.entries {
+        if let Ok(source) = std::fs::read_to_string(root.join(&entry.path)) {
+            out.push_str(&format!(
+                "### {} ({})\n",
+                entry.path.display(),
+                entry.reason
+            ));
+            out.push_str(&format!("```{}\n{}", fence_tag(&entry.language), source));
+            if !source.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str("```\n\n");
+        }
+    }
+    out
+}
+
+/// A Markdown fence tag for a detected language.
+fn fence_tag(language: &str) -> &'static str {
+    match language {
+        "Rust" => "rust",
+        "TypeScript" => "typescript",
+        "JavaScript" => "javascript",
+        "Python" => "python",
+        _ => "",
+    }
+}
+
 /// Build a context pack seeded from a single file, or `None` if the seed path
 /// is not a node in the graph.
 pub fn build_context_pack(
@@ -377,6 +411,30 @@ mod tests {
         // 100 chars each -> 100 tokens each, 3 files.
         assert_eq!(pack.used_tokens, 300);
         assert!(pack.omitted.is_empty());
+    }
+
+    #[test]
+    fn assemble_context_prompt_fences_real_source() {
+        let dir = std::env::temp_dir().join(format!(
+            "kestrel-ctx-prompt-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("seed.rs"), "fn seed_fn() {}\n").unwrap();
+
+        let files = vec![file("seed.rs", &["seed_fn"], &[], 16)];
+        let graph = build_graph_from_files(files);
+        let pack = build_context_pack(&graph, Path::new("seed.rs"), 10_000).unwrap();
+
+        let prompt = assemble_context_prompt(&dir, &pack);
+        assert!(prompt.contains("### seed.rs"));
+        assert!(prompt.contains("```rust"));
+        assert!(prompt.contains("fn seed_fn() {}"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
