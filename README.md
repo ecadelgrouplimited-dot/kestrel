@@ -75,7 +75,23 @@ cargo run -p kestrel-cli -- edit E:\Projects\some-repo\src\service.ts "add input
 cargo run -p kestrel-cli -- edit E:\Projects\some-repo\src\service.ts "add input validation to the load() method" --apply
 ```
 
-This is the first step of the *verified diff* wedge from [docs/vision-horizon.md](docs/vision-horizon.md): the human directs, the agent produces a concrete change, and the human reviews before it lands. Verification (running the project's lint/test/build after the edit) is the natural next increment. Same transport and flags as `ask`, plus `--apply` to write.
+This is the *verified diff* wedge from [docs/vision-horizon.md](docs/vision-horizon.md): the human directs, the agent produces a concrete change, and the human reviews before it lands. Same transport and flags as `ask`, plus `--apply` to write.
+
+Run the project's **verification ladder** — the detected format/test/build commands, executed in order and short-circuiting on the first failure:
+
+```powershell
+cargo run -p kestrel-cli -- verify E:\Projects\some-repo
+```
+
+Each step reports PASS/FAIL with duration and, on failure, the tail of its output; the process exits non-zero if any step fails. The ladder is derived from the project's markers (e.g. a Cargo workspace runs `cargo fmt --all -- --check` then `cargo test`; a Node project runs its package-manager `test` script; Python runs `pytest`; Go/`.NET` run build+test).
+
+Combine them for a **safe, verified apply** — Kestrel applies the edit, runs verification, and (with `--revert-on-fail`) rolls the file back if verification fails:
+
+```powershell
+cargo run -p kestrel-cli -- edit src\service.ts "add a null check" --apply --verify --revert-on-fail
+```
+
+That is the full Era-2 loop: the human directs, the agent produces a concrete change, verification proves it, and a failing change is automatically undone.
 
 ### Incremental index cache
 

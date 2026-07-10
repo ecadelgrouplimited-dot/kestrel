@@ -1,5 +1,6 @@
 use kestrel_core::{
-    build_project_graph, inspect_project, project_symbols, ProjectGraph, ProjectInspection,
+    build_project_graph, inspect_project, plan_verification, project_symbols, run_verification,
+    ProjectGraph, ProjectInspection, VerificationReport,
 };
 use std::env;
 use std::io;
@@ -58,10 +59,19 @@ fn main() -> io::Result<()> {
         "edit" => {
             let rest: Vec<String> = args.collect();
             let Some(opts) = parse_edit_args(&rest) else {
-                eprintln!("Usage: kestrel edit <file> \"<instruction>\" [--apply] [--model NAME] [--budget N] [--max-tokens N] [--dry-run]");
+                eprintln!("Usage: kestrel edit <file> \"<instruction>\" [--apply] [--verify] [--revert-on-fail] [--model NAME] [--budget N] [--max-tokens N] [--dry-run]");
                 std::process::exit(2);
             };
             run_edit(opts)?;
+        }
+        "verify" => {
+            let path = args
+                .next()
+                .map(PathBuf::from)
+                .unwrap_or(env::current_dir()?);
+            if !run_verify(path)? {
+                std::process::exit(1);
+            }
         }
         "--help" | "-h" | "help" => print_usage(),
         unknown => {
@@ -88,8 +98,9 @@ fn print_usage() {
     println!("                            Build a context pack from a natural-language query");
     println!("  kestrel ask \"<question>\" [path] [--model NAME] [--dry-run]");
     println!("                            Answer a question about the codebase using a model");
-    println!("  kestrel edit <file> \"<instruction>\" [--apply] [--model NAME] [--dry-run]");
+    println!("  kestrel edit <file> \"<instruction>\" [--apply] [--verify] [--model NAME]");
     println!("                            Propose a reviewed diff for a file (write with --apply)");
+    println!("  kestrel verify [path]     Run the project's format/test/build ladder");
 }
 
 fn print_summary(inspection: &ProjectInspection) {
@@ -918,6 +929,8 @@ struct EditOptions {
     max_tokens: u64,
     apply: bool,
     dry_run: bool,
+    verify: bool,
+    revert_on_fail: bool,
 }
 
 /// Parse `edit` arguments: `<file>` and `<instruction>` (positional), plus
@@ -930,6 +943,8 @@ fn parse_edit_args(args: &[String]) -> Option<EditOptions> {
     let mut max_tokens = 8_192u64;
     let mut apply = false;
     let mut dry_run = false;
+    let mut verify = false;
+    let mut revert_on_fail = false;
     let mut i = 0;
     while i < args.len() {
         let arg = &args[i];
@@ -960,6 +975,14 @@ fn parse_edit_args(args: &[String]) -> Option<EditOptions> {
                 dry_run = true;
                 i += 1;
             }
+            "--verify" => {
+                verify = true;
+                i += 1;
+            }
+            "--revert-on-fail" => {
+                revert_on_fail = true;
+                i += 1;
+            }
             _ => {
                 if file.is_none() {
                     file = Some(PathBuf::from(arg));
@@ -978,6 +1001,8 @@ fn parse_edit_args(args: &[String]) -> Option<EditOptions> {
         max_tokens: max_tokens.max(1),
         apply,
         dry_run,
+        verify,
+        revert_on_fail,
     })
 }
 
@@ -1081,17 +1106,104 @@ fn run_edit(opts: EditOptions) -> io::Result<()> {
         }
         Some(diff) => {
             print!("{diff}");
-            if opts.apply {
+            if !opts.apply {
+                eprintln!("\nProposed diff shown above. Re-run with --apply to write the changes.");
+            } else {
                 std::fs::write(&opts.file, &proposed)?;
                 eprintln!("\nApplied changes to {display_path}.");
-            } else {
-                eprintln!("\nProposed diff shown above. Re-run with --apply to write the changes.");
+                print_usage_line(&response);
+                return verify_after_edit(&opts, &graph.root, &current, &display_path);
             }
         }
     }
     print_usage_line(&response);
 
     Ok(())
+}
+
+/// After an applied edit, optionally run the verification ladder and, on
+/// failure, revert the file when `--revert-on-fail` is set.
+fn verify_after_edit(
+    opts: &EditOptions,
+    root: &Path,
+    original: &str,
+    display_path: &str,
+) -> io::Result<()> {
+    if !opts.verify {
+        return Ok(());
+    }
+    let inspection = inspect_project(root)?;
+    let steps = plan_verification(&inspection.markers);
+    if steps.is_empty() {
+        eprintln!("No verification commands detected for this project — skipping verification.");
+        return Ok(());
+    }
+
+    eprintln!("\nVerifying the change...");
+    let report = run_verification(&inspection.project_root, &steps);
+    print_verification(&report);
+
+    if report.passed {
+        return Ok(());
+    }
+    if opts.revert_on_fail {
+        std::fs::write(&opts.file, original)?;
+        eprintln!("Verification failed — reverted {display_path} to its previous contents.");
+    } else {
+        eprintln!(
+            "Verification failed. The change is still applied; revert it with your VCS, or use \
+             --revert-on-fail to auto-revert on failure."
+        );
+    }
+    std::process::exit(1);
+}
+
+/// Run the detected verification ladder for a project and print the report.
+/// Returns whether verification passed (or there was nothing to run).
+fn run_verify(path: PathBuf) -> io::Result<bool> {
+    let inspection = inspect_project(&path)?;
+    let steps = plan_verification(&inspection.markers);
+    if steps.is_empty() {
+        eprintln!("No verification commands detected for this project.");
+        return Ok(true);
+    }
+    eprintln!(
+        "Kestrel verify — {} step(s) in {}",
+        steps.len(),
+        inspection.project_root.display()
+    );
+    let report = run_verification(&inspection.project_root, &steps);
+    print_verification(&report);
+    Ok(report.passed)
+}
+
+/// Print a verification report to stderr (per-step status, plus failing output).
+fn print_verification(report: &VerificationReport) {
+    for step in &report.steps {
+        let status = if step.success { "PASS" } else { "FAIL" };
+        eprintln!(
+            "  [{status}] {} — `{}` ({} ms)",
+            step.label, step.command, step.duration_ms
+        );
+        if !step.success {
+            if !step.stderr_tail.is_empty() {
+                for line in step.stderr_tail.lines() {
+                    eprintln!("      {line}");
+                }
+            } else if !step.stdout_tail.is_empty() {
+                for line in step.stdout_tail.lines() {
+                    eprintln!("      {line}");
+                }
+            }
+        }
+    }
+    for step in &report.skipped {
+        eprintln!("  [SKIP] {} — `{}`", step.label, step.command);
+    }
+    eprintln!(
+        "Verification {}",
+        if report.passed { "PASSED" } else { "FAILED" }
+    );
 }
 
 /// Find the graph node whose relative path is the longest suffix match of the
