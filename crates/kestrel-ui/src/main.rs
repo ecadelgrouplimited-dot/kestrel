@@ -1,22 +1,26 @@
 //! Kestrel native desktop shell.
 //!
-//! An all-Rust GUI over `kestrel-core`. A left-hand file tree lets you browse a
-//! project's source files and jump to their symbols; the action bar runs the
-//! local analyses (inspect, graph, query-seeded context), the verification
-//! ladder, and host environment discovery. Slow work (verification, indexing)
-//! runs on a background thread so the window never freezes.
+//! An all-Rust GUI over `kestrel-core`. A left-hand **file explorer** browses
+//! the project's directory tree and creates, renames, and deletes files and
+//! folders; the central pane is a **source editor** (with save and rustfmt
+//! formatting) or the **output** of a local analysis. The action bar runs the
+//! analyses (inspect, graph, query-seeded context), the verification ladder,
+//! and environment discovery. A **Chat** view talks to your configured model
+//! provider, and **Settings** manages providers and your details. Slow work
+//! (indexing, verification, model calls) runs on a background thread so the
+//! window never freezes.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use eframe::egui;
-use kestrel_core::FileSymbols;
+use kestrel_core::Symbol;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, TryRecvError};
 
 fn main() -> eframe::Result<()> {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1100.0, 760.0])
-            .with_min_inner_size([720.0, 440.0])
+            .with_inner_size([1180.0, 800.0])
+            .with_min_inner_size([760.0, 460.0])
             .with_title("Kestrel"),
         ..Default::default()
     };
@@ -27,15 +31,21 @@ fn main() -> eframe::Result<()> {
     )
 }
 
+/// A node in the project's directory tree, loaded eagerly on Open/Refresh.
+#[derive(Clone)]
+struct TreeNode {
+    name: String,
+    path: PathBuf,
+    is_dir: bool,
+    children: Vec<TreeNode>,
+}
+
 /// The result a background job sends back to the UI thread.
 enum JobOutcome {
-    /// Free-text output for the main pane, plus a status line.
+    /// Free-text output for the Output tab, plus a status line.
     Text { output: String, status: String },
-    /// A loaded file tree (path + extracted symbols per file).
-    Files {
-        files: Vec<(PathBuf, FileSymbols)>,
-        status: String,
-    },
+    /// A freshly loaded project directory tree.
+    Tree { root: TreeNode, status: String },
 }
 
 #[derive(PartialEq, Eq)]
@@ -45,15 +55,54 @@ enum AppView {
     Chat,
 }
 
+/// Which pane the central area shows in the Main view.
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum CentralView {
+    Editor,
+    Output,
+}
+
+/// A pending create/rename operation driving the entry modal.
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum EntryOp {
+    NewFile,
+    NewFolder,
+    Rename,
+}
+
+/// An action requested while rendering the (immutably borrowed) file tree,
+/// applied after rendering so the tree walk needn't borrow `self` mutably.
+enum TreeAction {
+    Open(PathBuf),
+    Select(PathBuf),
+    Rename(PathBuf),
+    Delete(PathBuf),
+    NewIn(PathBuf, bool),
+}
+
 struct KestrelApp {
     view: AppView,
     path: String,
     query: String,
     output: String,
     status: String,
-    files: Vec<(PathBuf, FileSymbols)>,
-    selected: Option<usize>,
     job: Option<Receiver<JobOutcome>>,
+    // File explorer + editor state.
+    tree: Option<TreeNode>,
+    selected_path: Option<PathBuf>,
+    central: CentralView,
+    editor_path: Option<PathBuf>,
+    editor_text: String,
+    editor_original: String,
+    editor_symbols: Vec<Symbol>,
+    editor_status: String,
+    // Create/rename modal.
+    entry_op: Option<EntryOp>,
+    entry_target: PathBuf,
+    entry_name: String,
+    entry_status: String,
+    // Delete confirmation.
+    delete_target: Option<PathBuf>,
     // Settings state.
     settings: kestrel_core::Settings,
     user_name: String,
@@ -87,19 +136,25 @@ impl Default for KestrelApp {
             view: AppView::Main,
             path,
             query: String::new(),
-            output: "Set a project folder and press Open to load its files, or use the action \
-                     bar:\n\n\
-                     • Open     — load the file tree (click a file to see its symbols)\n\
-                     • Inspect  — languages, symbols, markers, likely commands\n\
-                     • Graph    — the file dependency graph\n\
-                     • Context  — files most relevant to the query box\n\
-                     • Verify   — run the project's format/test/build ladder\n\
-                     • Env      — host shells, toolchains, WSL, Docker"
+            output: "Open a project to browse its files. Click a file to view and edit it; use \
+                     + File / + Folder to create one. The action bar runs Inspect, Graph, a \
+                     Context query, Verify, and Env — their results appear on the Output tab."
                 .to_string(),
             status: String::new(),
-            files: Vec::new(),
-            selected: None,
             job: None,
+            tree: None,
+            selected_path: None,
+            central: CentralView::Editor,
+            editor_path: None,
+            editor_text: String::new(),
+            editor_original: String::new(),
+            editor_symbols: Vec::new(),
+            editor_status: String::new(),
+            entry_op: None,
+            entry_target: PathBuf::new(),
+            entry_name: String::new(),
+            entry_status: String::new(),
+            delete_target: None,
             settings,
             user_name,
             user_email,
@@ -141,13 +196,12 @@ impl KestrelApp {
             Ok(JobOutcome::Text { output, status }) => {
                 self.output = output;
                 self.status = status;
+                self.central = CentralView::Output;
                 self.job = None;
             }
-            Ok(JobOutcome::Files { files, status }) => {
-                self.files = files;
-                self.selected = None;
+            Ok(JobOutcome::Tree { root, status }) => {
+                self.tree = Some(root);
                 self.status = status;
-                self.output = "Select a file on the left to view its symbols.".to_string();
                 self.job = None;
             }
             Err(TryRecvError::Empty) => ctx.request_repaint(),
@@ -189,6 +243,8 @@ impl eframe::App for KestrelApp {
         self.poll_chat(ctx);
         let busy = self.job.is_some();
         self.new_project_modal(ctx);
+        self.entry_modal(ctx);
+        self.delete_modal(ctx);
 
         egui::TopBottomPanel::top("controls").show(ctx, |ui| {
             ui.add_space(6.0);
@@ -198,7 +254,7 @@ impl eframe::App for KestrelApp {
                 ui.label("Project:");
                 ui.add(
                     egui::TextEdit::singleline(&mut self.path)
-                        .desired_width(400.0)
+                        .desired_width(380.0)
                         .hint_text("path to a repository"),
                 );
                 if ui.add_enabled(!busy, egui::Button::new("Load")).clicked() {
@@ -229,7 +285,7 @@ impl eframe::App for KestrelApp {
                                 self.open_project_path(dir);
                             }
                         }
-                        if ui.button("New…").clicked() {
+                        if ui.button("New project…").clicked() {
                             if self.new_project_parent.trim().is_empty() {
                                 self.new_project_parent = self.path.clone();
                             }
@@ -269,7 +325,7 @@ impl eframe::App for KestrelApp {
                         let enter = ui
                             .add(
                                 egui::TextEdit::singleline(&mut self.query)
-                                    .desired_width(260.0)
+                                    .desired_width(220.0)
                                     .hint_text("e.g. dependency graph edges"),
                             )
                             .lost_focus()
@@ -322,41 +378,31 @@ impl eframe::App for KestrelApp {
 
         egui::SidePanel::left("files")
             .resizable(true)
-            .default_width(280.0)
+            .default_width(300.0)
             .show(ctx, |ui| {
                 ui.add_space(4.0);
-                ui.strong(format!("Files ({})", self.files.len()));
-                ui.separator();
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    let mut clicked = None;
-                    for (i, (path, _)) in self.files.iter().enumerate() {
-                        let label = path.display().to_string();
-                        if ui
-                            .selectable_label(self.selected == Some(i), label)
-                            .clicked()
-                        {
-                            clicked = Some(i);
-                        }
-                    }
-                    if let Some(i) = clicked {
-                        self.selected = Some(i);
-                        let (path, file) = &self.files[i];
-                        self.output = format_file_symbols(path, file);
-                        self.status =
-                            format!("{} — {} symbols", path.display(), file.symbols.len());
-                    }
-                });
+                self.tree_ui(ui);
             });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            egui::ScrollArea::both()
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    ui.add(
-                        egui::Label::new(egui::RichText::new(&self.output).monospace())
-                            .selectable(true),
-                    );
-                });
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut self.central, CentralView::Editor, "Editor");
+                ui.selectable_value(&mut self.central, CentralView::Output, "Output");
+            });
+            ui.separator();
+            match self.central {
+                CentralView::Editor => self.editor_ui(ui),
+                CentralView::Output => {
+                    egui::ScrollArea::both()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            ui.add(
+                                egui::Label::new(egui::RichText::new(&self.output).monospace())
+                                    .selectable(true),
+                            );
+                        });
+                }
+            }
         });
     }
 }
@@ -366,14 +412,425 @@ impl KestrelApp {
         PathBuf::from(self.path.trim())
     }
 
-    /// Make `path` the active project: record it as the path, remember it in
-    /// the recent list (persisted), return to the main view, and load its files.
+    /// Make `path` the active project: record it, remember it in the recent
+    /// list (persisted), return to the main view, and load its file tree.
     fn open_project_path(&mut self, path: PathBuf) {
         self.path = path.display().to_string();
         kestrel_core::push_recent(&mut self.settings.recent_projects, &path);
         let _ = kestrel_core::save_settings(&self.settings);
         self.view = AppView::Main;
-        self.spawn(move || load_files(&path));
+        self.reload_tree();
+    }
+
+    /// (Re)load the current project's directory tree on a worker thread.
+    fn reload_tree(&mut self) {
+        let path = self.project_path();
+        self.spawn(move || load_tree(&path));
+    }
+
+    // --- File explorer ---------------------------------------------------
+
+    /// The left-hand explorer: a toolbar plus the project's directory tree.
+    fn tree_ui(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.strong("Explorer");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("⟳").on_hover_text("Refresh").clicked() {
+                    self.reload_tree();
+                }
+            });
+        });
+        ui.horizontal(|ui| {
+            if ui.button("+ File").clicked() {
+                self.begin_new_entry(false);
+            }
+            if ui.button("+ Folder").clicked() {
+                self.begin_new_entry(true);
+            }
+        });
+        ui.separator();
+
+        let mut actions: Vec<TreeAction> = Vec::new();
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                if let Some(root) = &self.tree {
+                    if root.children.is_empty() {
+                        ui.label(egui::RichText::new("(empty project)").weak());
+                    }
+                    for child in &root.children {
+                        render_tree(ui, child, &self.selected_path, &mut actions);
+                    }
+                } else {
+                    ui.label(egui::RichText::new("Open a project to see its files.").weak());
+                }
+            });
+
+        for action in actions {
+            match action {
+                TreeAction::Open(path) => {
+                    self.selected_path = Some(path.clone());
+                    self.open_file(&path);
+                }
+                TreeAction::Select(path) => self.selected_path = Some(path),
+                TreeAction::Rename(path) => self.begin_rename(path),
+                TreeAction::Delete(path) => self.delete_target = Some(path),
+                TreeAction::NewIn(dir, is_dir) => {
+                    self.entry_target = dir;
+                    self.entry_name.clear();
+                    self.entry_status.clear();
+                    self.entry_op = Some(if is_dir {
+                        EntryOp::NewFolder
+                    } else {
+                        EntryOp::NewFile
+                    });
+                }
+            }
+        }
+    }
+
+    /// The directory a new entry should be created in: the selected folder, the
+    /// selected file's parent, or the project root.
+    fn new_entry_parent_dir(&self) -> PathBuf {
+        if let Some(selected) = &self.selected_path {
+            if selected.is_dir() {
+                return selected.clone();
+            }
+            if let Some(parent) = selected.parent() {
+                return parent.to_path_buf();
+            }
+        }
+        self.project_path()
+    }
+
+    fn begin_new_entry(&mut self, is_dir: bool) {
+        self.entry_target = self.new_entry_parent_dir();
+        self.entry_name.clear();
+        self.entry_status.clear();
+        self.entry_op = Some(if is_dir {
+            EntryOp::NewFolder
+        } else {
+            EntryOp::NewFile
+        });
+    }
+
+    fn begin_rename(&mut self, path: PathBuf) {
+        self.entry_name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        self.entry_target = path;
+        self.entry_status.clear();
+        self.entry_op = Some(EntryOp::Rename);
+    }
+
+    /// The create-file / create-folder / rename modal.
+    fn entry_modal(&mut self, ctx: &egui::Context) {
+        let Some(op) = self.entry_op else { return };
+        let title = match op {
+            EntryOp::NewFile => "New file",
+            EntryOp::NewFolder => "New folder",
+            EntryOp::Rename => "Rename",
+        };
+        let mut open = true;
+        let mut confirm = false;
+        let mut cancel = false;
+        egui::Window::new(title)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .open(&mut open)
+            .show(ctx, |ui| {
+                let hint = match op {
+                    EntryOp::NewFolder => "folder name",
+                    _ => "file name (e.g. main.rs)",
+                };
+                let context_line = match op {
+                    EntryOp::Rename => format!("Renaming {}", self.entry_target.display()),
+                    _ => format!("In {}", self.entry_target.display()),
+                };
+                ui.label(egui::RichText::new(context_line).weak());
+                ui.add_space(4.0);
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut self.entry_name)
+                        .desired_width(320.0)
+                        .hint_text(hint),
+                );
+                response.request_focus();
+                if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    confirm = true;
+                }
+                if !self.entry_status.is_empty() {
+                    ui.add_space(4.0);
+                    ui.colored_label(egui::Color32::from_rgb(220, 90, 90), &self.entry_status);
+                }
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .button(if op == EntryOp::Rename {
+                            "Rename"
+                        } else {
+                            "Create"
+                        })
+                        .clicked()
+                    {
+                        confirm = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+
+        if cancel || !open {
+            self.entry_op = None;
+            self.entry_status.clear();
+            return;
+        }
+        if confirm {
+            let result = match op {
+                EntryOp::NewFile => kestrel_core::create_file(&self.entry_target, &self.entry_name),
+                EntryOp::NewFolder => {
+                    kestrel_core::create_dir(&self.entry_target, &self.entry_name)
+                }
+                EntryOp::Rename => kestrel_core::rename_entry(&self.entry_target, &self.entry_name),
+            };
+            match result {
+                Ok(new_path) => {
+                    self.entry_op = None;
+                    self.entry_status.clear();
+                    self.reload_tree();
+                    self.selected_path = Some(new_path.clone());
+                    match op {
+                        EntryOp::NewFile => self.open_file(&new_path),
+                        EntryOp::Rename
+                            if self.editor_path.as_deref() == Some(&self.entry_target) =>
+                        {
+                            self.editor_path = Some(new_path);
+                        }
+                        _ => {}
+                    }
+                    self.status = "Done.".to_string();
+                }
+                Err(err) => self.entry_status = err.to_string(),
+            }
+        }
+    }
+
+    /// The delete-confirmation modal.
+    fn delete_modal(&mut self, ctx: &egui::Context) {
+        let Some(target) = self.delete_target.clone() else {
+            return;
+        };
+        let mut open = true;
+        let mut confirm = false;
+        let mut cancel = false;
+        egui::Window::new("Delete")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .open(&mut open)
+            .show(ctx, |ui| {
+                let kind = if target.is_dir() { "folder" } else { "file" };
+                ui.label(format!("Delete this {kind}?"));
+                ui.add_space(2.0);
+                ui.strong(target.display().to_string());
+                if target.is_dir() {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(220, 150, 80),
+                        "The folder and everything inside it will be removed.",
+                    );
+                }
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Delete").clicked() {
+                        confirm = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+
+        if cancel || !open {
+            self.delete_target = None;
+            return;
+        }
+        if confirm {
+            match kestrel_core::delete_entry(&target) {
+                Ok(()) => {
+                    if self.editor_path.as_ref() == Some(&target)
+                        || self
+                            .editor_path
+                            .as_ref()
+                            .is_some_and(|p| p.starts_with(&target))
+                    {
+                        self.editor_path = None;
+                        self.editor_text.clear();
+                        self.editor_original.clear();
+                        self.editor_symbols.clear();
+                    }
+                    if self.selected_path.as_ref() == Some(&target) {
+                        self.selected_path = None;
+                    }
+                    self.status = format!("Deleted {}.", target.display());
+                    self.reload_tree();
+                }
+                Err(err) => self.status = format!("Delete failed: {err}"),
+            }
+            self.delete_target = None;
+        }
+    }
+
+    // --- Editor ----------------------------------------------------------
+
+    fn open_file(&mut self, path: &Path) {
+        self.central = CentralView::Editor;
+        self.editor_path = Some(path.to_path_buf());
+        self.editor_status.clear();
+        match kestrel_core::read_text_file(path) {
+            Ok(text) => {
+                self.editor_text = text.clone();
+                self.editor_original = text;
+                self.editor_symbols = kestrel_core::symbols_for_file(path)
+                    .ok()
+                    .flatten()
+                    .map(|f| f.symbols)
+                    .unwrap_or_default();
+                self.status = format!("Opened {}.", path.display());
+            }
+            Err(err) => {
+                self.editor_text.clear();
+                self.editor_original.clear();
+                self.editor_symbols.clear();
+                self.editor_status = format!(
+                    "Cannot open as UTF-8 text ({err}). Binary files aren't editable here."
+                );
+                self.status = "Open failed.".to_string();
+            }
+        }
+    }
+
+    fn save_file(&mut self) {
+        let Some(path) = self.editor_path.clone() else {
+            return;
+        };
+        match kestrel_core::write_text_file(&path, &self.editor_text) {
+            Ok(()) => {
+                self.editor_original = self.editor_text.clone();
+                self.editor_symbols = kestrel_core::symbols_for_file(&path)
+                    .ok()
+                    .flatten()
+                    .map(|f| f.symbols)
+                    .unwrap_or_default();
+                self.editor_status = "Saved.".to_string();
+                self.status = format!("Saved {}.", path.display());
+            }
+            Err(err) => self.editor_status = format!("Save failed: {err}"),
+        }
+    }
+
+    fn format_current_file(&mut self) {
+        let Some(path) = self.editor_path.clone() else {
+            return;
+        };
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if ext != "rs" {
+            self.editor_status =
+                "Formatting is available for Rust files (.rs) via rustfmt.".to_string();
+            return;
+        }
+        match rustfmt_source(&self.editor_text) {
+            Ok(formatted) => {
+                self.editor_text = formatted;
+                self.editor_status = "Formatted with rustfmt.".to_string();
+            }
+            Err(err) => self.editor_status = format!("rustfmt failed: {err}"),
+        }
+    }
+
+    fn editor_ui(&mut self, ui: &mut egui::Ui) {
+        let Some(path) = self.editor_path.clone() else {
+            ui.add_space(8.0);
+            ui.label(
+                egui::RichText::new(
+                    "Select a file in the explorer to view and edit it, or create one with \
+                     + File.",
+                )
+                .weak(),
+            );
+            return;
+        };
+
+        let dirty = self.editor_text != self.editor_original;
+        let mut do_save = false;
+        let mut do_format = false;
+        ui.horizontal(|ui| {
+            ui.strong(path.display().to_string());
+            if dirty {
+                ui.colored_label(egui::Color32::from_rgb(220, 150, 80), "● unsaved");
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .button("Format")
+                    .on_hover_text("rustfmt (Rust files)")
+                    .clicked()
+                {
+                    do_format = true;
+                }
+                if ui
+                    .add_enabled(dirty, egui::Button::new("💾 Save"))
+                    .on_hover_text("Ctrl+S")
+                    .clicked()
+                {
+                    do_save = true;
+                }
+            });
+        });
+        if !self.editor_status.is_empty() {
+            ui.label(egui::RichText::new(&self.editor_status).weak());
+        }
+
+        if !self.editor_symbols.is_empty() {
+            egui::CollapsingHeader::new(format!("Outline ({} symbols)", self.editor_symbols.len()))
+                .id_source("editor-outline")
+                .show(ui, |ui| {
+                    for symbol in &self.editor_symbols {
+                        let vis = if symbol.exported { "+" } else { "-" };
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{vis} {:<9} {}  @{}",
+                                symbol.kind.as_str(),
+                                symbol.name,
+                                symbol.line
+                            ))
+                            .monospace(),
+                        );
+                    }
+                });
+        }
+        ui.separator();
+
+        egui::ScrollArea::both()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.add(
+                    egui::TextEdit::multiline(&mut self.editor_text)
+                        .code_editor()
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(28),
+                );
+            });
+
+        if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) {
+            do_save = true;
+        }
+        if do_save {
+            self.save_file();
+        }
+        if do_format {
+            self.format_current_file();
+        }
     }
 
     /// The "New project" modal: choose a parent folder and a name, scaffold a
@@ -500,7 +957,7 @@ impl KestrelApp {
         }
     }
 
-    /// Render the compose bar: provider status, context toggle, and input.
+    /// Render the compose bar: provider status, controls, and the input.
     fn chat_compose_ui(&mut self, ui: &mut egui::Ui) {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
@@ -526,9 +983,15 @@ impl KestrelApp {
             ui.separator();
             ui.checkbox(&mut self.chat_include_context, "Include project context");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("Clear").clicked() {
+                if ui.button("New chat").clicked() {
                     self.chat_history.clear();
                     self.chat_error.clear();
+                    self.chat_input.clear();
+                }
+                if self.chat_pending && ui.button("Stop").clicked() {
+                    self.chat_job = None;
+                    self.chat_pending = false;
+                    self.chat_error = "Cancelled.".to_string();
                 }
             });
         });
@@ -539,23 +1002,19 @@ impl KestrelApp {
 
         ui.add_space(2.0);
         ui.horizontal(|ui| {
-            let hint = if self.chat_include_context {
-                "Ask about this project… (Ctrl+Enter to send)"
-            } else {
-                "Message… (Ctrl+Enter to send)"
-            };
             let input = ui.add(
                 egui::TextEdit::multiline(&mut self.chat_input)
                     .desired_rows(2)
                     .desired_width(f32::INFINITY)
-                    .hint_text(hint),
+                    .hint_text("Message…  (Enter to send, Shift+Enter for a new line)"),
             );
-            let ctrl_enter = input.has_focus()
-                && ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter));
-            let send = ui
+            // Enter sends; Shift+Enter inserts a newline (handled by the widget).
+            let enter_send = input.has_focus()
+                && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
+            let clicked = ui
                 .add_enabled(!self.chat_pending, egui::Button::new("Send"))
                 .clicked();
-            if send || ctrl_enter {
+            if (enter_send || clicked) && !self.chat_pending {
                 self.send_chat();
             }
         });
@@ -837,6 +1296,136 @@ impl KestrelApp {
     }
 }
 
+/// Recursively render one tree node, pushing any requested actions to `actions`.
+fn render_tree(
+    ui: &mut egui::Ui,
+    node: &TreeNode,
+    selected: &Option<PathBuf>,
+    actions: &mut Vec<TreeAction>,
+) {
+    if node.is_dir {
+        let response = egui::CollapsingHeader::new(format!("📁 {}", node.name))
+            .id_source(&node.path)
+            .default_open(false)
+            .show(ui, |ui| {
+                for child in &node.children {
+                    render_tree(ui, child, selected, actions);
+                }
+            });
+        response.header_response.context_menu(|ui| {
+            if ui.button("New File…").clicked() {
+                actions.push(TreeAction::NewIn(node.path.clone(), false));
+                ui.close_menu();
+            }
+            if ui.button("New Folder…").clicked() {
+                actions.push(TreeAction::NewIn(node.path.clone(), true));
+                ui.close_menu();
+            }
+            ui.separator();
+            if ui.button("Rename…").clicked() {
+                actions.push(TreeAction::Rename(node.path.clone()));
+                ui.close_menu();
+            }
+            if ui.button("Delete").clicked() {
+                actions.push(TreeAction::Delete(node.path.clone()));
+                ui.close_menu();
+            }
+        });
+        if response.header_response.clicked() {
+            actions.push(TreeAction::Select(node.path.clone()));
+        }
+    } else {
+        let is_selected = selected.as_deref() == Some(node.path.as_path());
+        let response = ui.selectable_label(is_selected, format!("📄 {}", node.name));
+        if response.clicked() {
+            actions.push(TreeAction::Open(node.path.clone()));
+        }
+        response.context_menu(|ui| {
+            if ui.button("Rename…").clicked() {
+                actions.push(TreeAction::Rename(node.path.clone()));
+                ui.close_menu();
+            }
+            if ui.button("Delete").clicked() {
+                actions.push(TreeAction::Delete(node.path.clone()));
+                ui.close_menu();
+            }
+        });
+    }
+}
+
+/// Load a project's directory tree (on a worker thread).
+fn load_tree(path: &Path) -> JobOutcome {
+    if !path.exists() {
+        return JobOutcome::Text {
+            output: format!("Path does not exist: {}", path.display()),
+            status: "Open failed.".to_string(),
+        };
+    }
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.display().to_string());
+    let root = build_tree(path, name, path.is_dir(), 0);
+    let files = count_files(&root);
+    JobOutcome::Tree {
+        root,
+        status: format!("Loaded {} — {files} files.", path.display()),
+    }
+}
+
+/// Recursively build a `TreeNode`, capped in depth to avoid pathological trees.
+fn build_tree(path: &Path, name: String, is_dir: bool, depth: usize) -> TreeNode {
+    let mut children = Vec::new();
+    if is_dir && depth < 40 {
+        if let Ok(entries) = kestrel_core::read_dir_entries(path) {
+            for entry in entries {
+                children.push(build_tree(&entry.path, entry.name, entry.is_dir, depth + 1));
+            }
+        }
+    }
+    TreeNode {
+        name,
+        path: path.to_path_buf(),
+        is_dir,
+        children,
+    }
+}
+
+/// Count the files (non-directory leaves) in a tree.
+fn count_files(node: &TreeNode) -> usize {
+    if node.is_dir {
+        node.children.iter().map(count_files).sum()
+    } else {
+        1
+    }
+}
+
+/// Format Rust `source` with the system `rustfmt`, returning the formatted text
+/// or an error message. Uses a temp file (rustfmt formats files in place).
+fn rustfmt_source(source: &str) -> Result<String, String> {
+    let tmp = std::env::temp_dir().join(format!(
+        "kestrel-fmt-{}-{}.rs",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::write(&tmp, source).map_err(|e| e.to_string())?;
+    let output = std::process::Command::new("rustfmt")
+        .arg("--edition")
+        .arg("2021")
+        .arg(&tmp)
+        .output();
+    let result = match output {
+        Ok(out) if out.status.success() => std::fs::read_to_string(&tmp).map_err(|e| e.to_string()),
+        Ok(out) => Err(String::from_utf8_lossy(&out.stderr).trim().to_string()),
+        Err(err) => Err(format!("rustfmt not found on PATH ({err})")),
+    };
+    let _ = std::fs::remove_file(&tmp);
+    result
+}
+
 /// Build the system prompt for a chat turn. When `include` is set and the
 /// project graph builds, the most relevant files for `query` are attached as
 /// background context. Runs on the chat worker thread (graph building is slow),
@@ -878,39 +1467,6 @@ fn non_empty(s: &str) -> Option<String> {
     } else {
         Some(t.to_string())
     }
-}
-
-fn load_files(path: &Path) -> JobOutcome {
-    match kestrel_core::project_symbols(path) {
-        Ok(files) => {
-            let status = format!("Loaded {} source files.", files.len());
-            JobOutcome::Files { files, status }
-        }
-        Err(err) => JobOutcome::Text {
-            output: format!("Error: {err}"),
-            status: "Open failed.".to_string(),
-        },
-    }
-}
-
-fn format_file_symbols(path: &Path, file: &FileSymbols) -> String {
-    let mut out = format!("{} [{}]\n\n", path.display(), file.language);
-    for symbol in &file.symbols {
-        let vis = if symbol.exported { "+" } else { "-" };
-        let container = symbol
-            .container
-            .as_deref()
-            .map(|c| format!(" (in {c})"))
-            .unwrap_or_default();
-        out.push_str(&format!(
-            "  {vis} {:<9} {}{}  @{}\n",
-            symbol.kind.as_str(),
-            symbol.name,
-            container,
-            symbol.line
-        ));
-    }
-    out
 }
 
 fn inspect(path: &Path) -> Result<String, String> {

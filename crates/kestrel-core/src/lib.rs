@@ -9,6 +9,7 @@ pub mod providers;
 pub mod settings;
 pub mod symbols;
 pub mod verify;
+pub mod workspace;
 
 pub use config::{load_config, Config, ConfigLoad};
 pub use context::{
@@ -34,3 +35,7 @@ pub use symbols::{
     SymbolExtractor, SymbolKind,
 };
 pub use verify::{plan_verification, run_verification, StepResult, VerificationReport, VerifyStep};
+pub use workspace::{
+    create_dir, create_file, delete_entry, read_dir_entries, read_text_file, rename_entry,
+    validate_entry_name, write_text_file, WorkspaceEntry,
+};
