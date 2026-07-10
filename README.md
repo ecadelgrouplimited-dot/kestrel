@@ -58,6 +58,15 @@ cargo run -p kestrel-cli -- context E:\Projects\some-repo --query "user authenti
 
 Extraction runs behind a swappable `SymbolExtractor` trait, with dependency-free heuristic extractors for Rust, TypeScript/JavaScript, and Python that resolve symbols, imports, and cross-file references. The scanners are string- and comment-aware (block comments, raw strings, multi-line strings, BOMs, Rust lifetimes vs char literals). Dependency edges fuse two kinds of evidence: shared symbol references, and import specifiers resolved to concrete files (Rust `crate::`/`self::`/`super::` module-tree resolution; TS/JS relative imports with extension and `index.*` conventions; Python relative and absolute-from-root module resolution). The trait boundary is deliberate: a full tree-sitter backend can replace any extractor later without changing a single caller. Together the symbol index and the `ProjectGraph`/`DependencyEdge` structures are the Phase 0 substrate of the Living System Model described in [docs/vision-horizon.md](docs/vision-horizon.md).
 
+Ask a natural-language question about the codebase. Kestrel seeds a context pack from the question, assembles an Anthropic Messages request, and answers using a model:
+
+```powershell
+$env:ANTHROPIC_API_KEY = "sk-ant-..."
+cargo run -p kestrel-cli -- ask "how are dependency graph edges built and ranked?" E:\Projects\some-repo
+```
+
+The model call is made through the system `curl` (no bundled TLS stack), so it works anywhere `curl` is on `PATH` (Windows 10+, macOS, Linux all ship it). Flags: `--model NAME` (default `claude-opus-4-8`), `--budget N` (context tokens), `--max-tokens N` (answer cap), and `--dry-run` to print the exact request JSON without sending it. Without `ANTHROPIC_API_KEY` set, `ask` prints the assembled prompt instead of calling the API, so it stays useful offline.
+
 ### Incremental index cache
 
 The `graph`, `related`, and `context` commands persist their parse results to `<project-root>/.kestrel/index.json`, keyed by each file's size and modification time. On the next run only changed files are re-parsed — the first real step from a re-derived context engine toward a *living*, incrementally updated one. The cache directory is git-ignored; delete `.kestrel/` to force a full rebuild.

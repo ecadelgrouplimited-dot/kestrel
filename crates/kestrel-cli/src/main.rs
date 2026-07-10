@@ -47,6 +47,14 @@ fn main() -> io::Result<()> {
             let opts = parse_context_args(&rest);
             print_context(opts)?;
         }
+        "ask" => {
+            let rest: Vec<String> = args.collect();
+            let Some(opts) = parse_ask_args(&rest) else {
+                eprintln!("Usage: kestrel ask \"<question>\" [path] [--budget N] [--model NAME] [--max-tokens N] [--dry-run]");
+                std::process::exit(2);
+            };
+            run_ask(opts)?;
+        }
         "--help" | "-h" | "help" => print_usage(),
         unknown => {
             eprintln!("Unknown command: {unknown}");
@@ -70,6 +78,8 @@ fn print_usage() {
     println!("                            Build a ranked, budget-bounded context pack");
     println!("  kestrel context [path] --query \"...\" [--budget N] [--format ...]");
     println!("                            Build a context pack from a natural-language query");
+    println!("  kestrel ask \"<question>\" [path] [--model NAME] [--dry-run]");
+    println!("                            Answer a question about the codebase using a model");
 }
 
 fn print_summary(inspection: &ProjectInspection) {
@@ -583,6 +593,247 @@ fn print_context_prompt(graph: &ProjectGraph, pack: &kestrel_core::ContextPack) 
             );
         }
         println!("-->");
+    }
+
+    Ok(())
+}
+
+/// Default token budget for the context assembled behind `ask`.
+const DEFAULT_ASK_BUDGET: usize = 12_000;
+/// Default model for `ask`. Anthropic's most capable Opus-tier model.
+const DEFAULT_ASK_MODEL: &str = "claude-opus-4-8";
+/// Default response token cap (kept under the SDK's non-streaming limit).
+const DEFAULT_ASK_MAX_TOKENS: u64 = 4_096;
+
+struct AskOptions {
+    question: String,
+    path: Option<PathBuf>,
+    budget: usize,
+    model: String,
+    max_tokens: u64,
+    dry_run: bool,
+}
+
+/// Parse `ask` arguments: `<question>` then an optional path, plus
+/// `--budget`/`-b`, `--model`, `--max-tokens`, and `--dry-run`.
+fn parse_ask_args(args: &[String]) -> Option<AskOptions> {
+    let mut question = None;
+    let mut path = None;
+    let mut budget = DEFAULT_ASK_BUDGET;
+    let mut model = DEFAULT_ASK_MODEL.to_string();
+    let mut max_tokens = DEFAULT_ASK_MAX_TOKENS;
+    let mut dry_run = false;
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        match arg.as_str() {
+            "--budget" | "-b" => {
+                if let Some(v) = args.get(i + 1).and_then(|v| v.parse().ok()) {
+                    budget = v;
+                }
+                i += 2;
+            }
+            "--model" => {
+                if let Some(v) = args.get(i + 1) {
+                    model = v.clone();
+                }
+                i += 2;
+            }
+            "--max-tokens" => {
+                if let Some(v) = args.get(i + 1).and_then(|v| v.parse().ok()) {
+                    max_tokens = v;
+                }
+                i += 2;
+            }
+            "--dry-run" => {
+                dry_run = true;
+                i += 1;
+            }
+            _ => {
+                if question.is_none() {
+                    question = Some(arg.clone());
+                } else if path.is_none() {
+                    path = Some(PathBuf::from(arg));
+                }
+                i += 1;
+            }
+        }
+    }
+    Some(AskOptions {
+        question: question?,
+        path,
+        budget: budget.max(1),
+        model,
+        max_tokens: max_tokens.max(1),
+        dry_run,
+    })
+}
+
+/// Concatenate the included files' contents into a single context blob.
+fn assemble_context(graph: &ProjectGraph, pack: &kestrel_core::ContextPack) -> String {
+    let mut out = String::new();
+    for entry in &pack.entries {
+        match std::fs::read_to_string(graph.root.join(&entry.path)) {
+            Ok(source) => {
+                out.push_str(&format!(
+                    "### {} ({})\n",
+                    entry.path.display(),
+                    entry.reason
+                ));
+                out.push_str(&format!("```{}\n{}", fence_tag(&entry.language), source));
+                if !source.ends_with('\n') {
+                    out.push('\n');
+                }
+                out.push_str("```\n\n");
+            }
+            Err(_) => continue,
+        }
+    }
+    out
+}
+
+/// Answer a natural-language question about the codebase: seed a context pack
+/// from the question, assemble an Anthropic Messages request, and call the API
+/// via the system `curl` (no bundled TLS stack). `--dry-run` prints the request
+/// without sending it.
+fn run_ask(opts: AskOptions) -> io::Result<()> {
+    let root = match &opts.path {
+        Some(p) => p.clone(),
+        None => env::current_dir()?,
+    };
+    let graph = build_project_graph(&root)?;
+    let pack = kestrel_core::build_context_pack_for_query(&graph, &opts.question, opts.budget);
+
+    if pack.entries.is_empty() {
+        eprintln!(
+            "No relevant files matched \"{}\" — answering without codebase context.",
+            opts.question
+        );
+    }
+
+    let context = assemble_context(&graph, &pack);
+    let user_content = format!(
+        "Here is relevant context from the codebase:\n\n{context}\n---\n\nQuestion: {}\n\n\
+         Answer using the context above and cite the file paths you rely on. If the context does \
+         not contain enough information to answer, say so explicitly rather than guessing.",
+        opts.question
+    );
+    let system = "You are Kestrel, a precise coding assistant. Answer questions about the user's \
+         codebase using the provided file excerpts. Be concise, concrete, and cite file paths. If \
+         the provided context does not contain the answer, say so rather than guessing.";
+
+    let body = serde_json::json!({
+        "model": opts.model,
+        "max_tokens": opts.max_tokens,
+        "system": system,
+        "messages": [{ "role": "user", "content": user_content }],
+    });
+    let body_str = serde_json::to_string(&body).unwrap_or_default();
+
+    eprintln!(
+        "Kestrel ask — model {}, {} context files (~{} tokens), seed: {}",
+        opts.model,
+        pack.entries.len(),
+        pack.used_tokens,
+        pack.seed
+    );
+
+    if opts.dry_run {
+        println!("{body_str}");
+        return Ok(());
+    }
+
+    let api_key = env::var("ANTHROPIC_API_KEY").ok().filter(|k| !k.is_empty());
+    let Some(api_key) = api_key else {
+        eprintln!(
+            "ANTHROPIC_API_KEY is not set — printing the assembled prompt instead of calling the API."
+        );
+        eprintln!(
+            "(Set ANTHROPIC_API_KEY to get an answer, or use --dry-run for the raw request.)"
+        );
+        println!("{user_content}");
+        return Ok(());
+    };
+
+    // Send the body from a temp file so large context and quoting are safe.
+    let tmp = env::temp_dir().join(format!("kestrel-ask-{}.json", std::process::id()));
+    std::fs::write(&tmp, &body_str)?;
+    let result = std::process::Command::new("curl")
+        .args([
+            "-sS",
+            "https://api.anthropic.com/v1/messages",
+            "-H",
+            "content-type: application/json",
+            "-H",
+            "anthropic-version: 2023-06-01",
+            "-H",
+            &format!("x-api-key: {api_key}"),
+            "-d",
+            &format!("@{}", tmp.display()),
+        ])
+        .output();
+    let _ = std::fs::remove_file(&tmp);
+
+    let output = result?;
+    if !output.status.success() {
+        eprintln!(
+            "curl request failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        std::process::exit(1);
+    }
+
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "unexpected response (not JSON): {e}\n{}",
+                String::from_utf8_lossy(&output.stdout)
+            ),
+        )
+    })?;
+
+    if response.get("type").and_then(|t| t.as_str()) == Some("error") {
+        let message = response
+            .pointer("/error/message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("unknown error");
+        eprintln!("API error: {message}");
+        std::process::exit(1);
+    }
+
+    let mut answer = String::new();
+    if let Some(blocks) = response.get("content").and_then(|c| c.as_array()) {
+        for block in blocks {
+            if block.get("type").and_then(|t| t.as_str()) == Some("text") {
+                if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                    answer.push_str(text);
+                }
+            }
+        }
+    }
+
+    let stop = response
+        .get("stop_reason")
+        .and_then(|s| s.as_str())
+        .unwrap_or("");
+    if stop == "refusal" {
+        eprintln!("(The model declined to answer this request.)");
+    }
+    println!("{}", answer.trim());
+    if stop == "max_tokens" {
+        eprintln!("\n(Answer truncated at max_tokens; raise it with --max-tokens.)");
+    }
+    if let Some(usage) = response.get("usage") {
+        let input = usage
+            .get("input_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let output = usage
+            .get("output_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        eprintln!("\n[tokens: {input} in / {output} out]");
     }
 
     Ok(())
