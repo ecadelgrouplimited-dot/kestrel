@@ -50,12 +50,21 @@ enum JobOutcome {
 
 /// A live update streamed from a running agent loop.
 enum AgentUpdate {
-    /// A transcript line (assistant narration or a tool call).
+    /// A transcript line (assistant narration or a read-only tool call).
     Line(String),
+    /// A file the agent wrote, with its full contents for live preview.
+    Wrote { path: String, contents: String },
     /// The agent finished with a final summary.
     Done(String),
     /// The agent failed.
     Failed(String),
+}
+
+/// A file produced during an agent run, kept for the created-files history and
+/// its live preview.
+struct AgentFile {
+    path: String,
+    contents: String,
 }
 
 #[derive(PartialEq, Eq)]
@@ -134,6 +143,10 @@ struct KestrelApp {
     chat_error: String,
     chat_job: Option<Receiver<Result<String, String>>>,
     agent_job: Option<Receiver<AgentUpdate>>,
+    /// Files the current/last agent run produced, in creation order.
+    agent_files: Vec<AgentFile>,
+    /// Index into `agent_files` currently shown in the build preview.
+    agent_preview: Option<usize>,
 }
 
 impl Default for KestrelApp {
@@ -185,6 +198,8 @@ impl Default for KestrelApp {
             chat_error: String::new(),
             chat_job: None,
             agent_job: None,
+            agent_files: Vec::new(),
+            agent_preview: None,
         }
     }
 }
@@ -266,12 +281,23 @@ impl KestrelApp {
             };
             match message {
                 Ok(AgentUpdate::Line(line)) => {
-                    if let Some(rel) = line.strip_prefix("↪ write_file(") {
-                        last_written = Some(self.project_path().join(rel.trim_end_matches(')')));
-                        refresh = true;
-                    }
                     self.chat_history
                         .push(kestrel_core::ChatMessage::assistant(line));
+                    ctx.request_repaint();
+                }
+                Ok(AgentUpdate::Wrote { path, contents }) => {
+                    if let Some(idx) = self.agent_files.iter().position(|f| f.path == path) {
+                        self.agent_files[idx].contents = contents;
+                        self.agent_preview = Some(idx);
+                    } else {
+                        self.agent_files.push(AgentFile {
+                            path: path.clone(),
+                            contents,
+                        });
+                        self.agent_preview = Some(self.agent_files.len() - 1);
+                    }
+                    last_written = Some(self.project_path().join(&path));
+                    refresh = true;
                     ctx.request_repaint();
                 }
                 Ok(AgentUpdate::Done(summary)) => {
@@ -463,10 +489,18 @@ impl eframe::App for KestrelApp {
             // Keep the explorer visible so files created by the agent appear live.
             egui::SidePanel::left("files")
                 .resizable(true)
-                .default_width(280.0)
+                .default_width(240.0)
                 .show(ctx, |ui| {
                     ui.add_space(4.0);
                     self.tree_ui(ui);
+                });
+            // A live preview of the files the agent is creating.
+            egui::SidePanel::right("build-preview")
+                .resizable(true)
+                .default_width(440.0)
+                .show(ctx, |ui| {
+                    ui.add_space(4.0);
+                    self.build_preview_ui(ui);
                 });
             egui::CentralPanel::default().show(ctx, |ui| {
                 egui::ScrollArea::vertical()
@@ -1064,6 +1098,86 @@ impl KestrelApp {
         }
     }
 
+    /// The build-preview panel: a live, clickable history of the files the
+    /// agent is creating, with a preview of the selected one.
+    fn build_preview_ui(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.strong(format!("Files created ({})", self.agent_files.len()));
+            if self.chat_pending {
+                ui.spinner();
+            }
+        });
+        ui.separator();
+        if self.agent_files.is_empty() {
+            ui.label(
+                egui::RichText::new(
+                    "Turn on Agent mode and Build. Every file the agent writes appears here \
+                     live — click one to preview exactly what it wrote.",
+                )
+                .weak(),
+            );
+            return;
+        }
+
+        let mut select: Option<usize> = None;
+        let mut open_in_editor: Option<String> = None;
+
+        egui::ScrollArea::vertical()
+            .id_source("agent-file-list")
+            .max_height(150.0)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for (i, file) in self.agent_files.iter().enumerate() {
+                    if ui
+                        .selectable_label(
+                            self.agent_preview == Some(i),
+                            format!("📄 {}", file.path),
+                        )
+                        .clicked()
+                    {
+                        select = Some(i);
+                    }
+                }
+            });
+
+        ui.separator();
+
+        if let Some(idx) = self.agent_preview {
+            if let Some(file) = self.agent_files.get(idx) {
+                ui.horizontal(|ui| {
+                    ui.strong(&file.path);
+                    ui.label(
+                        egui::RichText::new(format!("· {} lines", file.contents.lines().count()))
+                            .weak(),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Open in editor").clicked() {
+                            open_in_editor = Some(file.path.clone());
+                        }
+                    });
+                });
+                egui::ScrollArea::both()
+                    .id_source("agent-file-preview")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(&file.contents).monospace())
+                                .selectable(true),
+                        );
+                    });
+            }
+        }
+
+        if let Some(i) = select {
+            self.agent_preview = Some(i);
+        }
+        if let Some(path) = open_in_editor {
+            let full = self.project_path().join(path);
+            self.open_file(&full);
+            self.view = AppView::Main;
+        }
+    }
+
     /// Render the compose bar: provider status, controls, and the input.
     fn chat_compose_ui(&mut self, ui: &mut egui::Ui) {
         ui.add_space(4.0);
@@ -1098,6 +1212,8 @@ impl KestrelApp {
                     self.chat_history.clear();
                     self.chat_error.clear();
                     self.chat_input.clear();
+                    self.agent_files.clear();
+                    self.agent_preview = None;
                 }
                 if self.chat_pending && ui.button("Stop").clicked() {
                     self.chat_job = None;
@@ -1212,16 +1328,21 @@ impl KestrelApp {
         let config = provider.to_config();
         let model = provider.model.clone();
         let root = self.project_path();
+        self.agent_files.clear();
+        self.agent_preview = None;
 
         let (tx, rx) = std::sync::mpsc::channel();
         let events = tx.clone();
         std::thread::spawn(move || {
             let result = kestrel_core::run_agent(&config, &model, &prompt, &root, 100, |event| {
-                let line = match event {
-                    kestrel_core::AgentEvent::Assistant(text) => text,
-                    kestrel_core::AgentEvent::Tool(call) => format!("↪ {call}"),
+                let update = match event {
+                    kestrel_core::AgentEvent::Assistant(text) => AgentUpdate::Line(text),
+                    kestrel_core::AgentEvent::Tool(call) => AgentUpdate::Line(format!("↪ {call}")),
+                    kestrel_core::AgentEvent::Wrote { path, contents } => {
+                        AgentUpdate::Wrote { path, contents }
+                    }
                 };
-                let _ = events.send(AgentUpdate::Line(line));
+                let _ = events.send(update);
             });
             let _ = match result {
                 Ok(summary) => tx.send(AgentUpdate::Done(summary)),

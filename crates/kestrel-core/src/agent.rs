@@ -152,8 +152,11 @@ fn safe_join(root: &Path, rel: &str) -> Result<PathBuf, String> {
 pub enum AgentEvent {
     /// The model's own narration for a turn.
     Assistant(String),
-    /// A tool the agent invoked (human-readable one-liner).
+    /// A read-only tool the agent invoked (human-readable one-liner).
     Tool(String),
+    /// A file was written to the project, with its full contents for live
+    /// preview in the UI.
+    Wrote { path: String, contents: String },
 }
 
 /// The system prompt for the tool-using agent loop.
@@ -374,8 +377,26 @@ pub fn run_agent(
         });
         let mut results = Vec::new();
         for call in &turn.calls {
-            on_event(AgentEvent::Tool(describe_call(call)));
-            let content = execute_tool(root, call);
+            let content = if call.name == "write_file" {
+                let path = call
+                    .input
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let contents = call
+                    .input
+                    .get("contents")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let out = execute_tool(root, call);
+                on_event(AgentEvent::Wrote { path, contents });
+                out
+            } else {
+                on_event(AgentEvent::Tool(describe_call(call)));
+                execute_tool(root, call)
+            };
             results.push(ToolResult {
                 id: call.id.clone(),
                 name: call.name.clone(),

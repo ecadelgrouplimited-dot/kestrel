@@ -33,7 +33,9 @@ cargo run -p kestrel-ui
   - `http_get` — fetch an http(s) URL (an API response, or a raw GitHub file like `https://raw.githubusercontent.com/owner/repo/branch/path`)
   - `write_file` — create/overwrite a file **inside the project** (paths that are absolute or escape via `..` are refused)
 
-  So you can point it at a spec file (`read the prompt in src/prompt.md and build it`), pull a template from GitHub, or scaffold a site from scratch — and the files land in your project as it works, with the explorer refreshing when it finishes. Reads and URL fetches are unrestricted (native, on your machine); writes are sandboxed to the project root for safety.
+  So you can point it at a spec file (`read the prompt in src/prompt.md and build it`), pull a template from GitHub, or scaffold a site from scratch — and the files land in your project as it works. Reads and URL fetches are unrestricted (native, on your machine); writes are sandboxed to the project root for safety.
+
+  While it runs, the Chat view shows a **live build panel**: the file explorer on the left fills up in real time, and a right-hand pane keeps a **history of every file created**, auto-previewing each one the instant it's written. Click any file in that history to see exactly what the agent wrote, or **Open in editor** to keep working on it. The transcript alongside shows the agent's narration and its `read_file`/`http_get` steps — so you see precisely what it's doing, not a generic "thinking" spinner.
 - **Never freezes** — slow work (verification, indexing, model calls) runs on a background thread; the window stays responsive.
 
 It calls `kestrel-core` directly (no subprocess, no web view). The CLI still hosts the scriptable model actions (`ask`/`edit`) with diff review and verification; the desktop Chat is the interactive counterpart.
