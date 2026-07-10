@@ -9,8 +9,9 @@
 //! and verifies iteratively is the next step up from here.)
 
 use crate::providers::{
-    run_turn, AgentMessage, ProviderConfig, ToolCall, ToolResult, ToolSpec, TurnResult,
+    run_turn, AgentMessage, ChatMessage, ProviderConfig, ToolCall, ToolResult, ToolSpec, TurnResult,
 };
+use serde::{Deserialize, Serialize};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -21,6 +22,12 @@ const TOOL_OUTPUT_CAP: usize = 60_000;
 
 /// How long a single `run_command` may run before it is killed.
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(240);
+
+/// When the conversation exceeds this many bytes it is compacted, so long
+/// sessions and refinements stay affordable in tokens.
+const HISTORY_SOFT_LIMIT: usize = 400_000;
+/// The size compaction trims the conversation back down to.
+const HISTORY_TARGET: usize = 180_000;
 
 /// The line that opens a file block: `<<<FILE relative/path>>>`.
 pub const FILE_MARKER: &str = "<<<FILE ";
@@ -178,6 +185,9 @@ pub fn agent_loop_system_prompt(root: &Path) -> String {
            path:line matches) — use it to understand an existing codebase before changing it.\n\
          - write_file(path, contents): create or overwrite a file inside the project (relative \
            path; `..` and absolute paths are refused).\n\
+         - edit_file(path, old, new): replace the exact snippet `old` with `new` in an existing \
+           file (`old` must occur exactly once). Prefer this for small changes — it is far more \
+           token-efficient than rewriting a whole file.\n\
          - run_command(command): run a shell command in the project root (e.g. `npm install`, \
            `npm run build`, `npx tsc --noEmit`, `cargo test`) and read its output and exit code.\n\
          - git(args): run a git command in the project (clone, status, diff, add, commit, log) \
@@ -188,7 +198,9 @@ pub fn agent_loop_system_prompt(root: &Path) -> String {
          snippets). Prefer fewer, complete, runnable files.\n\n\
          Work efficiently: you can call write_file MANY TIMES IN A SINGLE TURN — batch several \
          files together per turn rather than one file per message, so the whole project is \
-         created in as few turns as possible. Keep narration to one short line per turn.\n\n\
+         created in as few turns as possible. Keep narration to one short line per turn. When \
+         CHANGING an existing file, use edit_file to replace just the relevant snippet rather \
+         than rewriting the whole file.\n\n\
          VERIFY YOUR WORK: after writing or changing code, actually check it — run the build or \
          type-checker with run_command (or call verify). If it fails, READ the errors, fix the \
          offending files, and run it again. Iterate until it passes or you have made a genuine \
@@ -248,6 +260,22 @@ pub fn builtin_tools() -> Vec<ToolSpec> {
                     "contents": { "type": "string" },
                 },
                 "required": ["path", "contents"],
+            }),
+        },
+        ToolSpec {
+            name: "edit_file".to_string(),
+            description: "Make a targeted edit to an existing file: replace the exact text `old` \
+                          with `new`. `old` must appear EXACTLY ONCE. Use this for small changes \
+                          instead of rewriting the whole file — it saves tokens."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "old": { "type": "string" },
+                    "new": { "type": "string" },
+                },
+                "required": ["path", "old", "new"],
             }),
         },
         ToolSpec {
@@ -314,6 +342,7 @@ pub fn describe_call(call: &ToolCall) -> String {
         "http_get" => format!("http_get({})", arg("url")),
         "search" => format!("search({})", arg("query")),
         "write_file" => format!("write_file({})", arg("path")),
+        "edit_file" => format!("edit_file({})", arg("path")),
         "run_command" => format!("run_command: {}", arg("command")),
         "git" => format!("git {}", arg("args")),
         "verify" => "verify()".to_string(),
@@ -403,7 +432,37 @@ pub fn execute_tool(root: &Path, call: &ToolCall) -> String {
             }
             Err(err) => format!("error: {err}"),
         },
+        "edit_file" => match safe_join(root, &arg("path")) {
+            Ok(full) => edit_file(&full, &arg("old"), &arg("new")),
+            Err(err) => format!("error: {err}"),
+        },
         other => format!("error: unknown tool {other}"),
+    }
+}
+
+/// Replace the unique occurrence of `old` with `new` in a file. Fails if `old`
+/// is empty, missing, or appears more than once (so an edit is never ambiguous).
+fn edit_file(path: &Path, old: &str, new: &str) -> String {
+    if old.is_empty() {
+        return "error: `old` text is empty".to_string();
+    }
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(err) => return format!("error: {err}"),
+    };
+    match text.matches(old).count() {
+        0 => format!("error: `old` text was not found in {}", path.display()),
+        1 => {
+            let updated = text.replacen(old, new, 1);
+            match std::fs::write(path, updated) {
+                Ok(()) => format!("edited {}", path.display()),
+                Err(err) => format!("error: {err}"),
+            }
+        }
+        n => format!(
+            "error: `old` text appears {n} times in {}; include more context so it is unique",
+            path.display()
+        ),
     }
 }
 
@@ -706,6 +765,105 @@ pub struct AgentOutcome {
     pub history: Vec<AgentMessage>,
 }
 
+/// A project's saved agent state: the tool-using conversation (so a follow-up
+/// resumes it) and the chat transcript (so the UI restores what was said). Kept
+/// per-project under `.kestrel/agent-session.json` so reopening a project days
+/// later picks up exactly where it left off.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct AgentSession {
+    #[serde(default)]
+    pub messages: Vec<AgentMessage>,
+    #[serde(default)]
+    pub transcript: Vec<ChatMessage>,
+}
+
+/// The path to a project's saved agent session.
+pub fn agent_session_path(root: &Path) -> PathBuf {
+    root.join(".kestrel").join("agent-session.json")
+}
+
+/// Load a project's saved agent session, or a default (empty) one if absent.
+pub fn load_agent_session(root: &Path) -> AgentSession {
+    match std::fs::read_to_string(agent_session_path(root)) {
+        Ok(text) => serde_json::from_str(&text).unwrap_or_default(),
+        Err(_) => AgentSession::default(),
+    }
+}
+
+/// Persist a project's agent session under its `.kestrel/` directory.
+pub fn save_agent_session(root: &Path, session: &AgentSession) -> std::io::Result<()> {
+    let path = agent_session_path(root);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let text = serde_json::to_string(session)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    std::fs::write(path, text)
+}
+
+/// The approximate byte size of one conversation message.
+fn message_bytes(message: &AgentMessage) -> usize {
+    match message {
+        AgentMessage::User(text) => text.len(),
+        AgentMessage::Assistant { text, calls } => {
+            text.len()
+                + calls
+                    .iter()
+                    .map(|c| c.name.len() + c.input.to_string().len())
+                    .sum::<usize>()
+        }
+        AgentMessage::ToolResults(results) => results.iter().map(|r| r.content.len()).sum(),
+    }
+}
+
+fn history_bytes(history: &[AgentMessage]) -> usize {
+    history.iter().map(message_bytes).sum()
+}
+
+/// Compact a conversation to roughly `target` bytes by dropping the *middle*
+/// while keeping the first message (the original request) and the most recent
+/// turns. Cuts only on whole "rounds" (an assistant tool-call message plus its
+/// tool results stay together) so the tool_use/tool_result pairing the APIs
+/// require is never broken. The project files on disk remain the source of
+/// truth, so the agent can always re-read what it forgot.
+fn compact_history(history: Vec<AgentMessage>, target: usize) -> Vec<AgentMessage> {
+    // Group into rounds: an assistant-with-calls message pairs with the
+    // following tool-results message; everything else is its own round.
+    let mut rounds: Vec<Vec<AgentMessage>> = Vec::new();
+    let mut it = history.into_iter().peekable();
+    while let Some(message) = it.next() {
+        let has_calls =
+            matches!(&message, AgentMessage::Assistant { calls, .. } if !calls.is_empty());
+        let mut round = vec![message];
+        if has_calls && matches!(it.peek(), Some(AgentMessage::ToolResults(_))) {
+            round.push(it.next().unwrap());
+        }
+        rounds.push(round);
+    }
+    if rounds.is_empty() {
+        return Vec::new();
+    }
+
+    let first = rounds.remove(0);
+    let mut total: usize = first.iter().map(message_bytes).sum();
+    let mut kept_recent: Vec<Vec<AgentMessage>> = Vec::new();
+    for round in rounds.into_iter().rev() {
+        let size: usize = round.iter().map(message_bytes).sum();
+        if total + size > target && !kept_recent.is_empty() {
+            break;
+        }
+        total += size;
+        kept_recent.push(round);
+    }
+    kept_recent.reverse();
+
+    let mut out = first;
+    for round in kept_recent {
+        out.extend(round);
+    }
+    out
+}
+
 /// The review instruction injected once the agent first thinks it is done.
 fn review_prompt(request: &str) -> String {
     format!(
@@ -743,6 +901,11 @@ pub fn run_agent(
     let mut reviewed = !review;
 
     for _ in 0..max_steps {
+        // Keep the conversation affordable: drop the middle of a long history
+        // before sending it, preserving the request and the recent turns.
+        if history_bytes(&history) > HISTORY_SOFT_LIMIT {
+            history = compact_history(std::mem::take(&mut history), HISTORY_TARGET);
+        }
         let turn: TurnResult = match run_turn(config, model, 8192, Some(&system), &history, &tools)
         {
             Ok(Ok(turn)) => turn,
@@ -793,20 +956,20 @@ pub fn run_agent(
         });
         let mut results = Vec::new();
         for call in &turn.calls {
-            let content = if call.name == "write_file" {
+            let content = if call.name == "write_file" || call.name == "edit_file" {
                 let path = call
                     .input
                     .get("path")
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                let contents = call
-                    .input
-                    .get("contents")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
                 let out = execute_tool(root, call);
+                // Reflect the file as it now is on disk in the live preview
+                // (write_file and edit_file both change it).
+                let contents = safe_join(root, &path)
+                    .ok()
+                    .and_then(|p| std::fs::read_to_string(p).ok())
+                    .unwrap_or_default();
                 on_event(AgentEvent::Wrote { path, contents });
                 out
             } else {
@@ -945,6 +1108,83 @@ mod tests {
         };
         let out = execute_tool(&dir, &call);
         assert!(out.to_lowercase().contains("no verification"), "got: {out}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn edit_file_replaces_unique_text_and_rejects_ambiguity() {
+        let dir = std::env::temp_dir().join(format!("kestrel-edit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "hello world").unwrap();
+
+        let ok = execute_tool(
+            &dir,
+            &ToolCall {
+                id: "1".to_string(),
+                name: "edit_file".to_string(),
+                input: serde_json::json!({"path": "a.txt", "old": "world", "new": "kestrel"}),
+            },
+        );
+        assert!(ok.starts_with("edited"), "got: {ok}");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("a.txt")).unwrap(),
+            "hello kestrel"
+        );
+
+        std::fs::write(dir.join("b.txt"), "x x x").unwrap();
+        let ambiguous = execute_tool(
+            &dir,
+            &ToolCall {
+                id: "2".to_string(),
+                name: "edit_file".to_string(),
+                input: serde_json::json!({"path": "b.txt", "old": "x", "new": "y"}),
+            },
+        );
+        assert!(ambiguous.contains("appears 3 times"), "got: {ambiguous}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn compaction_keeps_first_and_recent_and_shrinks() {
+        let mut history = vec![AgentMessage::User("original request".to_string())];
+        for i in 0..40 {
+            history.push(AgentMessage::Assistant {
+                text: format!("turn {i}"),
+                calls: vec![ToolCall {
+                    id: i.to_string(),
+                    name: "write_file".to_string(),
+                    input: serde_json::json!({ "path": format!("f{i}"), "contents": "x".repeat(20_000) }),
+                }],
+            });
+            history.push(AgentMessage::ToolResults(vec![ToolResult {
+                id: i.to_string(),
+                name: "write_file".to_string(),
+                content: "wrote".to_string(),
+            }]));
+        }
+        let before = history_bytes(&history);
+        let compact = compact_history(history, 100_000);
+        let after = history_bytes(&compact);
+        assert!(after < before);
+        assert!(after <= 130_000, "after was {after}");
+        assert!(
+            matches!(&compact[0], AgentMessage::User(s) if s == "original request"),
+            "first message must be the original request"
+        );
+    }
+
+    #[test]
+    fn agent_session_round_trips() {
+        let dir = std::env::temp_dir().join(format!("kestrel-session-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let session = AgentSession {
+            messages: vec![AgentMessage::User("build it".to_string())],
+            transcript: vec![ChatMessage::user("build it")],
+        };
+        save_agent_session(&dir, &session).unwrap();
+        let loaded = load_agent_session(&dir);
+        assert_eq!(loaded.messages.len(), 1);
+        assert_eq!(loaded.transcript.len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

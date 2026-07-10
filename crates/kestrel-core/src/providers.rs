@@ -25,7 +25,7 @@ pub enum ProviderKind {
 }
 
 /// One message in a chat request.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
@@ -228,7 +228,7 @@ pub struct ToolSpec {
 }
 
 /// A tool invocation requested by the model.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: String,
     pub name: String,
@@ -236,7 +236,7 @@ pub struct ToolCall {
 }
 
 /// The result of running a tool, to feed back to the model.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResult {
     pub id: String,
     pub name: String,
@@ -244,7 +244,7 @@ pub struct ToolResult {
 }
 
 /// One message in an agent conversation (richer than [`ChatMessage`]).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AgentMessage {
     User(String),
     Assistant { text: String, calls: Vec<ToolCall> },

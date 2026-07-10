@@ -322,6 +322,7 @@ impl KestrelApp {
                     self.chat_pending = false;
                     self.agent_job = None;
                     self.status = "Agent finished.".to_string();
+                    self.save_session();
                     refresh = true;
                     break;
                 }
@@ -330,6 +331,7 @@ impl KestrelApp {
                     self.agent_messages = history;
                     self.chat_pending = false;
                     self.agent_job = None;
+                    self.save_session();
                     // Show whatever the agent managed to write before stopping.
                     refresh = true;
                     break;
@@ -578,13 +580,31 @@ impl KestrelApp {
     }
 
     /// Make `path` the active project: record it, remember it in the recent
-    /// list (persisted), return to the main view, and load its file tree.
+    /// list (persisted), restore its saved agent session, return to the main
+    /// view, and load its file tree.
     fn open_project_path(&mut self, path: PathBuf) {
         self.path = path.display().to_string();
         kestrel_core::push_recent(&mut self.settings.recent_projects, &path);
         let _ = kestrel_core::save_settings(&self.settings);
+        // Resume this project's agent conversation and transcript, if any.
+        let session = kestrel_core::load_agent_session(&path);
+        self.agent_messages = session.messages;
+        self.chat_history = session.transcript;
+        self.agent_files.clear();
+        self.agent_preview = None;
+        self.chat_error.clear();
         self.view = AppView::Main;
         self.reload_tree();
+    }
+
+    /// Persist the current project's agent conversation and transcript so
+    /// reopening it resumes where this left off.
+    fn save_session(&self) {
+        let session = kestrel_core::AgentSession {
+            messages: self.agent_messages.clone(),
+            transcript: self.chat_history.clone(),
+        };
+        let _ = kestrel_core::save_agent_session(&self.project_path(), &session);
     }
 
     /// (Re)load the current project's directory tree on a worker thread.
@@ -1253,6 +1273,7 @@ impl KestrelApp {
                     self.agent_files.clear();
                     self.agent_preview = None;
                     self.agent_messages.clear();
+                    self.save_session();
                 }
                 if self.chat_pending && ui.button("Stop").clicked() {
                     self.chat_job = None;

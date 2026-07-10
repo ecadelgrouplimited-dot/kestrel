@@ -35,6 +35,7 @@ cargo run -p kestrel-ui
   - `search` — grep the project's text files for a string, returning `path:line` matches (so it can understand an existing codebase before changing it)
   - `git` — run git in the project (`clone <url> .`, `status`, `diff`, `add -A`, `commit -m …`, `log`), with a fallback commit identity
   - `write_file` — create/overwrite a file **inside the project** (paths that are absolute or escape via `..` are refused)
+  - `edit_file` — replace an exact snippet in an existing file (a diff-style edit, far cheaper in tokens than rewriting the whole file); the agent is told to prefer it for changes
   - `run_command` — run a shell command in the project root (`npm install`, `npm run build`, `npx tsc --noEmit`, `cargo test`, …), capturing stdout/stderr and the exit code; killed after a few minutes
   - `verify` — run the project's detected build/test ladder and report pass/fail
 
@@ -42,7 +43,7 @@ cargo run -p kestrel-ui
 
   **Self-critique:** once it first believes it's done, the agent runs a review pass — it re-reads its own changes (`git diff`, `read_file`, `search`), checks them against your original request, builds again, and fixes anything it finds (bugs, missing requirements, broken imports, damage to unrelated code) before finishing.
 
-  **Conversation memory:** a build keeps its conversation, so a **follow-up prompt refines the same project** rather than starting over — "make the hero full-bleed and add a projects filter" picks up exactly where the last build left off. Press **New chat** to start a fresh project context.
+  **Conversation memory & token economy:** a build keeps its conversation, so a **follow-up prompt refines the same project** rather than starting over — "make the hero full-bleed and add a projects filter" picks up exactly where the last build left off. Two things keep this affordable: the agent uses **`edit_file`** (a snippet-level diff) for changes instead of rewriting whole files, and long conversations are **automatically compacted** — the original request and recent turns are kept while the middle is dropped (the files on disk remain the source of truth, so nothing is really lost). The whole session is **persisted per-project** in `.kestrel/agent-session.json`, so you can close Kestrel, reopen the project days later, and the agent resumes exactly where it was. Press **New chat** to start a fresh context.
 
   So you can point it at a spec file (`read the prompt in src/prompt.md and build it`), pull a template from GitHub, or scaffold a site from scratch — and the files land in your project as it works. Reads and URL fetches are unrestricted (native, on your machine); writes are sandboxed to the project root for safety.
 
