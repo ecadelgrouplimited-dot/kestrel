@@ -15,13 +15,17 @@ This repository currently starts with the Phase 0 foundation from the product ro
 
 ## Native desktop app
 
-Kestrel also ships a native, all-Rust desktop shell. Point it at a project and run the local, instant capabilities — inspect, symbols, dependency graph, and query-seeded context packs — with results in a scrollable pane:
+Kestrel also ships a native, all-Rust desktop shell:
 
 ```powershell
 cargo run -p kestrel-ui
 ```
 
-It calls `kestrel-core` directly (no subprocess), so it's a single native window with no web view. Model-backed actions (`ask`/`edit`) and verification currently live in the CLI.
+- **File-tree navigator** — press Open to load the project's source files; click a file to see its symbols.
+- **Action bar** — Inspect, Graph, a Context query box, plus **Verify** (runs the project's verification ladder) and **Env** (host shells/toolchains/WSL/Docker).
+- **Never freezes** — slow work (verification, indexing) runs on a background thread; the window stays responsive.
+
+It calls `kestrel-core` directly (no subprocess, no web view). Model-backed actions (`ask`/`edit`) currently live in the CLI.
 
 ## Commands
 
@@ -103,6 +107,14 @@ cargo run -p kestrel-cli -- edit src\service.ts "add a null check" --apply --ver
 ```
 
 That is the full Era-2 loop: the human directs, the agent produces a concrete change, verification proves it, and a failing change is automatically undone.
+
+Add **`--repair[=N]`** to make the change *self-heal*: if verification fails, Kestrel feeds the failing step's output back to the model to fix the file, re-applies, and re-verifies — up to `N` attempts (default 2). `--repair` implies `--apply --verify`.
+
+```powershell
+cargo run -p kestrel-cli -- edit src\parser.rs "handle the empty-input case" --repair=3 --revert-on-fail
+```
+
+This is the "Shadow Build" self-healing loop from the docs: propose → verify → on failure, repair against the real error output → re-verify, bounded by an attempt limit, reverting if it never passes.
 
 Show the **host environment** Kestrel can build and run against — OS, shells, WSL/Docker availability, and installed language toolchains with versions (each probed by actually invoking the tool):
 

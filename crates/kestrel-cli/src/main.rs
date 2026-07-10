@@ -60,7 +60,7 @@ fn main() -> io::Result<()> {
         "edit" => {
             let rest: Vec<String> = args.collect();
             let Some(opts) = parse_edit_args(&rest) else {
-                eprintln!("Usage: kestrel edit <file> \"<instruction>\" [--apply] [--verify] [--revert-on-fail] [--model NAME] [--budget N] [--max-tokens N] [--dry-run]");
+                eprintln!("Usage: kestrel edit <file> \"<instruction>\" [--apply] [--verify] [--repair[=N]] [--revert-on-fail] [--model NAME] [--budget N] [--max-tokens N] [--dry-run]");
                 std::process::exit(2);
             };
             run_edit(opts)?;
@@ -112,8 +112,10 @@ fn print_usage() {
     println!("                            Build a context pack from a natural-language query");
     println!("  kestrel ask \"<question>\" [path] [--model NAME] [--dry-run]");
     println!("                            Answer a question about the codebase using a model");
-    println!("  kestrel edit <file> \"<instruction>\" [--apply] [--verify] [--model NAME]");
-    println!("                            Propose a reviewed diff for a file (write with --apply)");
+    println!("  kestrel edit <file> \"<instruction>\" [--apply] [--verify] [--repair[=N]]");
+    println!(
+        "                            Propose a reviewed diff; verify and self-heal on --repair"
+    );
     println!("  kestrel verify [path]     Run the project's format/test/build ladder");
     println!("  kestrel env               Show the host environment (shells, WSL, toolchains)");
     println!("  kestrel run \"<command>\" [path] [--shell ...]");
@@ -1069,6 +1071,8 @@ struct EditOptions {
     dry_run: bool,
     verify: bool,
     revert_on_fail: bool,
+    /// Max self-repair attempts after a failed verification (0 = disabled).
+    repair: usize,
 }
 
 /// Parse `edit` arguments: `<file>` and `<instruction>` (positional), plus
@@ -1083,6 +1087,7 @@ fn parse_edit_args(args: &[String]) -> Option<EditOptions> {
     let mut dry_run = false;
     let mut verify = false;
     let mut revert_on_fail = false;
+    let mut repair = 0usize;
     let mut i = 0;
     while i < args.len() {
         let arg = &args[i];
@@ -1115,6 +1120,14 @@ fn parse_edit_args(args: &[String]) -> Option<EditOptions> {
                 revert_on_fail = true;
                 i += 1;
             }
+            "--repair" => {
+                repair = 2;
+                i += 1;
+            }
+            other if other.starts_with("--repair=") => {
+                repair = other["--repair=".len()..].parse().unwrap_or(2);
+                i += 1;
+            }
             _ => {
                 if file.is_none() {
                     file = Some(PathBuf::from(arg));
@@ -1124,6 +1137,11 @@ fn parse_edit_args(args: &[String]) -> Option<EditOptions> {
                 i += 1;
             }
         }
+    }
+    // Repairing only makes sense after applying and verifying.
+    if repair > 0 {
+        apply = true;
+        verify = true;
     }
     Some(EditOptions {
         file: file?,
@@ -1135,6 +1153,7 @@ fn parse_edit_args(args: &[String]) -> Option<EditOptions> {
         dry_run,
         verify,
         revert_on_fail,
+        repair,
     })
 }
 
@@ -1255,61 +1274,173 @@ fn run_edit(opts: EditOptions) -> io::Result<()> {
         }
         Some(diff) => {
             print!("{diff}");
+            print_usage_line(&response);
             if !opts.apply {
                 eprintln!("\nProposed diff shown above. Re-run with --apply to write the changes.");
             } else {
-                std::fs::write(&opts.file, &proposed)?;
-                eprintln!("\nApplied changes to {display_path}.");
-                print_usage_line(&response);
-                return verify_after_edit(&opts, &graph.root, &current, &display_path);
+                let ctx = RepairCtx {
+                    file: &opts.file,
+                    root: &graph.root,
+                    original: &current,
+                    display_path: &display_path,
+                    instruction: &opts.instruction,
+                    fence,
+                    system,
+                    model: &model,
+                    max_tokens,
+                    api_key: &api_key,
+                    verify: opts.verify,
+                    repair: opts.repair,
+                    revert_on_fail: opts.revert_on_fail,
+                };
+                return apply_and_verify(&ctx, &proposed);
             }
         }
     }
-    print_usage_line(&response);
 
     Ok(())
 }
 
-/// After an applied edit, optionally run the verification ladder and, on
-/// failure, revert the file when `--revert-on-fail` is set.
-fn verify_after_edit(
-    opts: &EditOptions,
-    root: &Path,
-    original: &str,
-    display_path: &str,
-) -> io::Result<()> {
-    if !opts.verify {
-        return Ok(());
-    }
+/// Everything the apply → verify → repair loop needs.
+struct RepairCtx<'a> {
+    file: &'a Path,
+    root: &'a Path,
+    original: &'a str,
+    display_path: &'a str,
+    instruction: &'a str,
+    fence: &'a str,
+    system: &'a str,
+    model: &'a str,
+    max_tokens: u64,
+    api_key: &'a str,
+    verify: bool,
+    repair: usize,
+    revert_on_fail: bool,
+}
+
+/// Detect a project's verification ladder (config override or auto-detected),
+/// returning the working directory and the steps.
+fn detect_verification(root: &Path) -> io::Result<(PathBuf, Vec<VerifyStep>)> {
     let inspection = inspect_project(root)?;
-    let configured = load_config(root).config().verify.steps;
+    let configured = load_config(&inspection.project_root).config().verify.steps;
     let steps = if configured.is_empty() {
         plan_verification(&inspection.markers)
     } else {
         steps_from_commands(&configured)
     };
+    Ok((inspection.project_root, steps))
+}
+
+/// Write the proposed edit, verify it, and — when `--repair N` is set — feed a
+/// failing verification back to the model to self-heal, up to N attempts.
+fn apply_and_verify(ctx: &RepairCtx, proposed: &str) -> io::Result<()> {
+    std::fs::write(ctx.file, proposed)?;
+    eprintln!("\nApplied changes to {}.", ctx.display_path);
+    if !ctx.verify {
+        return Ok(());
+    }
+
+    let (project_root, steps) = detect_verification(ctx.root)?;
     if steps.is_empty() {
-        eprintln!("No verification commands detected for this project — skipping verification.");
+        eprintln!("No verification commands detected — skipping verification.");
         return Ok(());
     }
 
-    eprintln!("\nVerifying the change...");
-    let report = run_verification(&inspection.project_root, &steps);
-    print_verification(&report);
+    let mut attempt = 0;
+    loop {
+        eprintln!("\nVerifying...");
+        let report = run_verification(&project_root, &steps);
+        print_verification(&report);
+        if report.passed {
+            eprintln!("Change applied and verified.");
+            return Ok(());
+        }
+        if attempt >= ctx.repair {
+            break;
+        }
+        attempt += 1;
+        eprintln!("\nRepair attempt {attempt}/{}…", ctx.repair);
 
-    if report.passed {
-        return Ok(());
+        let failing = std::fs::read_to_string(ctx.file)?;
+        let failing_step = report.steps.iter().find(|step| !step.success);
+        let repaired = match request_repair(ctx, &failing, failing_step)? {
+            Some(text) => text,
+            None => {
+                eprintln!("The model declined the repair.");
+                break;
+            }
+        };
+        if repaired == failing {
+            eprintln!("The model returned no change; stopping repair.");
+            break;
+        }
+        if let Some(diff) = render_unified_diff(&failing, &repaired, ctx.display_path) {
+            print!("{diff}");
+        }
+        std::fs::write(ctx.file, &repaired)?;
+        eprintln!("Applied repair attempt {attempt}.");
     }
-    if opts.revert_on_fail {
-        std::fs::write(&opts.file, original)?;
-        eprintln!("Verification failed — reverted {display_path} to its previous contents.");
+
+    if ctx.revert_on_fail {
+        std::fs::write(ctx.file, ctx.original)?;
+        eprintln!(
+            "Verification still failing — reverted {} to its previous contents.",
+            ctx.display_path
+        );
     } else {
         eprintln!(
-            "Verification failed. The change is still applied; revert it with your VCS, or use \
-             --revert-on-fail to auto-revert on failure."
+            "Verification still failing after {} repair attempt(s). The change is left in place; \
+             revert it with your VCS, or use --revert-on-fail.",
+            ctx.repair
         );
     }
     std::process::exit(1);
+}
+
+/// Ask the model to fix a file that failed verification, given the failing
+/// contents and the failing step's output. Returns `None` on a refusal.
+fn request_repair(
+    ctx: &RepairCtx,
+    failing: &str,
+    step: Option<&kestrel_core::StepResult>,
+) -> io::Result<Option<String>> {
+    let (label, command, output) = match step {
+        Some(step) => (
+            step.label.as_str(),
+            step.command.as_str(),
+            if step.stderr_tail.is_empty() {
+                step.stdout_tail.as_str()
+            } else {
+                step.stderr_tail.as_str()
+            },
+        ),
+        None => ("verification", "", ""),
+    };
+    let failing_fenced = if failing.ends_with('\n') {
+        failing.to_string()
+    } else {
+        format!("{failing}\n")
+    };
+    let user_content = format!(
+        "A file was edited with this instruction: {}\n\nAfter the edit, verification FAILED. Fix the \
+         file so it passes while still satisfying the instruction. Return the COMPLETE corrected \
+         contents of {} in a single fenced code block, and nothing else.\n\nTARGET FILE: {}\n\
+         ```{}\n{}```\n\nVERIFICATION FAILURE ({} — `{}`):\n{}\n",
+        ctx.instruction, ctx.display_path, ctx.display_path, ctx.fence, failing_fenced, label,
+        command, output
+    );
+    let body = serde_json::json!({
+        "model": ctx.model,
+        "max_tokens": ctx.max_tokens,
+        "system": ctx.system,
+        "messages": [{ "role": "user", "content": user_content }],
+    });
+    let response = send_anthropic(&body, ctx.api_key)?;
+    print_usage_line(&response);
+    if response.get("stop_reason").and_then(|s| s.as_str()) == Some("refusal") {
+        return Ok(None);
+    }
+    Ok(Some(extract_code_block(&response_text(&response))))
 }
 
 /// Run the detected verification ladder for a project and print the report.
