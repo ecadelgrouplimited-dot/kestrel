@@ -169,8 +169,12 @@ pub fn agent_loop_system_prompt(root: &Path) -> String {
            path; `..` and absolute paths are refused).\n\n\
          Work step by step: inspect what you need with read_file/list_dir/http_get, then create \
          the project by calling write_file for each file with its ENTIRE contents (never partial \
-         snippets). Prefer fewer, complete, runnable files. When you are finished, stop calling \
-         tools and reply with a short summary of what you did.\n\n\
+         snippets). Prefer fewer, complete, runnable files.\n\n\
+         Work efficiently: you can call write_file MANY TIMES IN A SINGLE TURN — batch several \
+         files together per turn rather than one file per message, so the whole project is \
+         created in as few turns as possible. Keep narration to one short line per turn.\n\n\
+         When you are finished, stop calling tools and reply with a short summary of what you \
+         did.\n\n\
          The current project root is: {}",
         root.display()
     )

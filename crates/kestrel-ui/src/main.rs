@@ -255,6 +255,10 @@ impl KestrelApp {
         if self.agent_job.is_none() {
             return;
         }
+        // Drain everything queued this frame, coalescing file writes into a
+        // single tree refresh so the explorer updates live but not wastefully.
+        let mut last_written: Option<PathBuf> = None;
+        let mut refresh = false;
         loop {
             let message = {
                 let rx = self.agent_job.as_ref().unwrap();
@@ -262,8 +266,13 @@ impl KestrelApp {
             };
             match message {
                 Ok(AgentUpdate::Line(line)) => {
+                    if let Some(rel) = line.strip_prefix("↪ write_file(") {
+                        last_written = Some(self.project_path().join(rel.trim_end_matches(')')));
+                        refresh = true;
+                    }
                     self.chat_history
                         .push(kestrel_core::ChatMessage::assistant(line));
+                    ctx.request_repaint();
                 }
                 Ok(AgentUpdate::Done(summary)) => {
                     if !summary.trim().is_empty() {
@@ -273,13 +282,15 @@ impl KestrelApp {
                     self.chat_pending = false;
                     self.agent_job = None;
                     self.status = "Agent finished.".to_string();
-                    self.reload_tree();
+                    refresh = true;
                     break;
                 }
                 Ok(AgentUpdate::Failed(err)) => {
                     self.chat_error = err;
                     self.chat_pending = false;
                     self.agent_job = None;
+                    // Show whatever the agent managed to write before stopping.
+                    refresh = true;
                     break;
                 }
                 Err(TryRecvError::Empty) => {
@@ -292,6 +303,30 @@ impl KestrelApp {
                     break;
                 }
             }
+        }
+
+        if refresh {
+            self.refresh_tree_now();
+        }
+        // If the agent just rewrote the file open in the editor, and it has no
+        // unsaved edits, reload it so the editor mirrors disk live.
+        if let Some(path) = last_written {
+            let clean = self.editor_text == self.editor_original;
+            if clean && self.editor_path.as_deref() == Some(path.as_path()) {
+                if let Ok(text) = kestrel_core::read_text_file(&path) {
+                    self.editor_text = text.clone();
+                    self.editor_original = text;
+                }
+            }
+        }
+    }
+
+    /// Rebuild the project tree synchronously (fast for typical projects), used
+    /// for live refreshes during an agent run without waiting on the job queue.
+    fn refresh_tree_now(&mut self) {
+        let path = self.project_path();
+        if let JobOutcome::Tree { root, .. } = load_tree(&path) {
+            self.tree = Some(root);
         }
     }
 }
@@ -425,6 +460,14 @@ impl eframe::App for KestrelApp {
             egui::TopBottomPanel::bottom("chat-compose").show(ctx, |ui| {
                 self.chat_compose_ui(ui);
             });
+            // Keep the explorer visible so files created by the agent appear live.
+            egui::SidePanel::left("files")
+                .resizable(true)
+                .default_width(280.0)
+                .show(ctx, |ui| {
+                    ui.add_space(4.0);
+                    self.tree_ui(ui);
+                });
             egui::CentralPanel::default().show(ctx, |ui| {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
@@ -1173,7 +1216,7 @@ impl KestrelApp {
         let (tx, rx) = std::sync::mpsc::channel();
         let events = tx.clone();
         std::thread::spawn(move || {
-            let result = kestrel_core::run_agent(&config, &model, &prompt, &root, 24, |event| {
+            let result = kestrel_core::run_agent(&config, &model, &prompt, &root, 100, |event| {
                 let line = match event {
                     kestrel_core::AgentEvent::Assistant(text) => text,
                     kestrel_core::AgentEvent::Tool(call) => format!("↪ {call}"),
