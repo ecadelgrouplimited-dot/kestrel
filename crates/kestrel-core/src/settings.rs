@@ -20,6 +20,9 @@ pub struct Settings {
     pub active_provider: Option<String>,
     /// Configured providers, keyed by a user-chosen name.
     pub providers: BTreeMap<String, ProviderSettings>,
+    /// Recently opened/created project paths, most recent first.
+    #[serde(default)]
+    pub recent_projects: Vec<String>,
 }
 
 /// Optional identifying details for the developer.
@@ -221,6 +224,7 @@ mod tests {
             },
             active_provider: Some("work".to_string()),
             providers: BTreeMap::new(),
+            recent_projects: vec!["E:/demo".to_string()],
         };
         let mut provider = provider_preset("deepseek").unwrap();
         provider.api_key = "sk-secret".to_string();
@@ -237,6 +241,7 @@ mod tests {
         assert_eq!(active.kind, ProviderKind::Openai);
         assert_eq!(active.api_key, "sk-secret");
         assert_eq!(active.model, "deepseek-v4-pro");
+        assert_eq!(loaded.recent_projects, vec!["E:/demo".to_string()]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -4,6 +4,7 @@ pub mod context;
 pub mod environment;
 pub mod graph;
 pub mod inspect;
+pub mod project;
 pub mod providers;
 pub mod settings;
 pub mod symbols;
@@ -21,6 +22,7 @@ pub use inspect::{
     inspect_project, project_symbols, CommandKind, CommandSuggestion, FileInventory,
     LanguageSummary, ProjectInspection, ProjectMarker, SymbolSummary,
 };
+pub use project::{create_project, push_recent, NewProject, MAX_RECENTS};
 pub use providers::{chat, ChatMessage, ChatRequest, ProviderConfig, ProviderKind};
 pub use settings::{
     load_settings, model_suggestions, model_suggestions_for, provider_preset, save_settings,

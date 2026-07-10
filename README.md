@@ -21,7 +21,8 @@ Kestrel also ships a native, all-Rust desktop shell:
 cargo run -p kestrel-ui
 ```
 
-- **File-tree navigator** — press Open to load the project's source files; click a file to see its symbols.
+- **Project management** — **Open…** picks an existing folder with a native dialog; **New…** scaffolds a fresh, Kestrel-ready project (a `src/` folder, a starter `kestrel.toml`, `README.md`, `.gitignore`, and `git init` when git is present); **Recent ▾** reopens a recently used project. The recent list is remembered in your per-user settings. **Load** opens whatever path is typed in the Project box.
+- **File-tree navigator** — the file tree loads automatically when you open a project; click a file to see its symbols.
 - **Action bar** — Inspect, Graph, a Context query box, plus **Verify** (runs the project's verification ladder) and **Env** (host shells/toolchains/WSL/Docker).
 - **Settings** (⚙, top-right) — your name/email and one or more **model providers**. Pick a preset (Anthropic, OpenAI, DeepSeek, or Kimi) to prefill its API kind, base URL, and a current default model, then paste your API key and choose which provider is active. Settings are written to your per-user config directory (`%APPDATA%\kestrel\settings.toml` on Windows), **never** into the project — because they hold secrets.
 - **Never freezes** — slow work (verification, indexing) runs on a background thread; the window stays responsive.

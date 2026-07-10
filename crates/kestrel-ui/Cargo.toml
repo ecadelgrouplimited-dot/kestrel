@@ -7,3 +7,4 @@ license.workspace = true
 [dependencies]
 kestrel-core = { path = "../kestrel-core" }
 eframe = "0.28"
+rfd = "0.14"

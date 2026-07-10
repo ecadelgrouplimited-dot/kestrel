@@ -60,6 +60,11 @@ struct KestrelApp {
     new_provider_name: String,
     new_provider_preset: String,
     settings_status: String,
+    // New-project modal state.
+    new_project_open: bool,
+    new_project_parent: String,
+    new_project_name: String,
+    new_project_status: String,
 }
 
 impl Default for KestrelApp {
@@ -93,6 +98,10 @@ impl Default for KestrelApp {
             new_provider_name: String::new(),
             new_provider_preset: "anthropic".to_string(),
             settings_status: String::new(),
+            new_project_open: false,
+            new_project_parent: String::new(),
+            new_project_name: String::new(),
+            new_project_status: String::new(),
         }
     }
 }
@@ -140,6 +149,7 @@ impl eframe::App for KestrelApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_job(ctx);
         let busy = self.job.is_some();
+        self.new_project_modal(ctx);
 
         egui::TopBottomPanel::top("controls").show(ctx, |ui| {
             ui.add_space(6.0);
@@ -149,9 +159,12 @@ impl eframe::App for KestrelApp {
                 ui.label("Project:");
                 ui.add(
                     egui::TextEdit::singleline(&mut self.path)
-                        .desired_width(440.0)
+                        .desired_width(400.0)
                         .hint_text("path to a repository"),
                 );
+                if ui.add_enabled(!busy, egui::Button::new("Load")).clicked() {
+                    self.open_project_path(self.project_path());
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let in_settings = self.view == AppView::Settings;
                     let label = if in_settings {
@@ -172,10 +185,37 @@ impl eframe::App for KestrelApp {
                 ui.add_space(4.0);
                 ui.add_enabled_ui(!busy, |ui| {
                     ui.horizontal(|ui| {
-                        if ui.button("Open").clicked() {
-                            let path = self.project_path();
-                            self.spawn(move || load_files(&path));
+                        if ui.button("Open…").clicked() {
+                            if let Some(dir) = rfd::FileDialog::new()
+                                .set_title("Open project folder")
+                                .pick_folder()
+                            {
+                                self.open_project_path(dir);
+                            }
                         }
+                        if ui.button("New…").clicked() {
+                            if self.new_project_parent.trim().is_empty() {
+                                self.new_project_parent = self.path.clone();
+                            }
+                            self.new_project_status.clear();
+                            self.new_project_open = true;
+                        }
+                        let mut chosen: Option<String> = None;
+                        ui.menu_button("Recent ▾", |ui| {
+                            if self.settings.recent_projects.is_empty() {
+                                ui.label(egui::RichText::new("(none yet)").weak());
+                            }
+                            for recent in &self.settings.recent_projects {
+                                if ui.button(recent).clicked() {
+                                    chosen = Some(recent.clone());
+                                    ui.close_menu();
+                                }
+                            }
+                        });
+                        if let Some(recent) = chosen {
+                            self.open_project_path(PathBuf::from(recent));
+                        }
+                        ui.separator();
                         if ui.button("Inspect").clicked() {
                             self.run_text(inspect);
                         }
@@ -273,6 +313,106 @@ impl eframe::App for KestrelApp {
 impl KestrelApp {
     fn project_path(&self) -> PathBuf {
         PathBuf::from(self.path.trim())
+    }
+
+    /// Make `path` the active project: record it as the path, remember it in
+    /// the recent list (persisted), return to the main view, and load its files.
+    fn open_project_path(&mut self, path: PathBuf) {
+        self.path = path.display().to_string();
+        kestrel_core::push_recent(&mut self.settings.recent_projects, &path);
+        let _ = kestrel_core::save_settings(&self.settings);
+        self.view = AppView::Main;
+        self.spawn(move || load_files(&path));
+    }
+
+    /// The "New project" modal: choose a parent folder and a name, scaffold a
+    /// Kestrel-ready project, then open it.
+    fn new_project_modal(&mut self, ctx: &egui::Context) {
+        if !self.new_project_open {
+            return;
+        }
+        let mut open = self.new_project_open;
+        let mut create = false;
+        let mut cancel = false;
+        egui::Window::new("New project")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .open(&mut open)
+            .show(ctx, |ui| {
+                egui::Grid::new("new-project-grid")
+                    .num_columns(2)
+                    .spacing([10.0, 8.0])
+                    .show(ui, |ui| {
+                        ui.label("Parent folder");
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.new_project_parent)
+                                    .desired_width(300.0)
+                                    .hint_text("where to create the project"),
+                            );
+                            if ui.button("Browse…").clicked() {
+                                if let Some(dir) = rfd::FileDialog::new()
+                                    .set_title("Choose a parent folder")
+                                    .pick_folder()
+                                {
+                                    self.new_project_parent = dir.display().to_string();
+                                }
+                            }
+                        });
+                        ui.end_row();
+                        ui.label("Project name");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.new_project_name)
+                                .desired_width(300.0)
+                                .hint_text("new-folder-name"),
+                        );
+                        ui.end_row();
+                    });
+                ui.add_space(6.0);
+                if !self.new_project_status.is_empty() {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(220, 90, 90),
+                        &self.new_project_status,
+                    );
+                    ui.add_space(4.0);
+                }
+                ui.horizontal(|ui| {
+                    if ui.button("Create").clicked() {
+                        create = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+
+        if create {
+            let parent = PathBuf::from(self.new_project_parent.trim());
+            match kestrel_core::create_project(&parent, &self.new_project_name) {
+                Ok(project) => {
+                    let git = if project.git_initialized {
+                        " (git initialized)"
+                    } else {
+                        ""
+                    };
+                    self.new_project_open = false;
+                    self.new_project_name.clear();
+                    self.new_project_status.clear();
+                    let root = project.root.clone();
+                    self.open_project_path(root);
+                    self.status = format!("Created {}{git}.", project.root.display());
+                }
+                Err(err) => self.new_project_status = format!("Could not create project: {err}"),
+            }
+            return;
+        }
+        if cancel {
+            self.new_project_open = false;
+            self.new_project_status.clear();
+            return;
+        }
+        self.new_project_open = open;
     }
 
     /// Run a text-producing action against the current path on a worker thread.
