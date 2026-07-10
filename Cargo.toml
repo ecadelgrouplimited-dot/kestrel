@@ -2,6 +2,7 @@
 members = [
     "crates/kestrel-cli",
     "crates/kestrel-core",
+    "crates/kestrel-ui",
 ]
 resolver = "2"
 

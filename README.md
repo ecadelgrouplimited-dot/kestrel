@@ -9,8 +9,19 @@ This repository currently starts with the Phase 0 foundation from the product ro
 ## Workspace
 
 - `crates/kestrel-core`: local indexing and project analysis primitives, including the structural symbol-extraction layer (the seed of the Ghost Context Engine).
-- `crates/kestrel-cli`: command-line entry point for Phase 0 inspection workflows.
+- `crates/kestrel-cli`: command-line entry point for all workflows.
+- `crates/kestrel-ui`: a native desktop shell (egui/eframe) over `kestrel-core`.
 - `docs`: product, architecture, requirements, roadmap, and planning documents.
+
+## Native desktop app
+
+Kestrel also ships a native, all-Rust desktop shell. Point it at a project and run the local, instant capabilities — inspect, symbols, dependency graph, and query-seeded context packs — with results in a scrollable pane:
+
+```powershell
+cargo run -p kestrel-ui
+```
+
+It calls `kestrel-core` directly (no subprocess), so it's a single native window with no web view. Model-backed actions (`ask`/`edit`) and verification currently live in the CLI.
 
 ## Commands
 
@@ -201,4 +212,6 @@ All three should pass cleanly before you commit. `cargo test` alone is enough fo
 
 ## Toolchain note
 
-This machine has no MSVC linker or Windows SDK, so the crates are built with the self-contained `x86_64-pc-windows-gnu` Rust toolchain (a directory-local `rustup override` is set for this repo). Installing the MSVC Build Tools + Windows SDK would let the default `msvc` toolchain link as well.
+Kestrel builds with the standard **`x86_64-pc-windows-msvc`** toolchain (Visual Studio Build Tools 2022 + Windows SDK). No special setup is required beyond a normal Rust install and the C++ build tools.
+
+If you are on a machine without the MSVC linker/SDK, the self-contained **`x86_64-pc-windows-gnu`** toolchain also works as a fallback (`rustup toolchain install stable-x86_64-pc-windows-gnu` then `rustup override set …` in the repo), with the caveat that C-dependent and `windows-sys`-dependent crates won't build there.
