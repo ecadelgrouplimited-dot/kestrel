@@ -33,6 +33,10 @@ cargo run -p kestrel-ui
   - `list_dir` — list any directory
   - `http_get` — fetch an http(s) URL (an API response, or a raw GitHub file like `https://raw.githubusercontent.com/owner/repo/branch/path`)
   - `write_file` — create/overwrite a file **inside the project** (paths that are absolute or escape via `..` are refused)
+  - `run_command` — run a shell command in the project root (`npm install`, `npm run build`, `npx tsc --noEmit`, `cargo test`, …), capturing stdout/stderr and the exit code; killed after a few minutes
+  - `verify` — run the project's detected build/test ladder and report pass/fail
+
+  **Verify-and-self-correct:** the agent is told to actually check its work — after writing code it builds or type-checks it, and if that fails it reads the errors, fixes the offending files, and runs it again, iterating until it passes. Build/verify results stream into the transcript so you watch it debug itself. (`run_command` runs real shell commands on your machine, scoped to the project directory — that's the point of a native agent, but be aware of it.)
 
   So you can point it at a spec file (`read the prompt in src/prompt.md and build it`), pull a template from GitHub, or scaffold a site from scratch — and the files land in your project as it works. Reads and URL fetches are unrestricted (native, on your machine); writes are sandboxed to the project root for safety.
 

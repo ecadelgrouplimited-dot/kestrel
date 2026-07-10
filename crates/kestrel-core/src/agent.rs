@@ -11,10 +11,16 @@
 use crate::providers::{
     run_turn, AgentMessage, ProviderConfig, ToolCall, ToolResult, ToolSpec, TurnResult,
 };
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 /// A cap on how much text a tool may return to the model, in bytes.
 const TOOL_OUTPUT_CAP: usize = 60_000;
+
+/// How long a single `run_command` may run before it is killed.
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(240);
 
 /// The line that opens a file block: `<<<FILE relative/path>>>`.
 pub const FILE_MARKER: &str = "<<<FILE ";
@@ -169,15 +175,22 @@ pub fn agent_loop_system_prompt(root: &Path) -> String {
          - http_get(url): fetch the body of an http(s) URL — an API, or a raw GitHub file such \
            as https://raw.githubusercontent.com/owner/repo/branch/path.\n\
          - write_file(path, contents): create or overwrite a file inside the project (relative \
-           path; `..` and absolute paths are refused).\n\n\
+           path; `..` and absolute paths are refused).\n\
+         - run_command(command): run a shell command in the project root (e.g. `npm install`, \
+           `npm run build`, `npx tsc --noEmit`, `cargo test`) and read its output and exit code.\n\
+         - verify(): run the project's detected build/test ladder and report pass/fail.\n\n\
          Work step by step: inspect what you need with read_file/list_dir/http_get, then create \
          the project by calling write_file for each file with its ENTIRE contents (never partial \
          snippets). Prefer fewer, complete, runnable files.\n\n\
          Work efficiently: you can call write_file MANY TIMES IN A SINGLE TURN — batch several \
          files together per turn rather than one file per message, so the whole project is \
          created in as few turns as possible. Keep narration to one short line per turn.\n\n\
+         VERIFY YOUR WORK: after writing or changing code, actually check it — run the build or \
+         type-checker with run_command (or call verify). If it fails, READ the errors, fix the \
+         offending files, and run it again. Iterate until it passes or you have made a genuine \
+         effort. Do not claim success without verifying.\n\n\
          When you are finished, stop calling tools and reply with a short summary of what you \
-         did.\n\n\
+         built and what verification showed.\n\n\
          The current project root is: {}",
         root.display()
     )
@@ -233,6 +246,26 @@ pub fn builtin_tools() -> Vec<ToolSpec> {
                 "required": ["path", "contents"],
             }),
         },
+        ToolSpec {
+            name: "run_command".to_string(),
+            description: "Run a shell command in the project root and return its stdout, stderr, \
+                          and exit code. Use this to install dependencies, build, type-check, or \
+                          test the project (e.g. `npm install`, `npm run build`, `cargo test`). \
+                          Commands are killed after a few minutes."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": { "command": { "type": "string" } },
+                "required": ["command"],
+            }),
+        },
+        ToolSpec {
+            name: "verify".to_string(),
+            description: "Run the project's detected verification ladder (its format/test/build \
+                          commands) and report pass/fail with failing output."
+                .to_string(),
+            input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+        },
     ]
 }
 
@@ -249,6 +282,8 @@ pub fn describe_call(call: &ToolCall) -> String {
         "read_file" | "list_dir" => format!("{}({})", call.name, arg("path")),
         "http_get" => format!("http_get({})", arg("url")),
         "write_file" => format!("write_file({})", arg("path")),
+        "run_command" => format!("run_command: {}", arg("command")),
+        "verify" => "verify()".to_string(),
         other => other.to_string(),
     }
 }
@@ -290,6 +325,15 @@ pub fn execute_tool(root: &Path, call: &ToolCall) -> String {
             }
         }
         "http_get" => http_get(&arg("url")),
+        "run_command" => {
+            let command = arg("command");
+            if command.trim().is_empty() {
+                "error: empty command".to_string()
+            } else {
+                run_shell(root, &command, COMMAND_TIMEOUT)
+            }
+        }
+        "verify" => project_verify(root),
         "write_file" => match safe_join(root, &arg("path")) {
             Ok(full) => {
                 if let Some(parent) = full.parent() {
@@ -339,10 +383,172 @@ fn http_get(url: &str) -> String {
 fn cap(mut text: String) -> String {
     if text.len() > TOOL_OUTPUT_CAP {
         let dropped = text.len() - TOOL_OUTPUT_CAP;
-        text.truncate(TOOL_OUTPUT_CAP);
+        text.truncate(floor_char_boundary(&text, TOOL_OUTPUT_CAP));
         text.push_str(&format!("\n… [truncated {dropped} bytes]"));
     }
     text
+}
+
+/// Keep the last `max_bytes` of `text` (build errors usually surface at the
+/// end), prefixed with an ellipsis when truncated.
+fn tail(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+    let start = text.len() - max_bytes;
+    let start = (start..text.len())
+        .find(|&i| text.is_char_boundary(i))
+        .unwrap_or(text.len());
+    format!("…\n{}", &text[start..])
+}
+
+fn floor_char_boundary(text: &str, index: usize) -> usize {
+    if index >= text.len() {
+        return text.len();
+    }
+    (0..=index)
+        .rev()
+        .find(|&i| text.is_char_boundary(i))
+        .unwrap_or(0)
+}
+
+/// Run `command` in `root` via the platform shell, capturing stdout/stderr and
+/// the exit code, killing it after `timeout`. Output tails are returned so the
+/// model sees the relevant end of a long build log.
+fn run_shell(root: &Path, command: &str, timeout: Duration) -> String {
+    let mut shell = if cfg!(windows) {
+        let mut c = Command::new("cmd");
+        c.args(["/C", command]);
+        c
+    } else {
+        let mut c = Command::new("sh");
+        c.args(["-c", command]);
+        c
+    };
+    shell
+        .current_dir(root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = match shell.spawn() {
+        Ok(child) => child,
+        Err(err) => return format!("error: could not start command: {err}"),
+    };
+
+    // Drain the pipes on threads so a chatty process cannot deadlock on a full
+    // pipe buffer while we wait.
+    let mut out_pipe = child.stdout.take();
+    let mut err_pipe = child.stderr.take();
+    let out_handle = std::thread::spawn(move || {
+        let mut buf = String::new();
+        if let Some(pipe) = out_pipe.as_mut() {
+            let _ = pipe.read_to_string(&mut buf);
+        }
+        buf
+    });
+    let err_handle = std::thread::spawn(move || {
+        let mut buf = String::new();
+        if let Some(pipe) = err_pipe.as_mut() {
+            let _ = pipe.read_to_string(&mut buf);
+        }
+        buf
+    });
+
+    let start = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) => {
+                if start.elapsed() > timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break None;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(_) => break None,
+        }
+    };
+
+    let stdout = out_handle.join().unwrap_or_default();
+    let stderr = err_handle.join().unwrap_or_default();
+
+    let mut result = match status {
+        Some(status) => format!(
+            "exit code: {}\n",
+            status
+                .code()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "terminated".to_string())
+        ),
+        None => format!("TIMED OUT after {}s — process killed\n", timeout.as_secs()),
+    };
+    if !stdout.trim().is_empty() {
+        result.push_str("--- stdout ---\n");
+        result.push_str(&tail(&stdout, 8000));
+        result.push('\n');
+    }
+    if !stderr.trim().is_empty() {
+        result.push_str("--- stderr ---\n");
+        result.push_str(&tail(&stderr, 8000));
+        result.push('\n');
+    }
+    if stdout.trim().is_empty() && stderr.trim().is_empty() {
+        result.push_str("(no output)\n");
+    }
+    cap(result)
+}
+
+/// Run the project's detected verification ladder and format the outcome.
+fn project_verify(root: &Path) -> String {
+    let inspection = match crate::inspect_project(root) {
+        Ok(inspection) => inspection,
+        Err(err) => return format!("error: {err}"),
+    };
+    let configured = crate::load_config(&inspection.project_root)
+        .config()
+        .verify
+        .steps;
+    let steps = if configured.is_empty() {
+        crate::plan_verification(&inspection.markers)
+    } else {
+        configured
+            .iter()
+            .map(|c| crate::VerifyStep {
+                label: c.split_whitespace().next().unwrap_or("step").to_string(),
+                command: c.clone(),
+            })
+            .collect()
+    };
+    if steps.is_empty() {
+        return "no verification commands were detected for this project (no build/test ladder \
+                found). Use run_command to build or test it directly."
+            .to_string();
+    }
+    let report = crate::run_verification(&inspection.project_root, &steps);
+    let mut out = format!(
+        "verification {}\n",
+        if report.passed { "PASSED" } else { "FAILED" }
+    );
+    for step in &report.steps {
+        out.push_str(&format!(
+            "[{}] {} ({} ms)\n",
+            if step.success { "PASS" } else { "FAIL" },
+            step.command,
+            step.duration_ms
+        ));
+        if !step.success {
+            let detail = if step.stderr_tail.is_empty() {
+                &step.stdout_tail
+            } else {
+                &step.stderr_tail
+            };
+            out.push_str(detail);
+            out.push('\n');
+        }
+    }
+    cap(out)
 }
 
 /// Run the tool-using agent loop until the model stops calling tools or the
@@ -395,7 +601,13 @@ pub fn run_agent(
                 out
             } else {
                 on_event(AgentEvent::Tool(describe_call(call)));
-                execute_tool(root, call)
+                let out = execute_tool(root, call);
+                // Surface build/verify results in the transcript, not just to
+                // the model, so the user can watch it check its own work.
+                if matches!(call.name.as_str(), "run_command" | "verify") {
+                    on_event(AgentEvent::Assistant(tail(&out, 1200)));
+                }
+                out
             };
             results.push(ToolResult {
                 id: call.id.clone(),
@@ -448,6 +660,36 @@ mod tests {
             input: serde_json::json!({"path": "../evil.txt", "contents": "no"}),
         };
         assert!(execute_tool(&dir, &escape).starts_with("error:"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn run_command_tool_captures_output_and_exit_code() {
+        let dir = std::env::temp_dir().join(format!("kestrel-run-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let call = ToolCall {
+            id: "1".to_string(),
+            name: "run_command".to_string(),
+            input: serde_json::json!({ "command": "echo kestrel_ok" }),
+        };
+        let out = execute_tool(&dir, &call);
+        assert!(out.contains("exit code: 0"), "got: {out}");
+        assert!(out.contains("kestrel_ok"), "got: {out}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verify_reports_when_no_ladder_detected() {
+        let dir = std::env::temp_dir().join(format!("kestrel-verify-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("note.txt"), "hi").unwrap();
+        let call = ToolCall {
+            id: "1".to_string(),
+            name: "verify".to_string(),
+            input: serde_json::json!({}),
+        };
+        let out = execute_tool(&dir, &call);
+        assert!(out.to_lowercase().contains("no verification"), "got: {out}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
