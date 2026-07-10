@@ -72,6 +72,7 @@ pub fn provider_preset(name: &str) -> Option<ProviderSettings> {
         "openai" => (ProviderKind::Openai, "https://api.openai.com/v1"),
         "deepseek" => (ProviderKind::Openai, "https://api.deepseek.com/v1"),
         "kimi" => (ProviderKind::Openai, "https://api.moonshot.ai/v1"),
+        "zai" => (ProviderKind::Openai, "https://api.z.ai/api/paas/v4"),
         _ => return None,
     };
     let model = model_suggestions(name)
@@ -105,6 +106,14 @@ pub fn model_suggestions(name: &str) -> &'static [&'static str] {
             "deepseek-reasoner",
         ],
         "kimi" => &["kimi-k2", "kimi-k2-turbo", "moonshot-v1-128k"],
+        "zai" => &[
+            "glm-5.2",
+            "glm-5.1",
+            "glm-5",
+            "glm-5-turbo",
+            "glm-4.7",
+            "glm-4.6",
+        ],
         _ => &[],
     }
 }
@@ -119,6 +128,8 @@ pub fn model_suggestions_for(provider: &ProviderSettings) -> &'static [&'static 
         model_suggestions("deepseek")
     } else if base.contains("moonshot") {
         model_suggestions("kimi")
+    } else if base.contains("z.ai") {
+        model_suggestions("zai")
     } else if base.contains("openai") {
         model_suggestions("openai")
     } else {
@@ -130,7 +141,7 @@ pub fn model_suggestions_for(provider: &ProviderSettings) -> &'static [&'static 
 }
 
 /// The known preset names, for a settings UI dropdown.
-pub const PROVIDER_PRESETS: [&str; 4] = ["anthropic", "openai", "deepseek", "kimi"];
+pub const PROVIDER_PRESETS: [&str; 5] = ["anthropic", "openai", "deepseek", "kimi", "zai"];
 
 /// The path to the settings file (`<config-dir>/kestrel/settings.toml`).
 pub fn settings_path() -> PathBuf {
@@ -205,6 +216,12 @@ mod tests {
             "deepseek-v4-pro"
         );
         assert_eq!(provider_preset("openai").unwrap().model, "gpt-5");
+        // z.ai GLM is OpenAI-compatible and defaults to the flagship glm-5.2.
+        let zai = provider_preset("zai").unwrap();
+        assert_eq!(zai.kind, ProviderKind::Openai);
+        assert_eq!(zai.base_url, "https://api.z.ai/api/paas/v4");
+        assert_eq!(zai.model, "glm-5.2");
+        assert_eq!(model_suggestions_for(&zai), model_suggestions("zai"));
     }
 
     #[test]

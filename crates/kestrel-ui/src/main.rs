@@ -586,23 +586,36 @@ impl KestrelApp {
         self.path = path.display().to_string();
         kestrel_core::push_recent(&mut self.settings.recent_projects, &path);
         let _ = kestrel_core::save_settings(&self.settings);
-        // Resume this project's agent conversation and transcript, if any.
+        // Resume this project's agent conversation and transcript, if any, and
+        // rebuild the file-preview history by re-reading the files from disk.
         let session = kestrel_core::load_agent_session(&path);
         self.agent_messages = session.messages;
         self.chat_history = session.transcript;
-        self.agent_files.clear();
-        self.agent_preview = None;
+        self.agent_files = session
+            .created_files
+            .iter()
+            .filter_map(|rel| {
+                std::fs::read_to_string(path.join(rel))
+                    .ok()
+                    .map(|contents| AgentFile {
+                        path: rel.clone(),
+                        contents,
+                    })
+            })
+            .collect();
+        self.agent_preview = self.agent_files.len().checked_sub(1);
         self.chat_error.clear();
         self.view = AppView::Main;
         self.reload_tree();
     }
 
-    /// Persist the current project's agent conversation and transcript so
-    /// reopening it resumes where this left off.
+    /// Persist the current project's agent conversation, transcript, and the
+    /// list of files it created so reopening it resumes where this left off.
     fn save_session(&self) {
         let session = kestrel_core::AgentSession {
             messages: self.agent_messages.clone(),
             transcript: self.chat_history.clone(),
+            created_files: self.agent_files.iter().map(|f| f.path.clone()).collect(),
         };
         let _ = kestrel_core::save_agent_session(&self.project_path(), &session);
     }

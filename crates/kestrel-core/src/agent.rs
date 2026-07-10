@@ -775,6 +775,10 @@ pub struct AgentSession {
     pub messages: Vec<AgentMessage>,
     #[serde(default)]
     pub transcript: Vec<ChatMessage>,
+    /// Project-relative paths the agent created/changed, so the UI can restore
+    /// its file-preview history (contents are re-read from disk on load).
+    #[serde(default)]
+    pub created_files: Vec<String>,
 }
 
 /// The path to a project's saved agent session.
@@ -1180,11 +1184,13 @@ mod tests {
         let session = AgentSession {
             messages: vec![AgentMessage::User("build it".to_string())],
             transcript: vec![ChatMessage::user("build it")],
+            created_files: vec!["src/main.rs".to_string()],
         };
         save_agent_session(&dir, &session).unwrap();
         let loaded = load_agent_session(&dir);
         assert_eq!(loaded.messages.len(), 1);
         assert_eq!(loaded.transcript.len(), 1);
+        assert_eq!(loaded.created_files, vec!["src/main.rs".to_string()]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
