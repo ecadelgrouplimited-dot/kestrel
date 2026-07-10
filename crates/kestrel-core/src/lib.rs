@@ -1,3 +1,4 @@
+pub mod agent;
 pub mod cache;
 pub mod config;
 pub mod context;
@@ -11,6 +12,7 @@ pub mod symbols;
 pub mod verify;
 pub mod workspace;
 
+pub use agent::{agent_system_prompt, apply_file_edits, parse_file_edits, AppliedEdit, FileEdit};
 pub use config::{load_config, Config, ConfigLoad};
 pub use context::{
     assemble_context_prompt, build_context_pack, build_context_pack_for_query, estimate_tokens,

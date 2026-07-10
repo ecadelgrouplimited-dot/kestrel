@@ -119,7 +119,10 @@ struct KestrelApp {
     chat_input: String,
     chat_history: Vec<kestrel_core::ChatMessage>,
     chat_include_context: bool,
+    chat_agent_mode: bool,
     chat_pending: bool,
+    /// Whether the in-flight request is a build-agent request (writes files).
+    chat_agent_pending: bool,
     chat_error: String,
     chat_job: Option<Receiver<Result<String, String>>>,
 }
@@ -168,7 +171,9 @@ impl Default for KestrelApp {
             chat_input: String::new(),
             chat_history: Vec::new(),
             chat_include_context: false,
+            chat_agent_mode: false,
             chat_pending: false,
+            chat_agent_pending: false,
             chat_error: String::new(),
             chat_job: None,
         }
@@ -217,20 +222,28 @@ impl KestrelApp {
         let Some(rx) = &self.chat_job else { return };
         match rx.try_recv() {
             Ok(Ok(reply)) => {
+                let message = if self.chat_agent_pending {
+                    self.apply_agent_reply(&reply)
+                } else {
+                    reply
+                };
                 self.chat_history
-                    .push(kestrel_core::ChatMessage::assistant(reply));
+                    .push(kestrel_core::ChatMessage::assistant(message));
                 self.chat_pending = false;
+                self.chat_agent_pending = false;
                 self.chat_job = None;
             }
             Ok(Err(err)) => {
                 self.chat_error = err;
                 self.chat_pending = false;
+                self.chat_agent_pending = false;
                 self.chat_job = None;
             }
             Err(TryRecvError::Empty) => ctx.request_repaint(),
             Err(TryRecvError::Disconnected) => {
                 self.chat_error = "The chat request stopped unexpectedly.".to_string();
                 self.chat_pending = false;
+                self.chat_agent_pending = false;
                 self.chat_job = None;
             }
         }
@@ -982,6 +995,10 @@ impl KestrelApp {
             }
             ui.separator();
             ui.checkbox(&mut self.chat_include_context, "Include project context");
+            ui.checkbox(&mut self.chat_agent_mode, "Agent · write files")
+                .on_hover_text(
+                    "Turn the request into real files written into the current project.",
+                );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("New chat").clicked() {
                     self.chat_history.clear();
@@ -991,28 +1008,48 @@ impl KestrelApp {
                 if self.chat_pending && ui.button("Stop").clicked() {
                     self.chat_job = None;
                     self.chat_pending = false;
+                    self.chat_agent_pending = false;
                     self.chat_error = "Cancelled.".to_string();
                 }
             });
         });
 
+        if self.chat_agent_mode {
+            ui.colored_label(
+                egui::Color32::from_rgb(150, 200, 150),
+                format!(
+                    "Agent mode: files will be written into {}",
+                    self.project_path().display()
+                ),
+            );
+        }
         if !self.chat_error.is_empty() {
             ui.colored_label(egui::Color32::from_rgb(220, 90, 90), &self.chat_error);
         }
 
         ui.add_space(2.0);
         ui.horizontal(|ui| {
+            let hint = if self.chat_agent_mode {
+                "Describe what to build…  (Enter to send, Shift+Enter for a new line)"
+            } else {
+                "Message…  (Enter to send, Shift+Enter for a new line)"
+            };
             let input = ui.add(
                 egui::TextEdit::multiline(&mut self.chat_input)
                     .desired_rows(2)
                     .desired_width(f32::INFINITY)
-                    .hint_text("Message…  (Enter to send, Shift+Enter for a new line)"),
+                    .hint_text(hint),
             );
             // Enter sends; Shift+Enter inserts a newline (handled by the widget).
             let enter_send = input.has_focus()
                 && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
+            let label = if self.chat_agent_mode {
+                "Build"
+            } else {
+                "Send"
+            };
             let clicked = ui
-                .add_enabled(!self.chat_pending, egui::Button::new("Send"))
+                .add_enabled(!self.chat_pending, egui::Button::new(label))
                 .clicked();
             if (enter_send || clicked) && !self.chat_pending {
                 self.send_chat();
@@ -1045,6 +1082,8 @@ impl KestrelApp {
         self.chat_history
             .push(kestrel_core::ChatMessage::user(text.clone()));
         self.chat_pending = true;
+        let agent = self.chat_agent_mode;
+        self.chat_agent_pending = agent;
 
         let config = provider.to_config();
         let model = provider.model.clone();
@@ -1054,10 +1093,16 @@ impl KestrelApp {
 
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let system = chat_system_prompt(include, &project, &text);
+            let system = if agent {
+                agent_system_prompt(include, &project, &text)
+            } else {
+                chat_system_prompt(include, &project, &text)
+            };
+            // Agent replies must fit a whole project's worth of files.
+            let max_tokens = if agent { 8192 } else { 2048 };
             let request = kestrel_core::ChatRequest {
                 model,
-                max_tokens: 2048,
+                max_tokens,
                 system: Some(system),
                 messages,
             };
@@ -1068,6 +1113,32 @@ impl KestrelApp {
             let _ = tx.send(result);
         });
         self.chat_job = Some(rx);
+    }
+
+    /// Apply a build-agent reply: write its files under the project root, reload
+    /// the tree, and return a human summary to show in the transcript.
+    fn apply_agent_reply(&mut self, reply: &str) -> String {
+        let root = self.project_path();
+        let edits = kestrel_core::parse_file_edits(reply);
+        if edits.is_empty() {
+            return "The agent produced no file blocks. Its raw reply:\n\n".to_string() + reply;
+        }
+        let applied = kestrel_core::apply_file_edits(&root, &edits);
+        let ok = applied.iter().filter(|a| a.is_ok()).count();
+        let mut summary = format!(
+            "Wrote {ok}/{} file(s) to {}:\n",
+            applied.len(),
+            root.display()
+        );
+        for entry in &applied {
+            match &entry.outcome {
+                Ok(_) => summary.push_str(&format!("  ✓ {}\n", entry.path)),
+                Err(err) => summary.push_str(&format!("  ✗ {} — {err}\n", entry.path)),
+            }
+        }
+        self.reload_tree();
+        self.status = format!("Agent wrote {ok} file(s) to {}.", root.display());
+        summary
     }
 
     /// Run a text-producing action against the current path on a worker thread.
@@ -1443,6 +1514,26 @@ fn chat_system_prompt(include: bool, project: &Path, query: &str) -> String {
                 prompt.push_str(
                     "\n\nThe following files from the user's project are the most relevant to \
                      their message. Use them as ground truth.\n\n",
+                );
+                prompt.push_str(&context);
+            }
+        }
+    }
+    prompt
+}
+
+/// The system prompt for a build-agent turn: the file-manifest protocol, plus
+/// optional project context so the agent can extend an existing codebase.
+fn agent_system_prompt(include: bool, project: &Path, query: &str) -> String {
+    let mut prompt = kestrel_core::agent_system_prompt();
+    if include {
+        if let Ok(graph) = kestrel_core::build_project_graph(project) {
+            let pack = kestrel_core::build_context_pack_for_query(&graph, query, 6000);
+            if !pack.entries.is_empty() {
+                let context = kestrel_core::assemble_context_prompt(&graph.root, &pack);
+                prompt.push_str(
+                    "\n\nThe project already contains these files. Extend or modify them as \
+                     needed, emitting the full new contents of any file you change.\n\n",
                 );
                 prompt.push_str(&context);
             }
