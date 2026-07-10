@@ -12,7 +12,8 @@
 
 use crate::graph::ProjectGraph;
 use crate::symbols::Symbol;
-use std::collections::{HashMap, VecDeque};
+use std::cmp::Ordering;
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 /// Relevance falloff applied per additional hop away from the seed.
@@ -21,6 +22,9 @@ const HOP_DECAY: f64 = 0.5;
 /// Approximate characters per token for cost estimation. A deliberately rough
 /// heuristic — good enough to keep a budget honest without a tokenizer.
 const CHARS_PER_TOKEN: usize = 4;
+
+/// The most query-matching files to use as seeds before expanding the graph.
+const MAX_QUERY_SEEDS: usize = 6;
 
 /// Estimate the token cost of a piece of source given its character count.
 pub fn estimate_tokens(chars: usize) -> usize {
@@ -48,34 +52,85 @@ pub struct ContextEntry {
     pub estimated_tokens: usize,
 }
 
-/// A ranked, budget-bounded selection of files relevant to a seed.
+/// A ranked, budget-bounded selection of files relevant to a seed or query.
 #[derive(Debug, Clone)]
 pub struct ContextPack {
-    pub seed: PathBuf,
+    /// Human-readable description of what the pack was built for.
+    pub seed: String,
     pub budget_tokens: usize,
     pub used_tokens: usize,
-    /// Included files, most relevant first (the seed is always first).
+    /// Included files, most relevant first.
     pub entries: Vec<ContextEntry>,
     /// Relevant files that did not fit the budget, still ranked.
     pub omitted: Vec<ContextEntry>,
 }
 
-/// Build a context pack for `seed` within `budget_tokens`, or `None` if the
-/// seed path is not a node in the graph. Pure over the graph, so ranking is
-/// deterministic and testable.
+/// Build a context pack seeded from a single file, or `None` if the seed path
+/// is not a node in the graph.
 pub fn build_context_pack(
     graph: &ProjectGraph,
     seed: &Path,
     budget_tokens: usize,
 ) -> Option<ContextPack> {
+    let seed_idx = graph.files.iter().position(|f| f.path == seed)?;
+    let mut reasons = HashMap::new();
+    reasons.insert(seed_idx, "seed file".to_string());
+    Some(assemble(
+        graph,
+        &[(seed_idx, 1.0)],
+        &reasons,
+        Some(seed),
+        Some(seed_idx),
+        format!("file {}", seed.display()),
+        budget_tokens,
+    ))
+}
+
+/// Build a context pack seeded from a natural-language query: files whose
+/// symbols or path match the query terms become seeds, and relevance spreads
+/// outward across the dependency graph from all of them.
+pub fn build_context_pack_for_query(
+    graph: &ProjectGraph,
+    query: &str,
+    budget_tokens: usize,
+) -> ContextPack {
+    let matches = query_matches(graph, query);
+    let seeds: Vec<(usize, f64)> = matches.iter().map(|m| (m.idx, m.score)).collect();
+    let reasons: HashMap<usize, String> = matches
+        .iter()
+        .map(|m| (m.idx, format!("matches query: {}", m.terms.join(", "))))
+        .collect();
+    assemble(
+        graph,
+        &seeds,
+        &reasons,
+        None,
+        None,
+        format!("query \"{query}\""),
+        budget_tokens,
+    )
+}
+
+/// The shared ranking + budget-fill core, seeded from one or more files.
+/// `primary` (if given) tunes the wording of non-seed reasons and is the one
+/// file force-included even when it exceeds the budget.
+#[allow(clippy::too_many_arguments)]
+fn assemble(
+    graph: &ProjectGraph,
+    seeds: &[(usize, f64)],
+    seed_reasons: &HashMap<usize, String>,
+    primary: Option<&Path>,
+    force_idx: Option<usize>,
+    seed_label: String,
+    budget_tokens: usize,
+) -> ContextPack {
+    let n = graph.files.len();
     let index: HashMap<&Path, usize> = graph
         .files
         .iter()
         .enumerate()
         .map(|(i, f)| (f.path.as_path(), i))
         .collect();
-    let seed_idx = *index.get(seed)?;
-    let n = graph.files.len();
 
     // Undirected adjacency with edge weights.
     let mut adjacency: Vec<Vec<(usize, usize)>> = vec![Vec::new(); n];
@@ -88,10 +143,17 @@ pub fn build_context_pack(
         }
     }
 
-    // Shortest hop distance from the seed.
+    let seed_set: HashSet<usize> = seeds.iter().map(|(i, _)| *i).collect();
+
+    // Multi-source shortest hop distance from every seed.
     let mut hops = vec![usize::MAX; n];
-    hops[seed_idx] = 0;
-    let mut queue = VecDeque::from([seed_idx]);
+    let mut queue = VecDeque::new();
+    for &(i, _) in seeds {
+        if hops[i] == usize::MAX {
+            hops[i] = 0;
+            queue.push_back(i);
+        }
+    }
     while let Some(u) = queue.pop_front() {
         for &(v, _) in &adjacency[u] {
             if hops[v] == usize::MAX {
@@ -101,8 +163,8 @@ pub fn build_context_pack(
         }
     }
 
-    // Spreading activation: a node's relevance is the decayed sum of edge
-    // weights connecting it to the seed-ward frontier.
+    // Spreading activation: seeds keep their initial score; every other node's
+    // relevance is the decayed sum of edge weights to the seed-ward frontier.
     let max_hop = hops
         .iter()
         .copied()
@@ -110,10 +172,12 @@ pub fn build_context_pack(
         .max()
         .unwrap_or(0);
     let mut score = vec![0f64; n];
-    score[seed_idx] = 1.0;
+    for &(i, s) in seeds {
+        score[i] = score[i].max(s);
+    }
     for level in 1..=max_hop {
         for v in 0..n {
-            if hops[v] != level {
+            if hops[v] != level || seed_set.contains(&v) {
                 continue;
             }
             let mut s = 0.0;
@@ -126,16 +190,12 @@ pub fn build_context_pack(
         }
     }
 
-    // Rank all reachable files: seed first (hop 0), then by relevance.
+    // Rank all reachable files: seeds first (hop 0), then by relevance.
     let mut order: Vec<usize> = (0..n).filter(|&i| hops[i] != usize::MAX).collect();
     order.sort_by(|&a, &b| {
         hops[a]
             .cmp(&hops[b])
-            .then_with(|| {
-                score[b]
-                    .partial_cmp(&score[a])
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
+            .then_with(|| score[b].partial_cmp(&score[a]).unwrap_or(Ordering::Equal))
             .then_with(|| graph.files[a].path.cmp(&graph.files[b].path))
     });
 
@@ -145,17 +205,23 @@ pub fn build_context_pack(
     for &i in &order {
         let file = &graph.files[i];
         let estimated_tokens = estimate_tokens(file.source_bytes);
+        let reason = if let Some(reason) = seed_reasons.get(&i) {
+            reason.clone()
+        } else if let Some(primary) = primary {
+            reason_for(graph, primary, &file.path, hops[i])
+        } else {
+            format!("{} hops from a query match", hops[i])
+        };
         let entry = ContextEntry {
             path: file.path.clone(),
             language: file.language.clone(),
-            reason: reason_for(graph, seed, &file.path, hops[i]),
+            reason,
             hops: hops[i],
             relevance: score[i],
             symbols: file.symbols.clone(),
             estimated_tokens,
         };
-        // The seed is always included; others must fit the remaining budget.
-        if i == seed_idx || used + estimated_tokens <= budget_tokens {
+        if force_idx == Some(i) || used + estimated_tokens <= budget_tokens {
             used += estimated_tokens;
             entries.push(entry);
         } else {
@@ -163,13 +229,72 @@ pub fn build_context_pack(
         }
     }
 
-    Some(ContextPack {
-        seed: graph.files[seed_idx].path.clone(),
+    ContextPack {
+        seed: seed_label,
         budget_tokens,
         used_tokens: used,
         entries,
         omitted,
-    })
+    }
+}
+
+/// A file matched by a query, with its score and the matched terms/symbols.
+struct QueryMatch {
+    idx: usize,
+    score: f64,
+    terms: Vec<String>,
+}
+
+/// Score every file against the query's terms by symbol-name and path matches,
+/// returning the top seeds. Exact symbol-name matches weigh most.
+fn query_matches(graph: &ProjectGraph, query: &str) -> Vec<QueryMatch> {
+    let terms: Vec<String> = query
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter(|t| t.len() >= 2)
+        .map(str::to_lowercase)
+        .collect();
+    if terms.is_empty() {
+        return Vec::new();
+    }
+
+    let mut out = Vec::new();
+    for (idx, file) in graph.files.iter().enumerate() {
+        let mut score = 0.0;
+        let mut matched: BTreeSet<String> = BTreeSet::new();
+        let path_lower = file.path.to_string_lossy().to_lowercase();
+        for term in &terms {
+            for symbol in &file.symbols {
+                let name = symbol.name.to_lowercase();
+                if name == *term {
+                    score += 3.0;
+                    matched.insert(symbol.name.clone());
+                } else if name.contains(term) {
+                    score += 1.5;
+                    matched.insert(symbol.name.clone());
+                }
+            }
+            if path_lower.contains(term) {
+                score += 1.0;
+                matched.insert(term.clone());
+            }
+        }
+        if score > 0.0 {
+            out.push(QueryMatch {
+                idx,
+                score,
+                terms: matched.into_iter().take(4).collect(),
+            });
+        }
+    }
+
+    out.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| graph.files[a.idx].path.cmp(&graph.files[b.idx].path))
+    });
+    out.truncate(MAX_QUERY_SEEDS);
+    out
 }
 
 /// Compose a human-readable reason for including `node`, given its distance
@@ -307,5 +432,32 @@ mod tests {
     fn unknown_seed_returns_none() {
         let graph = build_graph_from_files(vec![file("a.rs", &[], &[], 10)]);
         assert!(build_context_pack(&graph, Path::new("missing.rs"), 100).is_none());
+    }
+
+    #[test]
+    fn query_seeds_from_symbol_matches_and_expands() {
+        let files = vec![
+            file("auth.rs", &["authenticate", "AuthToken"], &[], 400),
+            file("db.rs", &["connect"], &["AuthToken"], 400), // references AuthToken
+            file("ui.rs", &["render"], &[], 400),             // unrelated
+        ];
+        let graph = build_graph_from_files(files);
+        let pack = build_context_pack_for_query(&graph, "auth token", 10_000);
+
+        assert_eq!(pack.entries[0].path, PathBuf::from("auth.rs"));
+        assert!(pack.entries[0].reason.starts_with("matches query"));
+        let paths: Vec<_> = pack.entries.iter().map(|e| e.path.clone()).collect();
+        // db.rs is pulled in by graph proximity to the matched seed.
+        assert!(paths.contains(&PathBuf::from("db.rs")));
+        // ui.rs neither matches nor connects, so it is excluded.
+        assert!(!paths.contains(&PathBuf::from("ui.rs")));
+    }
+
+    #[test]
+    fn query_with_no_matches_is_empty() {
+        let graph = build_graph_from_files(vec![file("a.rs", &["foo"], &[], 400)]);
+        let pack = build_context_pack_for_query(&graph, "nonexistentxyz", 10_000);
+        assert!(pack.entries.is_empty());
+        assert!(pack.omitted.is_empty());
     }
 }

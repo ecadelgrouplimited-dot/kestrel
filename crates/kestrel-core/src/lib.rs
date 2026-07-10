@@ -4,7 +4,9 @@ pub mod graph;
 pub mod inspect;
 pub mod symbols;
 
-pub use context::{build_context_pack, estimate_tokens, ContextEntry, ContextPack};
+pub use context::{
+    build_context_pack, build_context_pack_for_query, estimate_tokens, ContextEntry, ContextPack,
+};
 pub use graph::{
     build_graph_from_files, build_project_graph, DependencyEdge, FileNode, ProjectGraph,
 };

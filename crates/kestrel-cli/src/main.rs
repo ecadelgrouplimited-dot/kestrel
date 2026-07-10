@@ -44,12 +44,8 @@ fn main() -> io::Result<()> {
         }
         "context" => {
             let rest: Vec<String> = args.collect();
-            let (target, budget, format) = parse_context_args(&rest);
-            let Some(target) = target else {
-                eprintln!("Usage: kestrel context <file> [--budget N] [--format summary|prompt]");
-                std::process::exit(2);
-            };
-            print_context(target, budget, format)?;
+            let opts = parse_context_args(&rest);
+            print_context(opts)?;
         }
         "--help" | "-h" | "help" => print_usage(),
         unknown => {
@@ -72,6 +68,8 @@ fn print_usage() {
     println!("  kestrel related <file>    Show a file's dependencies and dependents");
     println!("  kestrel context <file> [--budget N] [--format summary|prompt]");
     println!("                            Build a ranked, budget-bounded context pack");
+    println!("  kestrel context [path] --query \"...\" [--budget N] [--format ...]");
+    println!("                            Build a context pack from a natural-language query");
 }
 
 fn print_summary(inspection: &ProjectInspection) {
@@ -353,11 +351,19 @@ enum ContextFormat {
     Prompt,
 }
 
-/// Parse `context` arguments: the target file, an optional
-/// `--budget N` / `--budget=N` / `-b N`, and `--format summary|prompt`
-/// (`--prompt` as a shorthand).
-fn parse_context_args(args: &[String]) -> (Option<PathBuf>, usize, ContextFormat) {
+/// Parsed options for the `context` command.
+struct ContextOptions {
+    target: Option<PathBuf>,
+    query: Option<String>,
+    budget: usize,
+    format: ContextFormat,
+}
+
+/// Parse `context` arguments: an optional target path, `--query "..."` (`-q`),
+/// `--budget N` (`-b`), and `--format summary|prompt` (`--prompt` shorthand).
+fn parse_context_args(args: &[String]) -> ContextOptions {
     let mut target = None;
+    let mut query = None;
     let mut budget = DEFAULT_CONTEXT_BUDGET;
     let mut format = ContextFormat::Summary;
     let mut i = 0;
@@ -374,6 +380,16 @@ fn parse_context_args(args: &[String]) -> (Option<PathBuf>, usize, ContextFormat
             if let Ok(value) = value.parse::<usize>() {
                 budget = value;
             }
+            i += 1;
+            continue;
+        }
+        if arg == "--query" || arg == "-q" {
+            query = args.get(i + 1).cloned();
+            i += 2;
+            continue;
+        }
+        if let Some(value) = arg.strip_prefix("--query=") {
+            query = Some(value.to_string());
             i += 1;
             continue;
         }
@@ -400,7 +416,12 @@ fn parse_context_args(args: &[String]) -> (Option<PathBuf>, usize, ContextFormat
         }
         i += 1;
     }
-    (target, budget.max(1), format)
+    ContextOptions {
+        target,
+        query,
+        budget: budget.max(1),
+        format,
+    }
 }
 
 /// Map a language label to a Markdown code-fence language tag.
@@ -413,7 +434,28 @@ fn fence_tag(language: &str) -> &str {
     }
 }
 
-fn print_context(target: PathBuf, budget: usize, format: ContextFormat) -> io::Result<()> {
+fn print_context(opts: ContextOptions) -> io::Result<()> {
+    // Query mode: seed from a natural-language query over the whole project.
+    if let Some(query) = opts.query {
+        let root = match opts.target {
+            Some(path) => path,
+            None => env::current_dir()?,
+        };
+        let graph = build_project_graph(&root)?;
+        let pack = kestrel_core::build_context_pack_for_query(&graph, &query, opts.budget);
+        if pack.entries.is_empty() {
+            println!("No files matched the query \"{query}\".");
+            return Ok(());
+        }
+        return render_pack(&graph, &pack, opts.format);
+    }
+
+    // File-seed mode.
+    let Some(target) = opts.target else {
+        eprintln!("Usage: kestrel context <file> [--budget N] [--format summary|prompt]");
+        eprintln!("       kestrel context [path] --query \"...\"");
+        std::process::exit(2);
+    };
     let search_root = if target.is_dir() {
         target.clone()
     } else {
@@ -434,16 +476,25 @@ fn print_context(target: PathBuf, budget: usize, format: ContextFormat) -> io::R
     };
 
     let seed = node.path.clone();
-    let Some(pack) = kestrel_core::build_context_pack(&graph, &seed, budget) else {
+    let Some(pack) = kestrel_core::build_context_pack(&graph, &seed, opts.budget) else {
         println!("Could not build a context pack for {}.", seed.display());
         return Ok(());
     };
 
+    render_pack(&graph, &pack, opts.format)
+}
+
+/// Render a built pack in the requested format.
+fn render_pack(
+    graph: &ProjectGraph,
+    pack: &kestrel_core::ContextPack,
+    format: ContextFormat,
+) -> io::Result<()> {
     if format == ContextFormat::Prompt {
-        return print_context_prompt(&graph, &pack);
+        return print_context_prompt(graph, pack);
     }
 
-    println!("Kestrel Context Pack — seed: {}", pack.seed.display());
+    println!("Kestrel Context Pack — {}", pack.seed);
     println!(
         "Budget: {} / {} tokens used across {} files ({} omitted)",
         pack.used_tokens,
@@ -492,14 +543,14 @@ fn print_context(target: PathBuf, budget: usize, format: ContextFormat) -> io::R
 fn print_context_prompt(graph: &ProjectGraph, pack: &kestrel_core::ContextPack) -> io::Result<()> {
     println!(
         "# Context for {} ({} files, ~{} tokens)",
-        pack.seed.display(),
+        pack.seed,
         pack.entries.len(),
         pack.used_tokens
     );
     println!();
     println!(
-        "The following files were selected as the most relevant context for `{}`.",
-        pack.seed.display()
+        "The following files were selected as the most relevant context for {}.",
+        pack.seed
     );
     println!();
 

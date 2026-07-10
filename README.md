@@ -50,6 +50,12 @@ Relevance spreads outward from the seed across dependency edges (both directions
 cargo run -p kestrel-cli -- context E:\Projects\some-repo\src\service.ts --format prompt
 ```
 
+You can also seed a pack from a **natural-language query** instead of a file — the files whose symbols or paths best match the query become the seeds, then relevance spreads across the graph from all of them:
+
+```powershell
+cargo run -p kestrel-cli -- context E:\Projects\some-repo --query "user authentication" --budget 8000
+```
+
 Extraction runs behind a swappable `SymbolExtractor` trait, with dependency-free heuristic extractors for Rust, TypeScript/JavaScript, and Python that resolve symbols, imports, and cross-file references. The scanners are string- and comment-aware (block comments, raw strings, multi-line strings, BOMs, Rust lifetimes vs char literals). Dependency edges fuse two kinds of evidence: shared symbol references, and import specifiers resolved to concrete files (Rust `crate::`/`self::`/`super::` module-tree resolution; TS/JS relative imports with extension and `index.*` conventions; Python relative and absolute-from-root module resolution). The trait boundary is deliberate: a full tree-sitter backend can replace any extractor later without changing a single caller. Together the symbol index and the `ProjectGraph`/`DependencyEdge` structures are the Phase 0 substrate of the Living System Model described in [docs/vision-horizon.md](docs/vision-horizon.md).
 
 ### Incremental index cache
