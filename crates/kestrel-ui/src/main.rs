@@ -54,10 +54,17 @@ enum AgentUpdate {
     Line(String),
     /// A file the agent wrote, with its full contents for live preview.
     Wrote { path: String, contents: String },
-    /// The agent finished with a final summary.
-    Done(String),
-    /// The agent failed.
-    Failed(String),
+    /// The agent finished; carries the final summary and the full conversation
+    /// so a follow-up prompt can refine the same project.
+    Done {
+        summary: String,
+        history: Vec<kestrel_core::AgentMessage>,
+    },
+    /// The agent failed; still returns the conversation so far.
+    Failed {
+        err: String,
+        history: Vec<kestrel_core::AgentMessage>,
+    },
 }
 
 /// A file produced during an agent run, kept for the created-files history and
@@ -148,6 +155,9 @@ struct KestrelApp {
     agent_files: Vec<AgentFile>,
     /// Index into `agent_files` currently shown in the build preview.
     agent_preview: Option<usize>,
+    /// The running agent conversation, carried across builds so follow-up
+    /// prompts refine the same project instead of starting from scratch.
+    agent_messages: Vec<kestrel_core::AgentMessage>,
 }
 
 impl Default for KestrelApp {
@@ -202,6 +212,7 @@ impl Default for KestrelApp {
             agent_job: None,
             agent_files: Vec::new(),
             agent_preview: None,
+            agent_messages: Vec::new(),
         }
     }
 }
@@ -302,19 +313,21 @@ impl KestrelApp {
                     refresh = true;
                     ctx.request_repaint();
                 }
-                Ok(AgentUpdate::Done(summary)) => {
+                Ok(AgentUpdate::Done { summary, history }) => {
                     if !summary.trim().is_empty() {
                         self.chat_history
                             .push(kestrel_core::ChatMessage::assistant(summary));
                     }
+                    self.agent_messages = history;
                     self.chat_pending = false;
                     self.agent_job = None;
                     self.status = "Agent finished.".to_string();
                     refresh = true;
                     break;
                 }
-                Ok(AgentUpdate::Failed(err)) => {
+                Ok(AgentUpdate::Failed { err, history }) => {
                     self.chat_error = err;
+                    self.agent_messages = history;
                     self.chat_pending = false;
                     self.agent_job = None;
                     // Show whatever the agent managed to write before stopping.
@@ -1239,6 +1252,7 @@ impl KestrelApp {
                     self.chat_input.clear();
                     self.agent_files.clear();
                     self.agent_preview = None;
+                    self.agent_messages.clear();
                 }
                 if self.chat_pending && ui.button("Stop").clicked() {
                     self.chat_job = None;
@@ -1250,10 +1264,15 @@ impl KestrelApp {
         });
 
         if self.chat_agent_mode {
+            let continuing = if self.agent_messages.is_empty() {
+                String::new()
+            } else {
+                "  ·  continuing this project (New chat to start fresh)".to_string()
+            };
             ui.colored_label(
                 egui::Color32::from_rgb(150, 200, 150),
                 format!(
-                    "Agent mode: files will be written into {}",
+                    "Agent mode: files will be written into {}{continuing}",
                     self.project_path().display()
                 ),
             );
@@ -1353,25 +1372,38 @@ impl KestrelApp {
         let config = provider.to_config();
         let model = provider.model.clone();
         let root = self.project_path();
-        self.agent_files.clear();
-        self.agent_preview = None;
+        // Carry the running conversation so a follow-up refines the same
+        // project. The file history keeps accumulating across builds too.
+        let history = self.agent_messages.clone();
 
         let (tx, rx) = std::sync::mpsc::channel();
         let events = tx.clone();
         std::thread::spawn(move || {
-            let result = kestrel_core::run_agent(&config, &model, &prompt, &root, 100, |event| {
-                let update = match event {
-                    kestrel_core::AgentEvent::Assistant(text) => AgentUpdate::Line(text),
-                    kestrel_core::AgentEvent::Tool(call) => AgentUpdate::Line(format!("↪ {call}")),
-                    kestrel_core::AgentEvent::Wrote { path, contents } => {
-                        AgentUpdate::Wrote { path, contents }
-                    }
-                };
-                let _ = events.send(update);
-            });
-            let _ = match result {
-                Ok(summary) => tx.send(AgentUpdate::Done(summary)),
-                Err(err) => tx.send(AgentUpdate::Failed(err)),
+            let outcome = kestrel_core::run_agent(
+                &config,
+                &model,
+                &prompt,
+                &root,
+                100,
+                true,
+                history,
+                |event| {
+                    let update = match event {
+                        kestrel_core::AgentEvent::Assistant(text) => AgentUpdate::Line(text),
+                        kestrel_core::AgentEvent::Tool(call) => {
+                            AgentUpdate::Line(format!("↪ {call}"))
+                        }
+                        kestrel_core::AgentEvent::Wrote { path, contents } => {
+                            AgentUpdate::Wrote { path, contents }
+                        }
+                    };
+                    let _ = events.send(update);
+                },
+            );
+            let history = outcome.history;
+            let _ = match outcome.result {
+                Ok(summary) => tx.send(AgentUpdate::Done { summary, history }),
+                Err(err) => tx.send(AgentUpdate::Failed { err, history }),
             };
         });
         self.agent_job = Some(rx);

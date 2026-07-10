@@ -699,33 +699,95 @@ fn project_verify(root: &Path) -> String {
     cap(out)
 }
 
+/// The result of an agent run plus the full conversation, so the caller can
+/// keep it and let a follow-up prompt refine the same project.
+pub struct AgentOutcome {
+    pub result: Result<String, String>,
+    pub history: Vec<AgentMessage>,
+}
+
+/// The review instruction injected once the agent first thinks it is done.
+fn review_prompt(request: &str) -> String {
+    format!(
+        "Now do a rigorous self-review before you finish. Re-check everything you just did \
+         against the ORIGINAL request:\n\n\"{request}\"\n\n\
+         Use read_file, search, and `git diff` to inspect your own changes, and run the build \
+         (run_command) or verify() to catch errors. Look specifically for: compile/type errors, \
+         missing or broken imports, unmet requirements, inconsistent data, and any unrelated \
+         code you may have damaged. Fix every problem you find with write_file, then re-verify. \
+         If everything is already correct and builds cleanly, briefly confirm that — do not make \
+         needless changes."
+    )
+}
+
 /// Run the tool-using agent loop until the model stops calling tools or the
-/// step limit is hit. `on_event` is called with progress as it happens.
+/// step limit is hit. `history` is the prior conversation (empty for a fresh
+/// build; carried across builds so follow-ups refine the same project); the
+/// updated conversation is returned in the [`AgentOutcome`]. When `review` is
+/// set, the first time the model believes it is done it is asked to critique
+/// and fix its own work before finishing. `on_event` reports progress live.
+#[allow(clippy::too_many_arguments)]
 pub fn run_agent(
     config: &ProviderConfig,
     model: &str,
     user_prompt: &str,
     root: &Path,
     max_steps: usize,
+    review: bool,
+    mut history: Vec<AgentMessage>,
     mut on_event: impl FnMut(AgentEvent),
-) -> Result<String, String> {
+) -> AgentOutcome {
     let system = agent_loop_system_prompt(root);
     let tools = builtin_tools();
-    let mut messages = vec![AgentMessage::User(user_prompt.to_string())];
+    history.push(AgentMessage::User(user_prompt.to_string()));
+    let mut reviewed = !review;
 
     for _ in 0..max_steps {
-        let turn: TurnResult = match run_turn(config, model, 8192, Some(&system), &messages, &tools)
+        let turn: TurnResult = match run_turn(config, model, 8192, Some(&system), &history, &tools)
         {
-            Ok(inner) => inner?,
-            Err(err) => return Err(err.to_string()),
+            Ok(Ok(turn)) => turn,
+            Ok(Err(msg)) => {
+                return AgentOutcome {
+                    result: Err(msg),
+                    history,
+                }
+            }
+            Err(err) => {
+                return AgentOutcome {
+                    result: Err(err.to_string()),
+                    history,
+                }
+            }
         };
         if !turn.text.trim().is_empty() {
             on_event(AgentEvent::Assistant(turn.text.clone()));
         }
+
         if turn.calls.is_empty() {
-            return Ok(turn.text);
+            if !reviewed {
+                reviewed = true;
+                let final_text = if turn.text.trim().is_empty() {
+                    "Done.".to_string()
+                } else {
+                    turn.text.clone()
+                };
+                history.push(AgentMessage::Assistant {
+                    text: final_text,
+                    calls: Vec::new(),
+                });
+                on_event(AgentEvent::Assistant(
+                    "— reviewing my work against the request —".to_string(),
+                ));
+                history.push(AgentMessage::User(review_prompt(user_prompt)));
+                continue;
+            }
+            return AgentOutcome {
+                result: Ok(turn.text),
+                history,
+            };
         }
-        messages.push(AgentMessage::Assistant {
+
+        history.push(AgentMessage::Assistant {
             text: turn.text.clone(),
             calls: turn.calls.clone(),
         });
@@ -763,11 +825,14 @@ pub fn run_agent(
                 content,
             });
         }
-        messages.push(AgentMessage::ToolResults(results));
+        history.push(AgentMessage::ToolResults(results));
     }
-    Err(format!(
-        "agent stopped after {max_steps} steps without finishing"
-    ))
+    AgentOutcome {
+        result: Err(format!(
+            "agent stopped after {max_steps} steps without finishing"
+        )),
+        history,
+    }
 }
 
 #[cfg(test)]

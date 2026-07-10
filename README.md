@@ -40,6 +40,10 @@ cargo run -p kestrel-ui
 
   **Verify-and-self-correct:** the agent is told to actually check its work — after writing code it builds or type-checks it, and if that fails it reads the errors, fixes the offending files, and runs it again, iterating until it passes. Build/verify results stream into the transcript so you watch it debug itself. (`run_command` runs real shell commands on your machine, scoped to the project directory — that's the point of a native agent, but be aware of it.)
 
+  **Self-critique:** once it first believes it's done, the agent runs a review pass — it re-reads its own changes (`git diff`, `read_file`, `search`), checks them against your original request, builds again, and fixes anything it finds (bugs, missing requirements, broken imports, damage to unrelated code) before finishing.
+
+  **Conversation memory:** a build keeps its conversation, so a **follow-up prompt refines the same project** rather than starting over — "make the hero full-bleed and add a projects filter" picks up exactly where the last build left off. Press **New chat** to start a fresh project context.
+
   So you can point it at a spec file (`read the prompt in src/prompt.md and build it`), pull a template from GitHub, or scaffold a site from scratch — and the files land in your project as it works. Reads and URL fetches are unrestricted (native, on your machine); writes are sandboxed to the project root for safety.
 
   While it runs, the Chat view shows a **live build panel**: the file explorer on the left fills up in real time, and a right-hand pane keeps a **history of every file created**, auto-previewing each one the instant it's written. Click any file in that history to see exactly what the agent wrote, or **Open in editor** to keep working on it. The transcript alongside shows the agent's narration and its `read_file`/`http_get` steps — so you see precisely what it's doing, not a generic "thinking" spinner.

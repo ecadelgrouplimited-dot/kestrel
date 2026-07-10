@@ -15,7 +15,7 @@ pub mod workspace;
 
 pub use agent::{
     agent_loop_system_prompt, agent_system_prompt, apply_file_edits, builtin_tools, describe_call,
-    execute_tool, parse_file_edits, run_agent, AgentEvent, AppliedEdit, FileEdit,
+    execute_tool, parse_file_edits, run_agent, AgentEvent, AgentOutcome, AppliedEdit, FileEdit,
 };
 pub use config::{load_config, Config, ConfigLoad};
 pub use context::{
