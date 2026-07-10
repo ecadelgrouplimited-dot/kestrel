@@ -32,6 +32,8 @@ cargo run -p kestrel-ui
   - `read_file` — read any UTF-8 file on your machine (absolute path or project-relative)
   - `list_dir` — list any directory
   - `http_get` — fetch an http(s) URL (an API response, or a raw GitHub file like `https://raw.githubusercontent.com/owner/repo/branch/path`)
+  - `search` — grep the project's text files for a string, returning `path:line` matches (so it can understand an existing codebase before changing it)
+  - `git` — run git in the project (`clone <url> .`, `status`, `diff`, `add -A`, `commit -m …`, `log`), with a fallback commit identity
   - `write_file` — create/overwrite a file **inside the project** (paths that are absolute or escape via `..` are refused)
   - `run_command` — run a shell command in the project root (`npm install`, `npm run build`, `npx tsc --noEmit`, `cargo test`, …), capturing stdout/stderr and the exit code; killed after a few minutes
   - `verify` — run the project's detected build/test ladder and report pass/fail

@@ -174,10 +174,14 @@ pub fn agent_loop_system_prompt(root: &Path) -> String {
          - list_dir(path): list a directory's entries.\n\
          - http_get(url): fetch the body of an http(s) URL — an API, or a raw GitHub file such \
            as https://raw.githubusercontent.com/owner/repo/branch/path.\n\
+         - search(query): find where text or code appears across the project (returns \
+           path:line matches) — use it to understand an existing codebase before changing it.\n\
          - write_file(path, contents): create or overwrite a file inside the project (relative \
            path; `..` and absolute paths are refused).\n\
          - run_command(command): run a shell command in the project root (e.g. `npm install`, \
            `npm run build`, `npx tsc --noEmit`, `cargo test`) and read its output and exit code.\n\
+         - git(args): run a git command in the project (clone, status, diff, add, commit, log) \
+           to pull a template repo, inspect history, or snapshot your work.\n\
          - verify(): run the project's detected build/test ladder and report pass/fail.\n\n\
          Work step by step: inspect what you need with read_file/list_dir/http_get, then create \
          the project by calling write_file for each file with its ENTIRE contents (never partial \
@@ -247,6 +251,33 @@ pub fn builtin_tools() -> Vec<ToolSpec> {
             }),
         },
         ToolSpec {
+            name: "search".to_string(),
+            description: "Search the project's text files for a query string (case-insensitive) \
+                          and return matching `path:line: text` results. Optionally scope to a \
+                          sub-path."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string" },
+                    "path": { "type": "string" },
+                },
+                "required": ["query"],
+            }),
+        },
+        ToolSpec {
+            name: "git".to_string(),
+            description: "Run a git command in the project root, e.g. \"clone <url> .\", \
+                          \"status\", \"diff\", \"add -A\", \"commit -m msg\", \"log --oneline\". \
+                          A default identity is used for commits if none is configured."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": { "args": { "type": "string" } },
+                "required": ["args"],
+            }),
+        },
+        ToolSpec {
             name: "run_command".to_string(),
             description: "Run a shell command in the project root and return its stdout, stderr, \
                           and exit code. Use this to install dependencies, build, type-check, or \
@@ -281,8 +312,10 @@ pub fn describe_call(call: &ToolCall) -> String {
     match call.name.as_str() {
         "read_file" | "list_dir" => format!("{}({})", call.name, arg("path")),
         "http_get" => format!("http_get({})", arg("url")),
+        "search" => format!("search({})", arg("query")),
         "write_file" => format!("write_file({})", arg("path")),
         "run_command" => format!("run_command: {}", arg("command")),
+        "git" => format!("git {}", arg("args")),
         "verify" => "verify()".to_string(),
         other => other.to_string(),
     }
@@ -325,12 +358,34 @@ pub fn execute_tool(root: &Path, call: &ToolCall) -> String {
             }
         }
         "http_get" => http_get(&arg("url")),
+        "search" => {
+            let query = arg("query");
+            if query.trim().is_empty() {
+                "error: empty query".to_string()
+            } else {
+                let scope = arg("path");
+                let scope = if scope.trim().is_empty() {
+                    None
+                } else {
+                    Some(scope)
+                };
+                search_project(root, &query, scope.as_deref(), 200)
+            }
+        }
         "run_command" => {
             let command = arg("command");
             if command.trim().is_empty() {
                 "error: empty command".to_string()
             } else {
                 run_shell(root, &command, COMMAND_TIMEOUT)
+            }
+        }
+        "git" => {
+            let args = arg("args");
+            if args.trim().is_empty() {
+                "error: empty git args".to_string()
+            } else {
+                run_git(root, &args, COMMAND_TIMEOUT)
             }
         }
         "verify" => project_verify(root),
@@ -500,6 +555,99 @@ fn run_shell(root: &Path, command: &str, timeout: Duration) -> String {
     cap(result)
 }
 
+/// Search the project's text files for `query` (case-insensitive substring),
+/// returning up to `max` `path:line: text` matches. Build/VCS dirs are skipped.
+fn search_project(root: &Path, query: &str, scope: Option<&str>, max: usize) -> String {
+    let needle = query.to_lowercase();
+    let base = match scope {
+        Some(s) => resolve_read_path(root, s),
+        None => root.to_path_buf(),
+    };
+    let mut out = String::new();
+    let mut matches = 0;
+
+    if base.is_file() {
+        grep_file(root, &base, &needle, &mut out, &mut matches, max);
+    } else {
+        let mut stack = vec![base];
+        while let Some(dir) = stack.pop() {
+            if matches >= max {
+                break;
+            }
+            let Ok(entries) = crate::read_dir_entries(&dir) else {
+                continue;
+            };
+            for entry in entries {
+                if entry.is_dir {
+                    stack.push(entry.path);
+                } else {
+                    grep_file(root, &entry.path, &needle, &mut out, &mut matches, max);
+                    if matches >= max {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    if out.is_empty() {
+        format!("no matches for \"{query}\"")
+    } else {
+        if matches >= max {
+            out.push_str("… [more matches omitted]\n");
+        }
+        cap(out)
+    }
+}
+
+/// Append `path:line: text` matches for `needle` in one file (skipping large or
+/// non-UTF-8 files) to `out`, stopping at `max` total matches.
+fn grep_file(
+    root: &Path,
+    path: &Path,
+    needle: &str,
+    out: &mut String,
+    matches: &mut usize,
+    max: usize,
+) {
+    if std::fs::metadata(path)
+        .map(|m| m.len() > 1_000_000)
+        .unwrap_or(true)
+    {
+        return;
+    }
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let rel = path.strip_prefix(root).unwrap_or(path);
+    for (i, line) in text.lines().enumerate() {
+        if *matches >= max {
+            return;
+        }
+        if line.to_lowercase().contains(needle) {
+            let trimmed = line.trim();
+            let shown = if trimmed.len() > 200 {
+                &trimmed[..floor_char_boundary(trimmed, 200)]
+            } else {
+                trimmed
+            };
+            out.push_str(&format!("{}:{}: {}\n", rel.display(), i + 1, shown));
+            *matches += 1;
+        }
+    }
+}
+
+/// Run a git command in `root`, injecting a fallback identity for commits so
+/// they don't fail when git has no configured `user.name`/`user.email`.
+fn run_git(root: &Path, args: &str, timeout: Duration) -> String {
+    let command = if args.trim_start().starts_with("commit") {
+        format!("git -c user.name=Kestrel -c user.email=kestrel@local {args}")
+    } else {
+        format!("git {args}")
+    };
+    run_shell(root, &command, timeout)
+}
+
 /// Run the project's detected verification ladder and format the outcome.
 fn project_verify(root: &Path) -> String {
     let inspection = match crate::inspect_project(root) {
@@ -604,7 +752,7 @@ pub fn run_agent(
                 let out = execute_tool(root, call);
                 // Surface build/verify results in the transcript, not just to
                 // the model, so the user can watch it check its own work.
-                if matches!(call.name.as_str(), "run_command" | "verify") {
+                if matches!(call.name.as_str(), "run_command" | "verify" | "git") {
                     on_event(AgentEvent::Assistant(tail(&out, 1200)));
                 }
                 out
@@ -675,6 +823,48 @@ mod tests {
         let out = execute_tool(&dir, &call);
         assert!(out.contains("exit code: 0"), "got: {out}");
         assert!(out.contains("kestrel_ok"), "got: {out}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn search_tool_finds_matches_with_locations() {
+        let dir = std::env::temp_dir().join(format!("kestrel-search-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/a.rs"), "fn alpha() {}\nfn beta() {}\n").unwrap();
+        std::fs::write(dir.join("src/b.rs"), "// beta helper\n").unwrap();
+
+        let call = ToolCall {
+            id: "1".to_string(),
+            name: "search".to_string(),
+            input: serde_json::json!({ "query": "beta" }),
+        };
+        let out = execute_tool(&dir, &call);
+        assert!(out.contains("a.rs:2"), "got: {out}");
+        assert!(out.contains("b.rs:1"), "got: {out}");
+
+        let miss = execute_tool(
+            &dir,
+            &ToolCall {
+                id: "2".to_string(),
+                name: "search".to_string(),
+                input: serde_json::json!({ "query": "zzznope" }),
+            },
+        );
+        assert!(miss.contains("no matches"), "got: {miss}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn git_tool_runs_git() {
+        let dir = std::env::temp_dir().join(format!("kestrel-git-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let call = ToolCall {
+            id: "1".to_string(),
+            name: "git".to_string(),
+            input: serde_json::json!({ "args": "--version" }),
+        };
+        let out = execute_tool(&dir, &call);
+        assert!(out.to_lowercase().contains("git version"), "got: {out}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
