@@ -55,6 +55,14 @@ fn main() -> io::Result<()> {
             };
             run_ask(opts)?;
         }
+        "edit" => {
+            let rest: Vec<String> = args.collect();
+            let Some(opts) = parse_edit_args(&rest) else {
+                eprintln!("Usage: kestrel edit <file> \"<instruction>\" [--apply] [--model NAME] [--budget N] [--max-tokens N] [--dry-run]");
+                std::process::exit(2);
+            };
+            run_edit(opts)?;
+        }
         "--help" | "-h" | "help" => print_usage(),
         unknown => {
             eprintln!("Unknown command: {unknown}");
@@ -80,6 +88,8 @@ fn print_usage() {
     println!("                            Build a context pack from a natural-language query");
     println!("  kestrel ask \"<question>\" [path] [--model NAME] [--dry-run]");
     println!("                            Answer a question about the codebase using a model");
+    println!("  kestrel edit <file> \"<instruction>\" [--apply] [--model NAME] [--dry-run]");
+    println!("                            Propose a reviewed diff for a file (write with --apply)");
 }
 
 fn print_summary(inspection: &ProjectInspection) {
@@ -692,6 +702,84 @@ fn assemble_context(graph: &ProjectGraph, pack: &kestrel_core::ContextPack) -> S
     out
 }
 
+/// POST an assembled Messages body to the Anthropic API via the system `curl`,
+/// returning the parsed response or an error (including surfaced API errors).
+fn send_anthropic(body: &serde_json::Value, api_key: &str) -> io::Result<serde_json::Value> {
+    let body_str = serde_json::to_string(body).unwrap_or_default();
+    let tmp = env::temp_dir().join(format!("kestrel-req-{}.json", std::process::id()));
+    std::fs::write(&tmp, &body_str)?;
+    let result = std::process::Command::new("curl")
+        .args([
+            "-sS",
+            "https://api.anthropic.com/v1/messages",
+            "-H",
+            "content-type: application/json",
+            "-H",
+            "anthropic-version: 2023-06-01",
+            "-H",
+            &format!("x-api-key: {api_key}"),
+            "-d",
+            &format!("@{}", tmp.display()),
+        ])
+        .output();
+    let _ = std::fs::remove_file(&tmp);
+
+    let output = result?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "curl request failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "unexpected response (not JSON): {e}\n{}",
+                String::from_utf8_lossy(&output.stdout)
+            ),
+        )
+    })?;
+    if response.get("type").and_then(|t| t.as_str()) == Some("error") {
+        let message = response
+            .pointer("/error/message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("unknown error");
+        return Err(io::Error::other(format!("API error: {message}")));
+    }
+    Ok(response)
+}
+
+/// Concatenate all `text` content blocks of a Messages response.
+fn response_text(response: &serde_json::Value) -> String {
+    let mut text = String::new();
+    if let Some(blocks) = response.get("content").and_then(|c| c.as_array()) {
+        for block in blocks {
+            if block.get("type").and_then(|t| t.as_str()) == Some("text") {
+                if let Some(t) = block.get("text").and_then(|t| t.as_str()) {
+                    text.push_str(t);
+                }
+            }
+        }
+    }
+    text
+}
+
+/// Print the token usage line for a Messages response to stderr.
+fn print_usage_line(response: &serde_json::Value) {
+    if let Some(usage) = response.get("usage") {
+        let input = usage
+            .get("input_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let output = usage
+            .get("output_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        eprintln!("\n[tokens: {input} in / {output} out]");
+    }
+}
+
 /// Answer a natural-language question about the codebase: seed a context pack
 /// from the question, assemble an Anthropic Messages request, and call the API
 /// via the system `curl` (no bundled TLS stack). `--dry-run` prints the request
@@ -755,64 +843,7 @@ fn run_ask(opts: AskOptions) -> io::Result<()> {
         return Ok(());
     };
 
-    // Send the body from a temp file so large context and quoting are safe.
-    let tmp = env::temp_dir().join(format!("kestrel-ask-{}.json", std::process::id()));
-    std::fs::write(&tmp, &body_str)?;
-    let result = std::process::Command::new("curl")
-        .args([
-            "-sS",
-            "https://api.anthropic.com/v1/messages",
-            "-H",
-            "content-type: application/json",
-            "-H",
-            "anthropic-version: 2023-06-01",
-            "-H",
-            &format!("x-api-key: {api_key}"),
-            "-d",
-            &format!("@{}", tmp.display()),
-        ])
-        .output();
-    let _ = std::fs::remove_file(&tmp);
-
-    let output = result?;
-    if !output.status.success() {
-        eprintln!(
-            "curl request failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-        std::process::exit(1);
-    }
-
-    let response: serde_json::Value = serde_json::from_slice(&output.stdout).map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "unexpected response (not JSON): {e}\n{}",
-                String::from_utf8_lossy(&output.stdout)
-            ),
-        )
-    })?;
-
-    if response.get("type").and_then(|t| t.as_str()) == Some("error") {
-        let message = response
-            .pointer("/error/message")
-            .and_then(|m| m.as_str())
-            .unwrap_or("unknown error");
-        eprintln!("API error: {message}");
-        std::process::exit(1);
-    }
-
-    let mut answer = String::new();
-    if let Some(blocks) = response.get("content").and_then(|c| c.as_array()) {
-        for block in blocks {
-            if block.get("type").and_then(|t| t.as_str()) == Some("text") {
-                if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
-                    answer.push_str(text);
-                }
-            }
-        }
-    }
-
+    let response = send_anthropic(&body, &api_key)?;
     let stop = response
         .get("stop_reason")
         .and_then(|s| s.as_str())
@@ -820,21 +851,245 @@ fn run_ask(opts: AskOptions) -> io::Result<()> {
     if stop == "refusal" {
         eprintln!("(The model declined to answer this request.)");
     }
-    println!("{}", answer.trim());
+    println!("{}", response_text(&response).trim());
     if stop == "max_tokens" {
         eprintln!("\n(Answer truncated at max_tokens; raise it with --max-tokens.)");
     }
-    if let Some(usage) = response.get("usage") {
-        let input = usage
-            .get("input_tokens")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
-        let output = usage
-            .get("output_tokens")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
-        eprintln!("\n[tokens: {input} in / {output} out]");
+    print_usage_line(&response);
+
+    Ok(())
+}
+
+/// Extract the contents of the first fenced code block in `text`, or the whole
+/// trimmed text if there is no fence. The model is asked to return the updated
+/// file inside a single fence; this recovers it robustly.
+fn extract_code_block(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let Some(open) = lines
+        .iter()
+        .position(|line| line.trim_start().starts_with("```"))
+    else {
+        return format!("{}\n", text.trim());
+    };
+    let close = lines[open + 1..]
+        .iter()
+        .position(|line| line.trim_start().starts_with("```"))
+        .map(|rel| open + 1 + rel)
+        .unwrap_or(lines.len());
+    let inner = lines[open + 1..close].join("\n");
+    if inner.is_empty() {
+        String::new()
+    } else {
+        format!("{inner}\n")
     }
+}
+
+/// Render a unified diff between `old` and `new`, or `None` if identical.
+fn render_unified_diff(old: &str, new: &str, path: &str) -> Option<String> {
+    if old == new {
+        return None;
+    }
+    let diff = similar::TextDiff::from_lines(old, new);
+    Some(
+        diff.unified_diff()
+            .context_radius(3)
+            .header(&format!("a/{path}"), &format!("b/{path}"))
+            .to_string(),
+    )
+}
+
+/// A Markdown fence tag for a file based on its extension.
+fn fence_for_path(path: &Path) -> &'static str {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("rs") => "rust",
+        Some("ts") | Some("tsx") | Some("js") | Some("jsx") | Some("mjs") | Some("cjs") => {
+            "typescript"
+        }
+        Some("py" | "pyw") => "python",
+        _ => "",
+    }
+}
+
+struct EditOptions {
+    file: PathBuf,
+    instruction: String,
+    budget: usize,
+    model: String,
+    max_tokens: u64,
+    apply: bool,
+    dry_run: bool,
+}
+
+/// Parse `edit` arguments: `<file>` and `<instruction>` (positional), plus
+/// `--apply`, `--dry-run`, `--model`, `--budget`/`-b`, and `--max-tokens`.
+fn parse_edit_args(args: &[String]) -> Option<EditOptions> {
+    let mut file = None;
+    let mut instruction = None;
+    let mut budget = DEFAULT_ASK_BUDGET;
+    let mut model = DEFAULT_ASK_MODEL.to_string();
+    let mut max_tokens = 8_192u64;
+    let mut apply = false;
+    let mut dry_run = false;
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        match arg.as_str() {
+            "--budget" | "-b" => {
+                if let Some(v) = args.get(i + 1).and_then(|v| v.parse().ok()) {
+                    budget = v;
+                }
+                i += 2;
+            }
+            "--model" => {
+                if let Some(v) = args.get(i + 1) {
+                    model = v.clone();
+                }
+                i += 2;
+            }
+            "--max-tokens" => {
+                if let Some(v) = args.get(i + 1).and_then(|v| v.parse().ok()) {
+                    max_tokens = v;
+                }
+                i += 2;
+            }
+            "--apply" => {
+                apply = true;
+                i += 1;
+            }
+            "--dry-run" => {
+                dry_run = true;
+                i += 1;
+            }
+            _ => {
+                if file.is_none() {
+                    file = Some(PathBuf::from(arg));
+                } else if instruction.is_none() {
+                    instruction = Some(arg.clone());
+                }
+                i += 1;
+            }
+        }
+    }
+    Some(EditOptions {
+        file: file?,
+        instruction: instruction?,
+        budget: budget.max(1),
+        model,
+        max_tokens: max_tokens.max(1),
+        apply,
+        dry_run,
+    })
+}
+
+/// Propose an edit to a single file: build context, ask the model for the full
+/// updated file, show a unified diff, and write it only when `--apply` is given.
+fn run_edit(opts: EditOptions) -> io::Result<()> {
+    if !opts.file.is_file() {
+        eprintln!("Not a readable file: {}", opts.file.display());
+        std::process::exit(2);
+    }
+    let current = std::fs::read_to_string(&opts.file)?;
+
+    let search_root = opts
+        .file
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let graph = build_project_graph(&search_root)?;
+
+    // Background context: files related to the target, excluding the target.
+    let mut background = String::new();
+    if let Some(node) = find_node(&graph, &opts.file) {
+        if let Some(pack) = kestrel_core::build_context_pack(&graph, &node.path, opts.budget) {
+            for entry in &pack.entries {
+                if entry.path == node.path {
+                    continue;
+                }
+                if let Ok(src) = std::fs::read_to_string(graph.root.join(&entry.path)) {
+                    background.push_str(&format!(
+                        "### {} ({})\n```{}\n{}",
+                        entry.path.display(),
+                        entry.reason,
+                        fence_tag(&entry.language),
+                        src
+                    ));
+                    if !src.ends_with('\n') {
+                        background.push('\n');
+                    }
+                    background.push_str("```\n\n");
+                }
+            }
+        }
+    }
+
+    let display_path = opts.file.display().to_string();
+    let fence = fence_for_path(&opts.file);
+    let current_fenced = if current.ends_with('\n') {
+        current.clone()
+    } else {
+        format!("{current}\n")
+    };
+    let user_content = format!(
+        "{background}You are editing this file.\n\nTARGET FILE: {display_path}\n```{fence}\n{current_fenced}```\n\n\
+         INSTRUCTION: {}\n\nReturn the COMPLETE updated contents of {display_path} in a single fenced \
+         code block, and nothing else. Preserve all unrelated code exactly.",
+        opts.instruction
+    );
+    let system =
+        "You are Kestrel, a precise code-editing assistant. You are given a file's current \
+         contents and an instruction. Return the complete, updated contents of that file inside a \
+         single fenced code block, and nothing else — no prose, no partial snippets, no ellipses. \
+         Preserve unrelated code exactly. If the instruction cannot be satisfied, return the file \
+         unchanged.";
+
+    let body = serde_json::json!({
+        "model": opts.model,
+        "max_tokens": opts.max_tokens,
+        "system": system,
+        "messages": [{ "role": "user", "content": user_content }],
+    });
+
+    eprintln!(
+        "Kestrel edit — model {}, target {} (+{} context bytes)",
+        opts.model,
+        display_path,
+        background.len()
+    );
+
+    if opts.dry_run {
+        println!("{}", serde_json::to_string(&body).unwrap_or_default());
+        return Ok(());
+    }
+
+    let Some(api_key) = env::var("ANTHROPIC_API_KEY").ok().filter(|k| !k.is_empty()) else {
+        eprintln!("ANTHROPIC_API_KEY is not set. Set it, or use --dry-run to inspect the request.");
+        std::process::exit(2);
+    };
+
+    let response = send_anthropic(&body, &api_key)?;
+    if response.get("stop_reason").and_then(|s| s.as_str()) == Some("refusal") {
+        eprintln!("The model declined to perform this edit.");
+        print_usage_line(&response);
+        std::process::exit(1);
+    }
+    let proposed = extract_code_block(&response_text(&response));
+
+    match render_unified_diff(&current, &proposed, &display_path) {
+        None => {
+            eprintln!("No changes proposed — the file already satisfies the instruction.");
+        }
+        Some(diff) => {
+            print!("{diff}");
+            if opts.apply {
+                std::fs::write(&opts.file, &proposed)?;
+                eprintln!("\nApplied changes to {display_path}.");
+            } else {
+                eprintln!("\nProposed diff shown above. Re-run with --apply to write the changes.");
+            }
+        }
+    }
+    print_usage_line(&response);
 
     Ok(())
 }
@@ -864,4 +1119,49 @@ fn find_node<'a>(graph: &'a ProjectGraph, target: &Path) -> Option<&'a kestrel_c
         }
     }
     best.map(|(node, _)| node)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_code_block_with_language_tag() {
+        let text = "Here you go:\n```rust\nfn main() {}\n```\nDone.";
+        assert_eq!(extract_code_block(text), "fn main() {}\n");
+    }
+
+    #[test]
+    fn extract_code_block_without_fence_returns_trimmed() {
+        let text = "  fn main() {}  ";
+        assert_eq!(extract_code_block(text), "fn main() {}\n");
+    }
+
+    #[test]
+    fn extract_code_block_takes_first_block_and_inner_only() {
+        let text = "```\nline one\nline two\n```";
+        assert_eq!(extract_code_block(text), "line one\nline two\n");
+    }
+
+    #[test]
+    fn unified_diff_none_when_identical() {
+        assert!(render_unified_diff("a\nb\n", "a\nb\n", "f.rs").is_none());
+    }
+
+    #[test]
+    fn unified_diff_shows_changes() {
+        let diff = render_unified_diff("a\nb\nc\n", "a\nB\nc\n", "f.rs").expect("a diff");
+        assert!(diff.contains("-b"));
+        assert!(diff.contains("+B"));
+        assert!(diff.contains("a/f.rs"));
+        assert!(diff.contains("b/f.rs"));
+    }
+
+    #[test]
+    fn fence_for_path_maps_extensions() {
+        assert_eq!(fence_for_path(Path::new("x.rs")), "rust");
+        assert_eq!(fence_for_path(Path::new("x.tsx")), "typescript");
+        assert_eq!(fence_for_path(Path::new("x.py")), "python");
+        assert_eq!(fence_for_path(Path::new("x.txt")), "");
+    }
 }

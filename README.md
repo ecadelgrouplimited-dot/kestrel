@@ -67,6 +67,16 @@ cargo run -p kestrel-cli -- ask "how are dependency graph edges built and ranked
 
 The model call is made through the system `curl` (no bundled TLS stack), so it works anywhere `curl` is on `PATH` (Windows 10+, macOS, Linux all ship it). Flags: `--model NAME` (default `claude-opus-4-8`), `--budget N` (context tokens), `--max-tokens N` (answer cap), and `--dry-run` to print the exact request JSON without sending it. Without `ANTHROPIC_API_KEY` set, `ask` prints the assembled prompt instead of calling the API, so it stays useful offline.
 
+Propose a **reviewed diff** for a file. Kestrel gathers the file plus its graph-related context, asks the model for the complete updated file, and prints a unified diff. Nothing is written unless you pass `--apply`:
+
+```powershell
+cargo run -p kestrel-cli -- edit E:\Projects\some-repo\src\service.ts "add input validation to the load() method"
+# review the diff, then:
+cargo run -p kestrel-cli -- edit E:\Projects\some-repo\src\service.ts "add input validation to the load() method" --apply
+```
+
+This is the first step of the *verified diff* wedge from [docs/vision-horizon.md](docs/vision-horizon.md): the human directs, the agent produces a concrete change, and the human reviews before it lands. Verification (running the project's lint/test/build after the edit) is the natural next increment. Same transport and flags as `ask`, plus `--apply` to write.
+
 ### Incremental index cache
 
 The `graph`, `related`, and `context` commands persist their parse results to `<project-root>/.kestrel/index.json`, keyed by each file's size and modification time. On the next run only changed files are re-parsed — the first real step from a re-derived context engine toward a *living*, incrementally updated one. The cache directory is git-ignored; delete `.kestrel/` to force a full rebuild.
