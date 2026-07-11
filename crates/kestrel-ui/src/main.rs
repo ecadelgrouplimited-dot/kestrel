@@ -157,6 +157,7 @@ struct KestrelApp {
     run_log: String,
     run_selected_pid: Option<u32>,
     run_status: String,
+    run_shots: Vec<PathBuf>,
     // Settings state.
     settings: kestrel_core::Settings,
     user_name: String,
@@ -232,6 +233,7 @@ impl Default for KestrelApp {
             run_log: String::new(),
             run_selected_pid: None,
             run_status: String::new(),
+            run_shots: Vec::new(),
             settings,
             user_name,
             user_email,
@@ -1399,7 +1401,15 @@ impl KestrelApp {
     }
 
     fn refresh_apps(&mut self) {
-        self.run_apps = kestrel_core::running_apps(&self.project_path());
+        let root = self.project_path();
+        self.run_apps = kestrel_core::running_apps(&root);
+        // Auto-fill the preview URL from a server that printed its address.
+        if self.run_url.trim().is_empty() {
+            if let Some(url) = self.run_apps.iter().find_map(|a| a.url.clone()) {
+                self.run_url = url;
+            }
+        }
+        self.run_shots = kestrel_core::list_screenshots(&root);
     }
 
     /// The Run tab: start/stop the app, watch its logs, and open a preview.
@@ -1454,6 +1464,7 @@ impl KestrelApp {
         }
         let mut view_log: Option<u32> = None;
         let mut stop: Option<u32> = None;
+        let mut open: Option<String> = None;
         for app in &self.run_apps {
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(format!("pid {}", app.pid)).monospace());
@@ -1465,12 +1476,20 @@ impl KestrelApp {
                     if ui.small_button("Logs").clicked() {
                         view_log = Some(app.pid);
                     }
+                    if let Some(url) = &app.url {
+                        if ui.small_button("Open").on_hover_text(url).clicked() {
+                            open = Some(url.clone());
+                        }
+                    }
                 });
             });
         }
         if let Some(pid) = view_log {
             self.run_log = kestrel_core::app_logs(&self.project_path(), pid);
             self.run_selected_pid = Some(pid);
+        }
+        if let Some(url) = open {
+            self.run_status = kestrel_core::open_url(&url);
         }
         if let Some(pid) = stop {
             self.run_status = kestrel_core::stop_app(&self.project_path(), pid);
@@ -1479,6 +1498,36 @@ impl KestrelApp {
                 self.run_log.clear();
             }
             self.refresh_apps();
+        }
+
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.strong(format!("Screenshots ({})", self.run_shots.len()));
+            if ui.button("📸 Capture").clicked() {
+                self.run_status = kestrel_core::take_screenshot(&self.project_path());
+                self.run_shots = kestrel_core::list_screenshots(&self.project_path());
+            }
+        });
+        let mut open_shot: Option<String> = None;
+        egui::ScrollArea::vertical()
+            .id_source("screenshots")
+            .max_height(120.0)
+            .show(ui, |ui| {
+                for shot in &self.run_shots {
+                    ui.horizontal(|ui| {
+                        if ui.small_button("Open").clicked() {
+                            open_shot = Some(shot.display().to_string());
+                        }
+                        let name = shot
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_default();
+                        ui.label(egui::RichText::new(name).monospace().weak());
+                    });
+                }
+            });
+        if let Some(path) = open_shot {
+            self.run_status = kestrel_core::open_path(&path);
         }
 
         if let Some(pid) = self.run_selected_pid {

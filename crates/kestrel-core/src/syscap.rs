@@ -257,6 +257,8 @@ pub struct RunningApp {
     pub pid: u32,
     pub command: String,
     pub log: String,
+    /// A local URL detected in the app's output, if any (for a preview button).
+    pub url: Option<String>,
 }
 
 /// The background apps that are still running (prunes any that have exited).
@@ -268,12 +270,62 @@ pub fn running_apps(root: &Path) -> Vec<RunningApp> {
     save_registry(root, &alive);
     alive
         .into_iter()
-        .map(|p| RunningApp {
-            pid: p.pid,
-            command: p.command,
-            log: p.log,
+        .map(|p| {
+            let url = detect_url(&read_tail(Path::new(&p.log), 6000));
+            RunningApp {
+                pid: p.pid,
+                command: p.command,
+                log: p.log,
+                url,
+            }
         })
         .collect()
+}
+
+/// Find the first local server URL (localhost/127.0.0.1/0.0.0.0) printed in
+/// `text`, normalising `0.0.0.0` to `localhost`. Used to auto-fill the preview.
+pub fn detect_url(text: &str) -> Option<String> {
+    let separators = [' ', '\t', '\n', '\r', '"', '\'', '(', ')', '<', '>', '`'];
+    for raw in text.split(|c: char| separators.contains(&c)) {
+        if raw.starts_with("http://") || raw.starts_with("https://") {
+            let low = raw.to_lowercase();
+            if low.contains("localhost") || low.contains("127.0.0.1") || low.contains("0.0.0.0") {
+                let url = raw.trim_end_matches(['.', ',', ';', '!']);
+                return Some(url.replace("0.0.0.0", "localhost"));
+            }
+        }
+    }
+    None
+}
+
+/// Open a local file (e.g. a screenshot) with the OS default application.
+pub fn open_path(path: &str) -> String {
+    let spawned = if cfg!(windows) {
+        Command::new("cmd").args(["/C", "start", "", path]).spawn()
+    } else if cfg!(target_os = "macos") {
+        Command::new("open").arg(path).spawn()
+    } else {
+        Command::new("xdg-open").arg(path).spawn()
+    };
+    match spawned {
+        Ok(_) => format!("opened {path}"),
+        Err(err) => format!("error: {err}"),
+    }
+}
+
+/// The saved screenshots for a project, newest first.
+pub fn list_screenshots(root: &Path) -> Vec<PathBuf> {
+    let dir = root.join(".kestrel").join("screenshots");
+    let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().map(|e| e == "png").unwrap_or(false))
+        .collect();
+    files.sort();
+    files.reverse();
+    files
 }
 
 /// Poll a URL until it responds (any HTTP status) or `timeout_secs` elapses.
@@ -475,6 +527,19 @@ mod tests {
         assert_eq!(known_winget_id("composer"), Some("Composer.Composer"));
         assert_eq!(known_winget_id("php"), Some("PHP.PHP"));
         assert!(known_winget_id("totally-unknown-xyz").is_none());
+    }
+
+    #[test]
+    fn detects_local_server_url() {
+        assert_eq!(
+            detect_url("  ➜  Local:   http://localhost:5173/"),
+            Some("http://localhost:5173/".to_string())
+        );
+        assert_eq!(
+            detect_url("Server running on http://0.0.0.0:3000."),
+            Some("http://localhost:3000".to_string())
+        );
+        assert_eq!(detect_url("no url here, just building…"), None);
     }
 
     #[test]
