@@ -5,12 +5,14 @@ pub mod context;
 pub mod environment;
 pub mod graph;
 pub mod inspect;
+pub mod pricing;
 pub mod project;
 pub mod providers;
 pub mod secrets;
 pub mod settings;
 pub mod symbols;
 pub mod syntax;
+pub mod tests_select;
 pub mod verify;
 pub mod workspace;
 
@@ -18,8 +20,8 @@ pub use agent::{
     agent_loop_system_prompt, agent_session_path, agent_system_prompt, apply_file_edits,
     audit_log_path, builtin_tools, describe_call, execute_tool, git_checkpoint, git_commit_all,
     git_init, git_log, git_restore, git_revert_all, git_review, load_agent_session,
-    parse_file_edits, run_agent, save_agent_session, AgentEvent, AgentOutcome, AgentSession,
-    AppliedEdit, Checkpoint, FileEdit, GitReview,
+    parse_file_edits, run_agent, run_shell_command, save_agent_session, AgentEvent, AgentOutcome,
+    AgentSession, AppliedEdit, Checkpoint, FileEdit, GitReview,
 };
 pub use config::{load_config, Config, ConfigLoad};
 pub use context::{
@@ -34,6 +36,7 @@ pub use inspect::{
     inspect_project, project_symbols, CommandKind, CommandSuggestion, FileInventory,
     LanguageSummary, ProjectInspection, ProjectMarker, SymbolSummary,
 };
+pub use pricing::{estimate_cost, model_price, ModelPrice};
 pub use project::{create_project, push_recent, NewProject, MAX_RECENTS};
 pub use providers::{
     chat, chat_stream, run_turn, AgentMessage, ChatMessage, ChatRequest, ProviderConfig,
@@ -49,6 +52,7 @@ pub use symbols::{
     SymbolExtractor, SymbolKind,
 };
 pub use syntax::{highlight, language_from_extension, Language, Span, TokenKind};
+pub use tests_select::{is_test_path, select_tests, TestSelection};
 pub use verify::{plan_verification, run_verification, StepResult, VerificationReport, VerifyStep};
 pub use workspace::{
     create_dir, create_file, delete_entry, read_dir_entries, read_text_file, rename_entry,

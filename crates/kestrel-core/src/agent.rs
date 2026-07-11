@@ -526,6 +526,13 @@ fn floor_char_boundary(text: &str, index: usize) -> usize {
         .unwrap_or(0)
 }
 
+/// Run `command` in the project root, capturing its output and exit code
+/// (killed after `timeout_secs`). Public entry point for UI-driven commands
+/// such as running the affected tests.
+pub fn run_shell_command(root: &Path, command: &str, timeout_secs: u64) -> String {
+    run_shell(root, command, Duration::from_secs(timeout_secs))
+}
+
 /// Run `command` in `root` via the platform shell, capturing stdout/stderr and
 /// the exit code, killing it after `timeout`. Output tails are returned so the
 /// model sees the relevant end of a long build log.
@@ -707,6 +714,8 @@ pub struct GitReview {
     pub summary: String,
     /// The changed entries (`git status --porcelain` lines).
     pub files: Vec<String>,
+    /// The changed file paths (project-relative), parsed from `files`.
+    pub paths: Vec<String>,
     /// The unified working-tree diff (untracked files included).
     pub diff: String,
     /// Likely secrets found in the changed files.
@@ -761,6 +770,7 @@ pub fn git_review(root: &Path) -> GitReview {
         has_head,
         summary,
         files,
+        paths,
         diff,
         secrets,
     }

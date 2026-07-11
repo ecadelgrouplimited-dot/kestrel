@@ -36,7 +36,7 @@ configurable and the agent has a full engineering toolset.
 - ✅ Patch proposal & diff review (CLI `edit`; UI **Diff** tab with Keep/Revert)
 - ✅ Command execution (agent `run_command`; CLI `run` with shell selection)
 - ✅ Verification loop (agent `verify` + CLI `verify`/`--repair`)
-- 🟡 Cost/estimate display (token estimates in context packs; no live $ meter yet)
+- ✅ Cost/estimate display (live token + cost meter in the chat compose bar)
 
 ## Phase 2 — Windows Superpower 🟡
 
@@ -55,10 +55,13 @@ configurable and the agent has a full engineering toolset.
 - ✅ **Secret scanner** (dependency-free; flags likely keys/tokens/private keys
   in changed files, surfaced in the Diff tab before you commit)
 - ✅ **Local audit log** (`.kestrel/audit.log`: every agent run and tool action,
-  timestamped)
+  timestamped) + an in-app **Audit** viewer
+- ✅ **Test selection** (pick the tests affected by the changes via the
+  dependency graph; "Test changes" in the Diff tab runs only those)
+- ✅ **Dirty-worktree protection** (uncommitted work is checkpointed before a
+  run and the user is told, so nothing is lost)
 - ⬜ LSP diagnostics integration
-- ⬜ Test selection
-- ⬜ Dirty-worktree protection · Policy engine
+- ⬜ Policy engine
 
 ## Beyond the roadmap line (shipped early because cheap and high-value)
 
@@ -74,8 +77,7 @@ configurable and the agent has a full engineering toolset.
 
 ## Next candidates
 
-1. **Cost meter** — live token/cost estimate per request in the UI.
-2. **Test selection** — run only the checks affected by a change.
-3. **Dirty-worktree protection** — warn before an agent run if there are
-   uncommitted changes that aren't checkpointed.
-4. **Audit log viewer** — surface `.kestrel/audit.log` in the app.
+1. **LSP diagnostics** — surface language-server errors/warnings inline.
+2. **Policy engine** — allow/deny rules for tools, paths, and commands.
+3. **Usage dashboard** — session token/cost totals over time (Phase 4).
+4. **Multi-repo reasoning** — reach across repositories (Phase 5).

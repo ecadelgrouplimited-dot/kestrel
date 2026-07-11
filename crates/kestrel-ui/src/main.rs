@@ -522,6 +522,9 @@ impl eframe::App for KestrelApp {
                         if ui.button("Env").clicked() {
                             self.spawn(environment);
                         }
+                        if ui.button("Audit").clicked() {
+                            self.show_audit_log();
+                        }
                         ui.separator();
                         ui.label("Query:");
                         let enter = ui
@@ -1109,6 +1112,7 @@ impl KestrelApp {
         let mut commit = false;
         let mut revert = false;
         let mut init = false;
+        let mut test = false;
         let mut restore: Option<String> = None;
 
         {
@@ -1134,6 +1138,13 @@ impl KestrelApp {
                             refresh = true;
                         }
                         let has_changes = !review.files.is_empty();
+                        if ui
+                            .add_enabled(has_changes, egui::Button::new("🧪 Test changes"))
+                            .on_hover_text("run only the tests affected by these changes")
+                            .clicked()
+                        {
+                            test = true;
+                        }
                         if ui
                             .add_enabled(has_changes, egui::Button::new("✓ Keep (commit)"))
                             .on_hover_text("git add -A && commit")
@@ -1244,10 +1255,66 @@ impl KestrelApp {
         if let Some(id) = restore {
             self.restore_target = Some(id);
         }
+        if test {
+            self.run_affected_tests();
+        }
         if refresh {
             self.diff_status.clear();
             self.diff_review = None;
         }
+    }
+
+    /// Select and run only the tests affected by the current changes, showing
+    /// the command and its output on the Output tab.
+    fn run_affected_tests(&mut self) {
+        let root = self.project_path();
+        let changed = self
+            .diff_review
+            .as_ref()
+            .map(|r| r.paths.clone())
+            .unwrap_or_default();
+        self.central = CentralView::Output;
+        self.spawn(move || {
+            let selection = kestrel_core::select_tests(&root, &changed);
+            match selection.command {
+                Some(command) => {
+                    let output = kestrel_core::run_shell_command(&root, &command, 300);
+                    JobOutcome::Text {
+                        output: format!("$ {command}\n\n{output}"),
+                        status: selection.note,
+                    }
+                }
+                None => {
+                    let files = if selection.test_files.is_empty() {
+                        "(none)".to_string()
+                    } else {
+                        selection
+                            .test_files
+                            .iter()
+                            .map(|p| p.display().to_string())
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    };
+                    JobOutcome::Text {
+                        output: format!(
+                            "{}\n\nAffected test files:\n{files}\n\n(No runner command could be \
+                             built automatically — run these yourself.)",
+                            selection.note
+                        ),
+                        status: selection.note,
+                    }
+                }
+            }
+        });
+    }
+
+    /// Load this project's agent audit log into the Output tab.
+    fn show_audit_log(&mut self) {
+        let path = kestrel_core::audit_log_path(&self.project_path());
+        self.output = std::fs::read_to_string(&path)
+            .unwrap_or_else(|_| "No audit log yet for this project.".to_string());
+        self.central = CentralView::Output;
+        self.status = format!("Audit log: {}", path.display());
     }
 
     /// Confirm before discarding the agent's changes.
@@ -1558,6 +1625,21 @@ impl KestrelApp {
                         ))
                         .strong(),
                     );
+                    // Cost meter: estimated size (and cost) of the next request.
+                    let ctx_chars: usize = self.chat_history.iter().map(|m| m.content.len()).sum();
+                    let input_tokens = kestrel_core::estimate_tokens(ctx_chars + 2_000);
+                    ui.separator();
+                    let meter = match kestrel_core::model_price(&p.model) {
+                        Some(price) => format!(
+                            "≈ {} tok context · ~${:.4} in · ${:.0}/${:.0} per 1M",
+                            input_tokens,
+                            kestrel_core::estimate_cost(price, input_tokens, 0),
+                            price.input_per_million,
+                            price.output_per_million
+                        ),
+                        None => format!("≈ {input_tokens} tok context"),
+                    };
+                    ui.label(egui::RichText::new(meter).weak());
                 }
                 None => {
                     ui.colored_label(
@@ -1707,9 +1789,16 @@ impl KestrelApp {
         let config = provider.to_config();
         let model = provider.model.clone();
         let root = self.project_path();
-        // Checkpoint the current state so this whole run can be rolled back.
+        // Checkpoint the current state so this whole run can be rolled back —
+        // and tell the user their uncommitted work was captured first.
         let label: String = prompt.chars().take(60).collect();
-        let _ = kestrel_core::git_checkpoint(&root, &label);
+        if let Ok(true) = kestrel_core::git_checkpoint(&root, &label) {
+            self.chat_history.push(kestrel_core::ChatMessage::assistant(
+                "🔖 Checkpointed your current changes before starting — roll back any time from \
+                 the Diff tab."
+                    .to_string(),
+            ));
+        }
         self.diff_review = None;
         // Carry the running conversation so a follow-up refines the same
         // project. The file history keeps accumulating across builds too.
