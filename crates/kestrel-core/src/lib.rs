@@ -7,6 +7,7 @@ pub mod graph;
 pub mod inspect;
 pub mod project;
 pub mod providers;
+pub mod secrets;
 pub mod settings;
 pub mod symbols;
 pub mod syntax;
@@ -15,10 +16,10 @@ pub mod workspace;
 
 pub use agent::{
     agent_loop_system_prompt, agent_session_path, agent_system_prompt, apply_file_edits,
-    builtin_tools, describe_call, execute_tool, git_checkpoint, git_commit_all, git_init, git_log,
-    git_restore, git_revert_all, git_review, load_agent_session, parse_file_edits, run_agent,
-    save_agent_session, AgentEvent, AgentOutcome, AgentSession, AppliedEdit, Checkpoint, FileEdit,
-    GitReview,
+    audit_log_path, builtin_tools, describe_call, execute_tool, git_checkpoint, git_commit_all,
+    git_init, git_log, git_restore, git_revert_all, git_review, load_agent_session,
+    parse_file_edits, run_agent, save_agent_session, AgentEvent, AgentOutcome, AgentSession,
+    AppliedEdit, Checkpoint, FileEdit, GitReview,
 };
 pub use config::{load_config, Config, ConfigLoad};
 pub use context::{
@@ -38,6 +39,7 @@ pub use providers::{
     chat, chat_stream, run_turn, AgentMessage, ChatMessage, ChatRequest, ProviderConfig,
     ProviderKind, ToolCall, ToolResult, ToolSpec, TurnResult,
 };
+pub use secrets::{scan_secrets, SecretFinding};
 pub use settings::{
     load_settings, model_suggestions, model_suggestions_for, provider_preset, save_settings,
     ProviderSettings, Settings, UserInfo, PROVIDER_PRESETS,

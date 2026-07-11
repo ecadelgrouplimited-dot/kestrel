@@ -12,10 +12,10 @@ use crate::providers::{
     run_turn, AgentMessage, ChatMessage, ProviderConfig, ToolCall, ToolResult, ToolSpec, TurnResult,
 };
 use serde::{Deserialize, Serialize};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// A cap on how much text a tool may return to the model, in bytes.
 const TOOL_OUTPUT_CAP: usize = 60_000;
@@ -709,6 +709,8 @@ pub struct GitReview {
     pub files: Vec<String>,
     /// The unified working-tree diff (untracked files included).
     pub diff: String,
+    /// Likely secrets found in the changed files.
+    pub secrets: Vec<crate::secrets::SecretFinding>,
 }
 
 /// Run a git command in `root`, returning (success, stdout, stderr).
@@ -734,7 +736,10 @@ pub fn git_review(root: &Path) -> GitReview {
     let (has_head, _, _) = git_output(root, &["rev-parse", "--verify", "HEAD"]);
     let _ = git_output(root, &["add", "-N", "--", "."]);
     let (_, diff, _) = git_output(root, &["--no-pager", "-c", "core.quotepath=false", "diff"]);
-    let (_, status, _) = git_output(root, &["status", "--porcelain"]);
+    let (_, status, _) = git_output(
+        root,
+        &["-c", "core.quotepath=false", "status", "--porcelain"],
+    );
     let files: Vec<String> = status
         .lines()
         .map(|l| l.trim_end().to_string())
@@ -745,12 +750,29 @@ pub fn git_review(root: &Path) -> GitReview {
     } else {
         format!("{} file(s) changed", files.len())
     };
+    let paths: Vec<String> = files
+        .iter()
+        .map(|l| porcelain_path(l))
+        .filter(|p| !p.is_empty())
+        .collect();
+    let secrets = crate::secrets::scan_secrets(root, &paths);
     GitReview {
         is_repo: true,
         has_head,
         summary,
         files,
         diff,
+        secrets,
+    }
+}
+
+/// Extract the file path from a `git status --porcelain` line.
+fn porcelain_path(line: &str) -> String {
+    let rest = line.get(3..).unwrap_or("").trim();
+    if let Some(idx) = rest.find("-> ") {
+        rest[idx + 3..].trim().trim_matches('"').to_string()
+    } else {
+        rest.trim_matches('"').to_string()
     }
 }
 
@@ -1002,6 +1024,66 @@ pub fn save_agent_session(root: &Path, session: &AgentSession) -> std::io::Resul
     std::fs::write(path, text)
 }
 
+/// The path to a project's agent audit log.
+pub fn audit_log_path(root: &Path) -> PathBuf {
+    root.join(".kestrel").join("audit.log")
+}
+
+/// Append one timestamped line to the project's audit log (best-effort).
+fn append_audit(root: &Path, entry: &str) {
+    let path = audit_log_path(root);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(file, "{}  {entry}", utc_timestamp());
+    }
+}
+
+/// A `YYYY-MM-DD HH:MM:SSZ` UTC timestamp, computed without a date dependency.
+fn utc_timestamp() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let days = (secs / 86_400) as i64;
+    let rem = secs % 86_400;
+    let (hour, min, sec) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    let (year, month, day) = civil_from_days(days);
+    format!("{year:04}-{month:02}-{day:02} {hour:02}:{min:02}:{sec:02}Z")
+}
+
+/// Convert a count of days since the Unix epoch to a civil (Y, M, D) date.
+/// Howard Hinnant's `civil_from_days` algorithm.
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let year = if month <= 2 { y + 1 } else { y };
+    (year, month, day)
+}
+
+/// The first line of a tool result, capped, for the audit log.
+fn audit_line(content: &str) -> String {
+    content
+        .lines()
+        .next()
+        .unwrap_or("")
+        .chars()
+        .take(140)
+        .collect()
+}
+
 /// The approximate byte size of one conversation message.
 fn message_bytes(message: &AgentMessage) -> usize {
     match message {
@@ -1100,6 +1182,10 @@ pub fn run_agent(
     let tools = builtin_tools();
     history.push(AgentMessage::User(user_prompt.to_string()));
     let mut reviewed = !review;
+    append_audit(
+        root,
+        &format!("RUN  {}", user_prompt.chars().take(140).collect::<String>()),
+    );
 
     for _ in 0..max_steps {
         // Keep the conversation affordable: drop the middle of a long history
@@ -1145,6 +1231,7 @@ pub fn run_agent(
                 history.push(AgentMessage::User(review_prompt(user_prompt)));
                 continue;
             }
+            append_audit(root, "END  finished");
             return AgentOutcome {
                 result: Ok(turn.text),
                 history,
@@ -1183,6 +1270,10 @@ pub fn run_agent(
                 }
                 out
             };
+            append_audit(
+                root,
+                &format!("{}  →  {}", describe_call(call), audit_line(&content)),
+            );
             results.push(ToolResult {
                 id: call.id.clone(),
                 name: call.name.clone(),
@@ -1191,6 +1282,7 @@ pub fn run_agent(
         }
         history.push(AgentMessage::ToolResults(results));
     }
+    append_audit(root, "END  step limit reached");
     AgentOutcome {
         result: Err(format!(
             "agent stopped after {max_steps} steps without finishing"

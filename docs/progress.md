@@ -52,9 +52,13 @@ configurable and the agent has a full engineering toolset.
 - ✅ Diff review / better code-review surface (colored git diff, Keep/Revert)
 - ✅ **Checkpoints & rollback** (auto-checkpoint before each agent run; restore
   any recent checkpoint from the Diff tab)
+- ✅ **Secret scanner** (dependency-free; flags likely keys/tokens/private keys
+  in changed files, surfaced in the Diff tab before you commit)
+- ✅ **Local audit log** (`.kestrel/audit.log`: every agent run and tool action,
+  timestamped)
 - ⬜ LSP diagnostics integration
 - ⬜ Test selection
-- ⬜ Dirty-worktree protection · Secret scanner · Policy engine · Local audit log
+- ⬜ Dirty-worktree protection · Policy engine
 
 ## Beyond the roadmap line (shipped early because cheap and high-value)
 
@@ -70,7 +74,8 @@ configurable and the agent has a full engineering toolset.
 
 ## Next candidates
 
-1. **Local audit log** — append every agent action to `.kestrel/audit.log`.
-2. **Secret scanner** — flag likely secrets in changed files before commit.
-3. **Cost meter** — live token/cost estimate per request in the UI.
-4. **Test selection** — run only the checks affected by a change.
+1. **Cost meter** — live token/cost estimate per request in the UI.
+2. **Test selection** — run only the checks affected by a change.
+3. **Dirty-worktree protection** — warn before an agent run if there are
+   uncommitted changes that aren't checkpointed.
+4. **Audit log viewer** — surface `.kestrel/audit.log` in the app.

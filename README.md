@@ -49,6 +49,8 @@ cargo run -p kestrel-ui
 
   **Checkpoints & rollback:** before every agent run, Kestrel commits a git checkpoint of the current state, so a whole run is undoable as a unit. The **Diff** tab lists recent checkpoints — hit **Restore** on any of them (behind a confirm) to roll the project back to that point. Combined with Keep/Revert, you can let the agent work freely and always get back to a known-good state.
 
+  **Secret scanning & audit log:** the Diff tab flags likely leaked credentials (provider/cloud API keys, tokens, private-key blocks) in the changed files before you commit them. And every agent run and tool action is appended, timestamped, to `.kestrel/audit.log` — a complete, local trail of what the agent did.
+
   While it runs, the Chat view shows a **live build panel**: the file explorer on the left fills up in real time, and a right-hand pane keeps a **history of every file created**, auto-previewing each one the instant it's written. Click any file in that history to see exactly what the agent wrote, or **Open in editor** to keep working on it. The transcript alongside shows the agent's narration and its `read_file`/`http_get` steps — so you see precisely what it's doing, not a generic "thinking" spinner.
 - **Never freezes** — slow work (verification, indexing, model calls) runs on a background thread; the window stays responsive.
 

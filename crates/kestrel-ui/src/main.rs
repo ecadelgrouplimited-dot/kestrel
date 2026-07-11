@@ -1155,6 +1155,27 @@ impl KestrelApp {
                     ui.label(egui::RichText::new(&self.diff_status).weak());
                 }
 
+                if !review.secrets.is_empty() {
+                    ui.add_space(2.0);
+                    ui.colored_label(
+                        egui::Color32::from_rgb(220, 90, 90),
+                        format!(
+                            "⚠ {} possible secret(s) in these changes — review before committing:",
+                            review.secrets.len()
+                        ),
+                    );
+                    for finding in &review.secrets {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "   {}:{} — {}",
+                                finding.path, finding.line, finding.kind
+                            ))
+                            .monospace()
+                            .color(egui::Color32::from_rgb(220, 120, 120)),
+                        );
+                    }
+                }
+
                 if !self.checkpoints.is_empty() {
                     egui::CollapsingHeader::new(format!(
                         "Checkpoints ({}) — roll back a run",
