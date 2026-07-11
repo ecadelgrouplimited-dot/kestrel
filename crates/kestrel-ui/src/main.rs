@@ -50,8 +50,10 @@ enum JobOutcome {
 
 /// A live update streamed from a running agent loop.
 enum AgentUpdate {
-    /// A transcript line (assistant narration or a read-only tool call).
+    /// The model's narration (also shown in the transcript).
     Line(String),
+    /// A tool action in progress (shown in the transcript and as live status).
+    Activity(String),
     /// A file the agent wrote, with its full contents for live preview.
     Wrote { path: String, contents: String },
     /// The agent finished; carries the final summary and the full conversation
@@ -175,6 +177,8 @@ struct KestrelApp {
     /// The running agent conversation, carried across builds so follow-up
     /// prompts refine the same project instead of starting from scratch.
     agent_messages: Vec<kestrel_core::AgentMessage>,
+    /// The agent's current activity, shown live while it works.
+    agent_activity: String,
 }
 
 impl Default for KestrelApp {
@@ -235,6 +239,7 @@ impl Default for KestrelApp {
             agent_files: Vec::new(),
             agent_preview: None,
             agent_messages: Vec::new(),
+            agent_activity: String::new(),
         }
     }
 }
@@ -341,11 +346,19 @@ impl KestrelApp {
             };
             match message {
                 Ok(AgentUpdate::Line(line)) => {
+                    self.agent_activity = "💭 Thinking…".to_string();
+                    self.chat_history
+                        .push(kestrel_core::ChatMessage::assistant(line));
+                    ctx.request_repaint();
+                }
+                Ok(AgentUpdate::Activity(line)) => {
+                    self.agent_activity = line.clone();
                     self.chat_history
                         .push(kestrel_core::ChatMessage::assistant(line));
                     ctx.request_repaint();
                 }
                 Ok(AgentUpdate::Wrote { path, contents }) => {
+                    self.agent_activity = format!("✍ Writing {path}");
                     if let Some(idx) = self.agent_files.iter().position(|f| f.path == path) {
                         self.agent_files[idx].contents = contents;
                         self.agent_preview = Some(idx);
@@ -367,6 +380,7 @@ impl KestrelApp {
                     }
                     self.agent_messages = history;
                     self.chat_pending = false;
+                    self.agent_activity.clear();
                     self.agent_job = None;
                     self.status = "Agent finished — review changes in the Diff tab.".to_string();
                     self.save_session();
@@ -378,6 +392,7 @@ impl KestrelApp {
                     self.chat_error = err;
                     self.agent_messages = history;
                     self.chat_pending = false;
+                    self.agent_activity.clear();
                     self.agent_job = None;
                     self.save_session();
                     self.diff_review = None;
@@ -430,6 +445,7 @@ impl eframe::App for KestrelApp {
         } else {
             egui::Visuals::light()
         });
+        configure_style(ctx, self.dark_mode);
         self.poll_job(ctx);
         self.poll_chat(ctx);
         self.poll_agent(ctx);
@@ -443,7 +459,7 @@ impl eframe::App for KestrelApp {
         egui::TopBottomPanel::top("controls").show(ctx, |ui| {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                ui.heading("Kestrel");
+                ui.heading(egui::RichText::new("🦅 Kestrel").color(ACCENT));
                 ui.separator();
                 ui.label("Project:");
                 ui.add(
@@ -479,7 +495,7 @@ impl eframe::App for KestrelApp {
                 ui.add_space(4.0);
                 ui.add_enabled_ui(!busy, |ui| {
                     ui.horizontal(|ui| {
-                        if ui.button("Open…").clicked() {
+                        if ui.button("📂 Open…").clicked() {
                             if let Some(dir) = rfd::FileDialog::new()
                                 .set_title("Open project folder")
                                 .pick_folder()
@@ -487,7 +503,7 @@ impl eframe::App for KestrelApp {
                                 self.open_project_path(dir);
                             }
                         }
-                        if ui.button("New project…").clicked() {
+                        if ui.button("✨ New project…").clicked() {
                             if self.new_project_parent.trim().is_empty() {
                                 self.new_project_parent = self.path.clone();
                             }
@@ -510,19 +526,19 @@ impl eframe::App for KestrelApp {
                             self.open_project_path(PathBuf::from(recent));
                         }
                         ui.separator();
-                        if ui.button("Inspect").clicked() {
+                        if ui.button("🔍 Inspect").clicked() {
                             self.run_text(inspect);
                         }
-                        if ui.button("Graph").clicked() {
+                        if ui.button("🕸 Graph").clicked() {
                             self.run_text(graph);
                         }
-                        if ui.button("Verify").clicked() {
+                        if ui.button("✅ Verify").clicked() {
                             self.run_text(verify);
                         }
-                        if ui.button("Env").clicked() {
+                        if ui.button("🖥 Env").clicked() {
                             self.spawn(environment);
                         }
-                        if ui.button("Audit").clicked() {
+                        if ui.button("📜 Audit").clicked() {
                             self.show_audit_log();
                         }
                         ui.separator();
@@ -1509,9 +1525,9 @@ impl KestrelApp {
         }
         for message in &self.chat_history {
             let (who, color) = if message.role == "user" {
-                ("You", egui::Color32::from_rgb(120, 170, 255))
+                ("🧑 You", egui::Color32::from_rgb(120, 170, 255))
             } else {
-                ("Kestrel", egui::Color32::from_rgb(150, 210, 150))
+                ("🦅 Kestrel", ACCENT)
             };
             ui.add_space(6.0);
             ui.label(egui::RichText::new(who).strong().color(color));
@@ -1524,7 +1540,12 @@ impl KestrelApp {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label(egui::RichText::new("Kestrel is thinking…").weak());
+                let activity = if self.agent_activity.is_empty() {
+                    "Kestrel is thinking…"
+                } else {
+                    self.agent_activity.as_str()
+                };
+                ui.label(egui::RichText::new(activity).strong());
             });
         }
     }
@@ -1668,6 +1689,7 @@ impl KestrelApp {
                     self.chat_job = None;
                     self.agent_job = None;
                     self.chat_pending = false;
+                    self.agent_activity.clear();
                     self.chat_error = "Cancelled.".to_string();
                 }
             });
@@ -1800,6 +1822,7 @@ impl KestrelApp {
             ));
         }
         self.diff_review = None;
+        self.agent_activity = "💭 Planning…".to_string();
         // Carry the running conversation so a follow-up refines the same
         // project. The file history keeps accumulating across builds too.
         let history = self.agent_messages.clone();
@@ -1818,9 +1841,7 @@ impl KestrelApp {
                 |event| {
                     let update = match event {
                         kestrel_core::AgentEvent::Assistant(text) => AgentUpdate::Line(text),
-                        kestrel_core::AgentEvent::Tool(call) => {
-                            AgentUpdate::Line(format!("↪ {call}"))
-                        }
+                        kestrel_core::AgentEvent::Tool(call) => AgentUpdate::Activity(call),
                         kestrel_core::AgentEvent::Wrote { path, contents } => {
                             AgentUpdate::Wrote { path, contents }
                         }
@@ -2216,6 +2237,39 @@ fn chat_system_prompt(include: bool, project: &Path, query: &str) -> String {
         }
     }
     prompt
+}
+
+/// Kestrel's amber accent colour (a kestrel is a russet falcon).
+const ACCENT: egui::Color32 = egui::Color32::from_rgb(0xE8, 0x8A, 0x2E);
+
+/// Apply Kestrel's visual style over the base light/dark theme: comfortable
+/// spacing, rounded widgets, and an amber accent for selection and links.
+fn configure_style(ctx: &egui::Context, dark: bool) {
+    let mut style = (*ctx.style()).clone();
+    style.spacing.item_spacing = egui::vec2(8.0, 6.0);
+    style.spacing.button_padding = egui::vec2(9.0, 5.0);
+    style.spacing.menu_margin = egui::Margin::same(6.0);
+    style.spacing.window_margin = egui::Margin::same(10.0);
+
+    let rounding = egui::Rounding::same(6.0);
+    let widgets = &mut style.visuals.widgets;
+    for w in [
+        &mut widgets.noninteractive,
+        &mut widgets.inactive,
+        &mut widgets.hovered,
+        &mut widgets.active,
+        &mut widgets.open,
+    ] {
+        w.rounding = rounding;
+    }
+    style.visuals.window_rounding = egui::Rounding::same(9.0);
+    style.visuals.menu_rounding = egui::Rounding::same(7.0);
+    style.visuals.selection.bg_fill = ACCENT.linear_multiply(if dark { 0.42 } else { 0.30 });
+    style.visuals.selection.stroke = egui::Stroke::new(1.0, ACCENT);
+    style.visuals.hyperlink_color = ACCENT;
+    // A touch of accent on the active widget outline.
+    style.visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, ACCENT.linear_multiply(0.6));
+    ctx.set_style(style);
 }
 
 /// The colour for a unified-diff line by its leading marker.

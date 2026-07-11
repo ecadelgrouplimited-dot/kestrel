@@ -338,14 +338,15 @@ pub fn describe_call(call: &ToolCall) -> String {
             .to_string()
     };
     match call.name.as_str() {
-        "read_file" | "list_dir" => format!("{}({})", call.name, arg("path")),
-        "http_get" => format!("http_get({})", arg("url")),
-        "search" => format!("search({})", arg("query")),
-        "write_file" => format!("write_file({})", arg("path")),
-        "edit_file" => format!("edit_file({})", arg("path")),
-        "run_command" => format!("run_command: {}", arg("command")),
-        "git" => format!("git {}", arg("args")),
-        "verify" => "verify()".to_string(),
+        "read_file" => format!("📖 Reading {}", arg("path")),
+        "list_dir" => format!("📁 Listing {}", arg("path")),
+        "http_get" => format!("🌐 Fetching {}", arg("url")),
+        "search" => format!("🔎 Searching \"{}\"", arg("query")),
+        "write_file" => format!("✍ Writing {}", arg("path")),
+        "edit_file" => format!("✏ Editing {}", arg("path")),
+        "run_command" => format!("▶ Running: {}", arg("command")),
+        "git" => format!("🔀 git {}", arg("args")),
+        "verify" => "✅ Verifying".to_string(),
         other => other.to_string(),
     }
 }
