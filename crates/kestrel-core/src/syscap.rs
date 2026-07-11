@@ -11,7 +11,7 @@ use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Command fragments that indicate a long-running process (a server/watcher),
 /// which must be started in the background rather than run to completion.
@@ -251,11 +251,72 @@ fn is_alive(pid: u32) -> bool {
     }
 }
 
+/// A background app Kestrel is tracking.
+#[derive(Debug, Clone)]
+pub struct RunningApp {
+    pub pid: u32,
+    pub command: String,
+    pub log: String,
+}
+
+/// The background apps that are still running (prunes any that have exited).
+pub fn running_apps(root: &Path) -> Vec<RunningApp> {
+    let alive: Vec<TrackedProcess> = load_registry(root)
+        .into_iter()
+        .filter(|p| is_alive(p.pid))
+        .collect();
+    save_registry(root, &alive);
+    alive
+        .into_iter()
+        .map(|p| RunningApp {
+            pid: p.pid,
+            command: p.command,
+            log: p.log,
+        })
+        .collect()
+}
+
+/// Poll a URL until it responds (any HTTP status) or `timeout_secs` elapses.
+pub fn http_check(url: &str, timeout_secs: u64) -> String {
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return "error: only http(s) URLs".to_string();
+    }
+    let null = if cfg!(windows) { "NUL" } else { "/dev/null" };
+    let start = Instant::now();
+    loop {
+        if let Ok(out) = Command::new("curl")
+            .args(["-sS", "-o", null, "-m", "5", "-w", "%{http_code}", url])
+            .output()
+        {
+            let code = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !code.is_empty() && code != "000" {
+                return format!("{url} responded with HTTP {code}");
+            }
+        }
+        if start.elapsed().as_secs() >= timeout_secs {
+            return format!(
+                "{url} did not respond within {timeout_secs}s — is the server running? Check app_logs."
+            );
+        }
+        std::thread::sleep(Duration::from_millis(600));
+    }
+}
+
 /// Start a long-running app (e.g. a dev server) in the background, capturing its
 /// output to a log, and track it. Stops any previous instance of the same
 /// command first (so re-running is clean), then does a brief health check so a
 /// server that crashes on startup is reported immediately with its output.
 pub fn start_app(root: &Path, command: &str) -> String {
+    start_app_inner(root, command, true)
+}
+
+/// Like [`start_app`] but returns immediately without the health-check wait,
+/// for a snappy UI Start button.
+pub fn start_app_detached(root: &Path, command: &str) -> String {
+    start_app_inner(root, command, false)
+}
+
+fn start_app_inner(root: &Path, command: &str, wait: bool) -> String {
     if command.trim().is_empty() {
         return "error: empty command".to_string();
     }
@@ -311,6 +372,12 @@ pub fn start_app(root: &Path, command: &str) -> String {
             });
             save_registry(root, &procs);
 
+            if !wait {
+                return format!(
+                    "started (pid {pid}) in the background: {command}\nlog: {}",
+                    log_path.display()
+                );
+            }
             // Give it a moment to bind/crash, then report.
             std::thread::sleep(Duration::from_millis(1500));
             let tail = read_tail(&log_path, 1500);

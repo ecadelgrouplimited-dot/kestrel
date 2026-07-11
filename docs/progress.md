@@ -71,9 +71,13 @@ configurable and the agent has a full engineering toolset.
 - ✅ Light/dark theme
 - ✅ Agent toolset: `read_file`, `list_dir`, `http_get`, `search`, `write_file`,
   `edit_file` (diff-style), `run_command`, `git`, `verify`
-- ✅ System agent: `open_url` (preview in browser), `start_app`/`list_apps`/
-  `stop_app` (background dev servers), `screenshot`, `install_tool`
-  (detect + winget install missing toolchains, e.g. composer/php/node)
+- ✅ System agent: `open_url` (preview in browser), `start_app`/`app_logs`/
+  `list_apps`/`stop_app` (background dev servers with captured logs + health
+  check), `http_check` (poll until a server responds), `screenshot`,
+  `install_tool` (detect + winget install missing toolchains, e.g.
+  composer/php/node). `run_command` refuses to hang on servers.
+- ✅ **Run tab** in the UI: start/stop the app, watch its logs live, and open a
+  browser preview — a real runner beside the agent.
 - ✅ Intelligent live status (the stream shows the real action with icons) and a
   visual polish pass (amber accent, rounded widgets, iconified controls)
 - ✅ Token economy: `edit_file` over full rewrites, automatic history compaction

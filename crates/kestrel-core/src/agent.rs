@@ -203,10 +203,11 @@ pub fn agent_loop_system_prompt(root: &Path) -> String {
          When a project needs tools that may not be installed, check with install_tool before \
          building. NEVER run a server or any long-running process (e.g. `node server.js`, \
          `npm run dev`, `php artisan serve`, watchers) with run_command — it will block. Use \
-         start_app for those; then app_logs(pid) to read the server's output and debug it, \
-         http_get to hit an endpoint, and open_url to preview. To restart after a fix, just call \
-         start_app again (it stops the previous instance). When something is broken (e.g. a bad \
-         database query), read app_logs and the code, fix it, restart, and re-check.\n\n\
+         start_app for those; then http_check(url) to confirm it's up, app_logs(pid) to read \
+         the server's output and debug it, http_get to hit an endpoint, and open_url to preview. \
+         To restart after a fix, just call start_app again (it stops the previous instance). When \
+         something is broken (e.g. a bad database query), read app_logs and the code, fix it, \
+         restart, and re-check.\n\n\
          Work step by step: inspect what you need with read_file/list_dir/http_get, then create \
          the project by calling write_file for each file with its ENTIRE contents (never partial \
          snippets). Prefer fewer, complete, runnable files.\n\n\
@@ -388,6 +389,17 @@ pub fn builtin_tools() -> Vec<ToolSpec> {
             }),
         },
         ToolSpec {
+            name: "http_check".to_string(),
+            description: "Poll a URL until it responds (or times out) and report the HTTP status \
+                          — use it after start_app to confirm a server is actually up."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": { "url": { "type": "string" } },
+                "required": ["url"],
+            }),
+        },
+        ToolSpec {
             name: "screenshot".to_string(),
             description:
                 "Capture the screen to a PNG under the project's .kestrel/screenshots for \
@@ -434,6 +446,7 @@ pub fn describe_call(call: &ToolCall) -> String {
         "git" => format!("🔀 git {}", arg("args")),
         "verify" => "✅ Verifying".to_string(),
         "open_url" => format!("🖥 Opening {}", arg("url")),
+        "http_check" => format!("🩺 Checking {}", arg("url")),
         "start_app" => format!("🚀 Starting: {}", arg("command")),
         "app_logs" => format!("📋 Reading logs (pid {})", arg("pid")),
         "list_apps" => "📋 Listing running apps".to_string(),
@@ -520,6 +533,7 @@ pub fn execute_tool(root: &Path, call: &ToolCall) -> String {
         }
         "verify" => project_verify(root),
         "open_url" => crate::syscap::open_url(&arg("url")),
+        "http_check" => crate::syscap::http_check(&arg("url"), 30),
         "start_app" => crate::syscap::start_app(root, &arg("command")),
         "app_logs" => match call.input.get("pid").and_then(|v| v.as_u64()) {
             Some(pid) => crate::syscap::app_logs(root, pid as u32),
@@ -1408,6 +1422,7 @@ pub fn run_agent(
                         | "list_apps"
                         | "stop_app"
                         | "open_url"
+                        | "http_check"
                         | "screenshot"
                 ) {
                     on_event(AgentEvent::Assistant(tail(&out, 1200)));

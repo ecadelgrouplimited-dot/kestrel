@@ -99,6 +99,7 @@ enum CentralView {
     Editor,
     Output,
     Diff,
+    Run,
 }
 
 /// A pending create/rename operation driving the entry modal.
@@ -149,6 +150,13 @@ struct KestrelApp {
     confirm_revert: bool,
     checkpoints: Vec<kestrel_core::Checkpoint>,
     restore_target: Option<String>,
+    // Run tab state.
+    run_command_input: String,
+    run_url: String,
+    run_apps: Vec<kestrel_core::RunningApp>,
+    run_log: String,
+    run_selected_pid: Option<u32>,
+    run_status: String,
     // Settings state.
     settings: kestrel_core::Settings,
     user_name: String,
@@ -218,6 +226,12 @@ impl Default for KestrelApp {
             confirm_revert: false,
             checkpoints: Vec::new(),
             restore_target: None,
+            run_command_input: String::new(),
+            run_url: String::new(),
+            run_apps: Vec::new(),
+            run_log: String::new(),
+            run_selected_pid: None,
+            run_status: String::new(),
             settings,
             user_name,
             user_email,
@@ -626,6 +640,12 @@ impl eframe::App for KestrelApp {
                 ui.selectable_value(&mut self.central, CentralView::Editor, "Editor");
                 ui.selectable_value(&mut self.central, CentralView::Output, "Output");
                 ui.selectable_value(&mut self.central, CentralView::Diff, "Diff");
+                if ui
+                    .selectable_value(&mut self.central, CentralView::Run, "▶ Run")
+                    .clicked()
+                {
+                    self.refresh_apps();
+                }
             });
             ui.separator();
             match self.central {
@@ -641,6 +661,7 @@ impl eframe::App for KestrelApp {
                         });
                 }
                 CentralView::Diff => self.diff_ui(ui),
+                CentralView::Run => self.run_ui(ui),
             }
         });
     }
@@ -1374,6 +1395,109 @@ impl KestrelApp {
             self.confirm_revert = false;
             self.diff_review = None;
             self.reload_tree();
+        }
+    }
+
+    fn refresh_apps(&mut self) {
+        self.run_apps = kestrel_core::running_apps(&self.project_path());
+    }
+
+    /// The Run tab: start/stop the app, watch its logs, and open a preview.
+    fn run_ui(&mut self, ui: &mut egui::Ui) {
+        if self.run_command_input.is_empty() {
+            self.run_command_input = detect_run_command(&self.project_path());
+        }
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.label("Command:");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.run_command_input)
+                    .desired_width(340.0)
+                    .hint_text("npm run dev"),
+            );
+            if ui.button("▶ Start").clicked() {
+                self.run_status =
+                    kestrel_core::start_app_detached(&self.project_path(), &self.run_command_input);
+                self.refresh_apps();
+            }
+            if ui.button("⟳ Refresh").clicked() {
+                self.refresh_apps();
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label("Preview:");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.run_url)
+                    .desired_width(260.0)
+                    .hint_text("http://localhost:3000"),
+            );
+            if ui.button("🖥 Open in browser").clicked() {
+                let url = if self.run_url.trim().is_empty() {
+                    "http://localhost:3000".to_string()
+                } else {
+                    self.run_url.clone()
+                };
+                self.run_status = kestrel_core::open_url(&url);
+            }
+        });
+        if !self.run_status.is_empty() {
+            ui.label(egui::RichText::new(&self.run_status).weak());
+        }
+        ui.separator();
+
+        ui.strong(format!("Running apps ({})", self.run_apps.len()));
+        if self.run_apps.is_empty() {
+            ui.label(
+                egui::RichText::new("Nothing running. Start the app above — or the agent will.")
+                    .weak(),
+            );
+        }
+        let mut view_log: Option<u32> = None;
+        let mut stop: Option<u32> = None;
+        for app in &self.run_apps {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(format!("pid {}", app.pid)).monospace());
+                ui.label(&app.command);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button("Stop").clicked() {
+                        stop = Some(app.pid);
+                    }
+                    if ui.small_button("Logs").clicked() {
+                        view_log = Some(app.pid);
+                    }
+                });
+            });
+        }
+        if let Some(pid) = view_log {
+            self.run_log = kestrel_core::app_logs(&self.project_path(), pid);
+            self.run_selected_pid = Some(pid);
+        }
+        if let Some(pid) = stop {
+            self.run_status = kestrel_core::stop_app(&self.project_path(), pid);
+            if self.run_selected_pid == Some(pid) {
+                self.run_selected_pid = None;
+                self.run_log.clear();
+            }
+            self.refresh_apps();
+        }
+
+        if let Some(pid) = self.run_selected_pid {
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.strong(format!("Logs — pid {pid}"));
+                if ui.small_button("⟳").clicked() {
+                    self.run_log = kestrel_core::app_logs(&self.project_path(), pid);
+                }
+            });
+            egui::ScrollArea::both()
+                .auto_shrink([false, false])
+                .stick_to_bottom(true)
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(&self.run_log).monospace())
+                            .selectable(true),
+                    );
+                });
         }
     }
 
@@ -2289,6 +2413,24 @@ fn diff_line_color(line: &str, default: egui::Color32) -> egui::Color32 {
     } else {
         default
     }
+}
+
+/// The default dev/run command for a project (from its markers, else a sane
+/// Node fallback), used to prefill the Run tab.
+fn detect_run_command(root: &Path) -> String {
+    if let Ok(inspection) = kestrel_core::inspect_project(root) {
+        if let Some(command) = inspection
+            .commands
+            .iter()
+            .find(|c| matches!(c.kind, kestrel_core::CommandKind::Run))
+        {
+            return command.command.clone();
+        }
+    }
+    if root.join("package.json").exists() {
+        return "npm run dev".to_string();
+    }
+    String::new()
 }
 
 /// The highlighting language for a file path's extension.

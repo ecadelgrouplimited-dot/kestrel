@@ -53,6 +53,9 @@ pub use symbols::{
     SymbolExtractor, SymbolKind,
 };
 pub use syntax::{highlight, language_from_extension, Language, Span, TokenKind};
+pub use syscap::{
+    app_logs, http_check, open_url, running_apps, start_app_detached, stop_app, RunningApp,
+};
 pub use tests_select::{is_test_path, select_tests, TestSelection};
 pub use verify::{plan_verification, run_verification, StepResult, VerificationReport, VerifyStep};
 pub use workspace::{
