@@ -34,8 +34,8 @@ pub use inspect::{
 };
 pub use project::{create_project, push_recent, NewProject, MAX_RECENTS};
 pub use providers::{
-    chat, run_turn, AgentMessage, ChatMessage, ChatRequest, ProviderConfig, ProviderKind, ToolCall,
-    ToolResult, ToolSpec, TurnResult,
+    chat, chat_stream, run_turn, AgentMessage, ChatMessage, ChatRequest, ProviderConfig,
+    ProviderKind, ToolCall, ToolResult, ToolSpec, TurnResult,
 };
 pub use settings::{
     load_settings, model_suggestions, model_suggestions_for, provider_preset, save_settings,

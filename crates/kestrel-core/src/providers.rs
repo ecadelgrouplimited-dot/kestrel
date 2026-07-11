@@ -11,7 +11,7 @@
 //! bundled HTTP/TLS stack is required.
 
 use serde::{Deserialize, Serialize};
-use std::io::{self, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::process::{Command, Stdio};
 
 /// The API shape a provider speaks.
@@ -173,6 +173,116 @@ pub fn chat(config: &ProviderConfig, request: &ChatRequest) -> io::Result<Result
         }
     };
     Ok(parse_response(config.kind, &response))
+}
+
+/// Stream a chat completion, calling `on_token` with each text delta as it
+/// arrives (Server-Sent Events over `curl -N`), and returning the full text.
+/// Text-only: tool calls are not streamed (the agent loop uses `run_turn`).
+pub fn chat_stream(
+    config: &ProviderConfig,
+    request: &ChatRequest,
+    mut on_token: impl FnMut(&str),
+) -> io::Result<Result<String, String>> {
+    if config.api_key.trim().is_empty() {
+        return Ok(Err("no API key configured for this provider".to_string()));
+    }
+    let url = endpoint(config.kind, &config.base_url);
+    let header_args = headers(config.kind, &config.api_key);
+    let mut body = build_body(config.kind, request);
+    body["stream"] = serde_json::json!(true);
+
+    let kind = config.kind;
+    let mut full = String::new();
+    let mut error: Option<String> = None;
+
+    post_json_stream(&url, &header_args, &body, |line| {
+        let Some(data) = line.trim().strip_prefix("data:") else {
+            return;
+        };
+        let data = data.trim();
+        if data.is_empty() || data == "[DONE]" {
+            return;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(data) else {
+            return;
+        };
+        if let Some(message) = value.pointer("/error/message").and_then(|m| m.as_str()) {
+            error = Some(message.to_string());
+            return;
+        }
+        let delta = match kind {
+            ProviderKind::Anthropic => {
+                if value.get("type").and_then(|t| t.as_str()) == Some("content_block_delta") {
+                    value.pointer("/delta/text").and_then(|t| t.as_str())
+                } else {
+                    None
+                }
+            }
+            ProviderKind::Openai => value
+                .pointer("/choices/0/delta/content")
+                .and_then(|c| c.as_str()),
+        };
+        if let Some(text) = delta {
+            if !text.is_empty() {
+                full.push_str(text);
+                on_token(text);
+            }
+        }
+    })?;
+
+    if let Some(message) = error {
+        return Ok(Err(message));
+    }
+    Ok(Ok(full))
+}
+
+/// POST a JSON body and stream the response body line by line to `on_line`
+/// (used for SSE). The request body is written and stdin closed before reading,
+/// so there is no pipe deadlock for the small requests we send.
+fn post_json_stream(
+    url: &str,
+    headers: &[(String, String)],
+    body: &serde_json::Value,
+    mut on_line: impl FnMut(&str),
+) -> io::Result<()> {
+    let body_str = serde_json::to_string(body).unwrap_or_default();
+    let mut command = Command::new("curl");
+    command.arg("-sS").arg("-N").arg(url);
+    for (key, value) in headers {
+        command.arg("-H").arg(format!("{key}: {value}"));
+    }
+    command.args(["--data-binary", "@-"]);
+    command.stdin(Stdio::piped());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+
+    let mut child = command.spawn()?;
+    {
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| io::Error::other("failed to open curl stdin"))?;
+        stdin.write_all(body_str.as_bytes())?;
+    }
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| io::Error::other("failed to open curl stdout"))?;
+    for line in BufReader::new(stdout).lines() {
+        on_line(&line?);
+    }
+    let status = child.wait()?;
+    if !status.success() {
+        let mut stderr = String::new();
+        if let Some(mut pipe) = child.stderr.take() {
+            let _ = pipe.read_to_string(&mut stderr);
+        }
+        return Err(io::Error::other(format!(
+            "curl request failed: {}",
+            stderr.trim()
+        )));
+    }
+    Ok(())
 }
 
 /// POST a JSON body to `url` with the given headers via the system `curl`,

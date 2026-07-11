@@ -74,6 +74,16 @@ struct AgentFile {
     contents: String,
 }
 
+/// A streamed update from a plain (non-agent) chat request.
+enum ChatUpdate {
+    /// A text delta to append to the in-progress reply.
+    Token(String),
+    /// The reply finished.
+    Done,
+    /// The request failed.
+    Failed(String),
+}
+
 #[derive(PartialEq, Eq)]
 enum AppView {
     Main,
@@ -154,7 +164,7 @@ struct KestrelApp {
     chat_agent_mode: bool,
     chat_pending: bool,
     chat_error: String,
-    chat_job: Option<Receiver<Result<String, String>>>,
+    chat_job: Option<Receiver<ChatUpdate>>,
     agent_job: Option<Receiver<AgentUpdate>>,
     /// Files the current/last agent run produced, in creation order.
     agent_files: Vec<AgentFile>,
@@ -264,24 +274,49 @@ impl KestrelApp {
 
     /// Poll the in-flight chat request, if any, and append the reply.
     fn poll_chat(&mut self, ctx: &egui::Context) {
-        let Some(rx) = &self.chat_job else { return };
-        match rx.try_recv() {
-            Ok(Ok(reply)) => {
-                self.chat_history
-                    .push(kestrel_core::ChatMessage::assistant(reply));
-                self.chat_pending = false;
-                self.chat_job = None;
-            }
-            Ok(Err(err)) => {
-                self.chat_error = err;
-                self.chat_pending = false;
-                self.chat_job = None;
-            }
-            Err(TryRecvError::Empty) => ctx.request_repaint(),
-            Err(TryRecvError::Disconnected) => {
-                self.chat_error = "The chat request stopped unexpectedly.".to_string();
-                self.chat_pending = false;
-                self.chat_job = None;
+        if self.chat_job.is_none() {
+            return;
+        }
+        loop {
+            let message = self.chat_job.as_ref().unwrap().try_recv();
+            match message {
+                Ok(ChatUpdate::Token(token)) => {
+                    if let Some(last) = self.chat_history.last_mut() {
+                        if last.role == "assistant" {
+                            last.content.push_str(&token);
+                        }
+                    }
+                    ctx.request_repaint();
+                }
+                Ok(ChatUpdate::Done) => {
+                    self.chat_pending = false;
+                    self.chat_job = None;
+                    self.save_session();
+                    break;
+                }
+                Ok(ChatUpdate::Failed(err)) => {
+                    // Drop the empty placeholder reply we added when sending.
+                    if self
+                        .chat_history
+                        .last()
+                        .is_some_and(|m| m.role == "assistant" && m.content.is_empty())
+                    {
+                        self.chat_history.pop();
+                    }
+                    self.chat_error = err;
+                    self.chat_pending = false;
+                    self.chat_job = None;
+                    break;
+                }
+                Err(TryRecvError::Empty) => {
+                    ctx.request_repaint();
+                    break;
+                }
+                Err(TryRecvError::Disconnected) => {
+                    self.chat_pending = false;
+                    self.chat_job = None;
+                    break;
+                }
             }
         }
     }
@@ -1540,9 +1575,13 @@ impl KestrelApp {
 
         let config = provider.to_config();
         let model = provider.model.clone();
+        // Snapshot the conversation before adding the placeholder reply.
         let messages = self.chat_history.clone();
         let include = self.chat_include_context;
         let project = self.project_path();
+        // A placeholder assistant message that streamed tokens append to.
+        self.chat_history
+            .push(kestrel_core::ChatMessage::assistant(String::new()));
 
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -1553,11 +1592,14 @@ impl KestrelApp {
                 system: Some(system),
                 messages,
             };
-            let result = match kestrel_core::chat(&config, &request) {
-                Ok(inner) => inner,
-                Err(err) => Err(err.to_string()),
+            let result = kestrel_core::chat_stream(&config, &request, |token| {
+                let _ = tx.send(ChatUpdate::Token(token.to_string()));
+            });
+            let _ = match result {
+                Ok(Ok(_)) => tx.send(ChatUpdate::Done),
+                Ok(Err(err)) => tx.send(ChatUpdate::Failed(err)),
+                Err(err) => tx.send(ChatUpdate::Failed(err.to_string())),
             };
-            let _ = tx.send(result);
         });
         self.chat_job = Some(rx);
     }
