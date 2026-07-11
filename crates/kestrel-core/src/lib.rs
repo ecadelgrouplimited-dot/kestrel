@@ -15,9 +15,10 @@ pub mod workspace;
 
 pub use agent::{
     agent_loop_system_prompt, agent_session_path, agent_system_prompt, apply_file_edits,
-    builtin_tools, describe_call, execute_tool, git_commit_all, git_init, git_revert_all,
-    git_review, load_agent_session, parse_file_edits, run_agent, save_agent_session, AgentEvent,
-    AgentOutcome, AgentSession, AppliedEdit, FileEdit, GitReview,
+    builtin_tools, describe_call, execute_tool, git_checkpoint, git_commit_all, git_init, git_log,
+    git_restore, git_revert_all, git_review, load_agent_session, parse_file_edits, run_agent,
+    save_agent_session, AgentEvent, AgentOutcome, AgentSession, AppliedEdit, Checkpoint, FileEdit,
+    GitReview,
 };
 pub use config::{load_config, Config, ConfigLoad};
 pub use context::{

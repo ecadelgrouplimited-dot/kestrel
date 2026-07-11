@@ -791,6 +791,93 @@ pub fn git_commit_all(root: &Path, message: &str) -> Result<String, String> {
     }
 }
 
+/// A restore point in the project's history (a git commit).
+#[derive(Debug, Clone)]
+pub struct Checkpoint {
+    pub id: String,
+    pub summary: String,
+    pub when: String,
+}
+
+/// Commit the current working tree as a checkpoint before an agent run, so the
+/// run's changes are isolated and the whole run can be rolled back. Returns
+/// `Ok(true)` if a checkpoint was made, `Ok(false)` if there was nothing to
+/// checkpoint (clean tree, or not a git repo).
+pub fn git_checkpoint(root: &Path, label: &str) -> Result<bool, String> {
+    let (is_repo, _, _) = git_output(root, &["rev-parse", "--is-inside-work-tree"]);
+    if !is_repo {
+        return Ok(false);
+    }
+    let (_, status, _) = git_output(root, &["status", "--porcelain"]);
+    if status.trim().is_empty() {
+        return Ok(false);
+    }
+    let (ok, _, err) = git_output(root, &["add", "-A"]);
+    if !ok {
+        return Err(err.trim().to_string());
+    }
+    let message = format!("Kestrel checkpoint: {label}");
+    let (ok, out, err) = git_output(
+        root,
+        &[
+            "-c",
+            "user.name=Kestrel",
+            "-c",
+            "user.email=kestrel@local",
+            "commit",
+            "-m",
+            &message,
+        ],
+    );
+    if ok {
+        Ok(true)
+    } else {
+        let msg = if err.trim().is_empty() { out } else { err };
+        Err(msg.trim().to_string())
+    }
+}
+
+/// The most recent commits, as restore points for the Diff view.
+pub fn git_log(root: &Path, limit: usize) -> Vec<Checkpoint> {
+    let (ok, out, _) = git_output(
+        root,
+        &[
+            "--no-pager",
+            "log",
+            "--format=%h\x1f%s\x1f%cr",
+            &format!("-n{limit}"),
+        ],
+    );
+    if !ok {
+        return Vec::new();
+    }
+    out.lines()
+        .filter_map(|line| {
+            let mut parts = line.split('\x1f');
+            Some(Checkpoint {
+                id: parts.next()?.to_string(),
+                summary: parts.next()?.to_string(),
+                when: parts.next().unwrap_or("").to_string(),
+            })
+        })
+        .collect()
+}
+
+/// Reset the working tree to a specific commit and remove new files, rolling
+/// back to that restore point.
+pub fn git_restore(root: &Path, id: &str) -> Result<String, String> {
+    let (ok, _, err) = git_output(root, &["reset", "--hard", id]);
+    if !ok {
+        return Err(err.trim().to_string());
+    }
+    let (ok, _, err) = git_output(root, &["clean", "-fd"]);
+    if ok {
+        Ok(format!("Restored to {id}."))
+    } else {
+        Err(err.trim().to_string())
+    }
+}
+
 /// Discard all uncommitted changes, reverting the working tree to HEAD and
 /// removing new files (reject the agent's changes). Requires a commit to exist.
 pub fn git_revert_all(root: &Path) -> Result<String, String> {
@@ -1193,6 +1280,43 @@ mod tests {
             },
         );
         assert!(miss.contains("no matches"), "got: {miss}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn checkpoint_log_and_restore_round_trip() {
+        let dir = std::env::temp_dir().join(format!("kestrel-ckpt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // A throwaway repo.
+        let init = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        };
+        if !init(&["init"]) {
+            return; // git not available; skip
+        }
+        std::fs::write(dir.join("a.txt"), "one").unwrap();
+        // First checkpoint captures the initial state.
+        assert!(git_checkpoint(&dir, "first").unwrap());
+        let first = git_log(&dir, 5);
+        assert!(!first.is_empty());
+        let first_id = first[0].id.clone();
+
+        // Change and checkpoint again.
+        std::fs::write(dir.join("a.txt"), "two").unwrap();
+        assert!(git_checkpoint(&dir, "second").unwrap());
+        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "two");
+
+        // Restore the first checkpoint.
+        git_restore(&dir, &first_id).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "one");
+
+        // A clean tree needs no checkpoint.
+        assert!(!git_checkpoint(&dir, "noop").unwrap());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

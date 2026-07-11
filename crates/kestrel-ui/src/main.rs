@@ -145,6 +145,8 @@ struct KestrelApp {
     diff_review: Option<kestrel_core::GitReview>,
     diff_status: String,
     confirm_revert: bool,
+    checkpoints: Vec<kestrel_core::Checkpoint>,
+    restore_target: Option<String>,
     // Settings state.
     settings: kestrel_core::Settings,
     user_name: String,
@@ -210,6 +212,8 @@ impl Default for KestrelApp {
             diff_review: None,
             diff_status: String::new(),
             confirm_revert: false,
+            checkpoints: Vec::new(),
+            restore_target: None,
             settings,
             user_name,
             user_email,
@@ -434,6 +438,7 @@ impl eframe::App for KestrelApp {
         self.entry_modal(ctx);
         self.delete_modal(ctx);
         self.revert_modal(ctx);
+        self.restore_modal(ctx);
 
         egui::TopBottomPanel::top("controls").show(ctx, |ui| {
             ui.add_space(6.0);
@@ -1096,12 +1101,15 @@ impl KestrelApp {
     /// last commit, with Keep (commit) and Revert (discard) actions.
     fn diff_ui(&mut self, ui: &mut egui::Ui) {
         if self.diff_review.is_none() {
-            self.diff_review = Some(kestrel_core::git_review(&self.project_path()));
+            let root = self.project_path();
+            self.diff_review = Some(kestrel_core::git_review(&root));
+            self.checkpoints = kestrel_core::git_log(&root, 15);
         }
         let mut refresh = false;
         let mut commit = false;
         let mut revert = false;
         let mut init = false;
+        let mut restore: Option<String> = None;
 
         {
             let review = self.diff_review.as_ref().unwrap();
@@ -1145,6 +1153,27 @@ impl KestrelApp {
                 });
                 if !self.diff_status.is_empty() {
                     ui.label(egui::RichText::new(&self.diff_status).weak());
+                }
+
+                if !self.checkpoints.is_empty() {
+                    egui::CollapsingHeader::new(format!(
+                        "Checkpoints ({}) — roll back a run",
+                        self.checkpoints.len()
+                    ))
+                    .id_source("checkpoints")
+                    .show(ui, |ui| {
+                        for cp in &self.checkpoints {
+                            ui.horizontal(|ui| {
+                                if ui.small_button("Restore").clicked() {
+                                    restore = Some(cp.id.clone());
+                                }
+                                ui.label(
+                                    egui::RichText::new(format!("{} · {}", cp.id, cp.when)).weak(),
+                                );
+                                ui.label(&cp.summary);
+                            });
+                        }
+                    });
                 }
                 ui.separator();
 
@@ -1191,6 +1220,9 @@ impl KestrelApp {
         if revert {
             self.confirm_revert = true;
         }
+        if let Some(id) = restore {
+            self.restore_target = Some(id);
+        }
         if refresh {
             self.diff_status.clear();
             self.diff_review = None;
@@ -1236,6 +1268,50 @@ impl KestrelApp {
                 Err(err) => self.diff_status = format!("Revert failed: {err}"),
             }
             self.confirm_revert = false;
+            self.diff_review = None;
+            self.reload_tree();
+        }
+    }
+
+    /// Confirm before rolling the project back to an earlier checkpoint.
+    fn restore_modal(&mut self, ctx: &egui::Context) {
+        let Some(target) = self.restore_target.clone() else {
+            return;
+        };
+        let mut open = true;
+        let mut confirm = false;
+        let mut cancel = false;
+        egui::Window::new("Restore checkpoint")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label(format!("Roll the project back to checkpoint {target}?"));
+                ui.colored_label(
+                    egui::Color32::from_rgb(220, 150, 80),
+                    "Every change after that point is discarded and new files are removed.",
+                );
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Restore").clicked() {
+                        confirm = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        if cancel || !open {
+            self.restore_target = None;
+            return;
+        }
+        if confirm {
+            match kestrel_core::git_restore(&self.project_path(), &target) {
+                Ok(msg) => self.diff_status = msg,
+                Err(err) => self.diff_status = format!("Restore failed: {err}"),
+            }
+            self.restore_target = None;
             self.diff_review = None;
             self.reload_tree();
         }
@@ -1610,6 +1686,10 @@ impl KestrelApp {
         let config = provider.to_config();
         let model = provider.model.clone();
         let root = self.project_path();
+        // Checkpoint the current state so this whole run can be rolled back.
+        let label: String = prompt.chars().take(60).collect();
+        let _ = kestrel_core::git_checkpoint(&root, &label);
+        self.diff_review = None;
         // Carry the running conversation so a follow-up refines the same
         // project. The file history keeps accumulating across builds too.
         let history = self.agent_messages.clone();
