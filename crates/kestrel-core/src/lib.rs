@@ -12,6 +12,7 @@ pub mod secrets;
 pub mod settings;
 pub mod symbols;
 pub mod syntax;
+pub mod syscap;
 pub mod tests_select;
 pub mod verify;
 pub mod workspace;

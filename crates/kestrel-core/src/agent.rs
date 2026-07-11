@@ -192,7 +192,17 @@ pub fn agent_loop_system_prompt(root: &Path) -> String {
            `npm run build`, `npx tsc --noEmit`, `cargo test`) and read its output and exit code.\n\
          - git(args): run a git command in the project (clone, status, diff, add, commit, log) \
            to pull a template repo, inspect history, or snapshot your work.\n\
-         - verify(): run the project's detected build/test ladder and report pass/fail.\n\n\
+         - verify(): run the project's detected build/test ladder and report pass/fail.\n\
+         - install_tool(command[, package]): check whether a CLI tool exists and install it via \
+           winget if missing. Use this FIRST when a build needs a toolchain that may be absent \
+           (e.g. composer/php for Laravel, node, python).\n\
+         - start_app(command) / list_apps() / stop_app(pid): run a dev server or app in the \
+           background, see what's running, and stop it.\n\
+         - open_url(url): open a preview in the user's browser.\n\
+         - screenshot(): capture the screen for visual review.\n\n\
+         When a project needs tools that may not be installed, check with install_tool before \
+         building. To show the user a running app, start_app the dev server and open_url its \
+         address.\n\n\
          Work step by step: inspect what you need with read_file/list_dir/http_get, then create \
          the project by calling write_file for each file with its ENTIRE contents (never partial \
          snippets). Prefer fewer, complete, runnable files.\n\n\
@@ -325,6 +335,67 @@ pub fn builtin_tools() -> Vec<ToolSpec> {
                 .to_string(),
             input_schema: serde_json::json!({ "type": "object", "properties": {} }),
         },
+        ToolSpec {
+            name: "open_url".to_string(),
+            description: "Open a URL (or local file://) in the user's default browser — use it to \
+                          preview a running app or a built page."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": { "url": { "type": "string" } },
+                "required": ["url"],
+            }),
+        },
+        ToolSpec {
+            name: "start_app".to_string(),
+            description: "Start a long-running app (e.g. `npm run dev`, `php artisan serve`) in \
+                          the background and track it, so it keeps running. Returns its pid."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": { "command": { "type": "string" } },
+                "required": ["command"],
+            }),
+        },
+        ToolSpec {
+            name: "list_apps".to_string(),
+            description: "List the background apps Kestrel started that are still running."
+                .to_string(),
+            input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+        },
+        ToolSpec {
+            name: "stop_app".to_string(),
+            description: "Stop a background app started by start_app, by its pid.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": { "pid": { "type": "integer" } },
+                "required": ["pid"],
+            }),
+        },
+        ToolSpec {
+            name: "screenshot".to_string(),
+            description:
+                "Capture the screen to a PNG under the project's .kestrel/screenshots for \
+                          visual review (Windows)."
+                    .to_string(),
+            input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+        },
+        ToolSpec {
+            name: "install_tool".to_string(),
+            description: "Check whether a command-line tool is installed and, if not, install it \
+                          via winget (Windows). Use before building a project whose toolchain may \
+                          be missing (e.g. `composer` for Laravel, `node`, `php`, `python`). \
+                          Optionally pass a winget package id."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "command": { "type": "string" },
+                    "package": { "type": "string" },
+                },
+                "required": ["command"],
+            }),
+        },
     ]
 }
 
@@ -347,6 +418,12 @@ pub fn describe_call(call: &ToolCall) -> String {
         "run_command" => format!("▶ Running: {}", arg("command")),
         "git" => format!("🔀 git {}", arg("args")),
         "verify" => "✅ Verifying".to_string(),
+        "open_url" => format!("🖥 Opening {}", arg("url")),
+        "start_app" => format!("🚀 Starting: {}", arg("command")),
+        "list_apps" => "📋 Listing running apps".to_string(),
+        "stop_app" => format!("🛑 Stopping app {}", arg("pid")),
+        "screenshot" => "📸 Taking a screenshot".to_string(),
+        "install_tool" => format!("📦 Installing {}", arg("command")),
         other => other.to_string(),
     }
 }
@@ -419,6 +496,23 @@ pub fn execute_tool(root: &Path, call: &ToolCall) -> String {
             }
         }
         "verify" => project_verify(root),
+        "open_url" => crate::syscap::open_url(&arg("url")),
+        "start_app" => crate::syscap::start_app(root, &arg("command")),
+        "list_apps" => crate::syscap::list_apps(root),
+        "stop_app" => match call.input.get("pid").and_then(|v| v.as_u64()) {
+            Some(pid) => crate::syscap::stop_app(root, pid as u32),
+            None => "error: pid must be an integer".to_string(),
+        },
+        "screenshot" => crate::syscap::take_screenshot(root),
+        "install_tool" => {
+            let package = arg("package");
+            let package = if package.trim().is_empty() {
+                None
+            } else {
+                Some(package)
+            };
+            crate::syscap::ensure_tool(&arg("command"), package.as_deref())
+        }
         "write_file" => match safe_join(root, &arg("path")) {
             Ok(full) => {
                 if let Some(parent) = full.parent() {
@@ -1276,7 +1370,18 @@ pub fn run_agent(
                 let out = execute_tool(root, call);
                 // Surface build/verify results in the transcript, not just to
                 // the model, so the user can watch it check its own work.
-                if matches!(call.name.as_str(), "run_command" | "verify" | "git") {
+                if matches!(
+                    call.name.as_str(),
+                    "run_command"
+                        | "verify"
+                        | "git"
+                        | "install_tool"
+                        | "start_app"
+                        | "list_apps"
+                        | "stop_app"
+                        | "open_url"
+                        | "screenshot"
+                ) {
                     on_event(AgentEvent::Assistant(tail(&out, 1200)));
                 }
                 out
@@ -1538,7 +1643,7 @@ mod tests {
             name: "read_file".to_string(),
             input: serde_json::json!({"path": "src/main.rs"}),
         };
-        assert_eq!(describe_call(&call), "read_file(src/main.rs)");
+        assert_eq!(describe_call(&call), "📖 Reading src/main.rs");
     }
 
     #[test]

@@ -71,6 +71,11 @@ configurable and the agent has a full engineering toolset.
 - ✅ Light/dark theme
 - ✅ Agent toolset: `read_file`, `list_dir`, `http_get`, `search`, `write_file`,
   `edit_file` (diff-style), `run_command`, `git`, `verify`
+- ✅ System agent: `open_url` (preview in browser), `start_app`/`list_apps`/
+  `stop_app` (background dev servers), `screenshot`, `install_tool`
+  (detect + winget install missing toolchains, e.g. composer/php/node)
+- ✅ Intelligent live status (the stream shows the real action with icons) and a
+  visual polish pass (amber accent, rounded widgets, iconified controls)
 - ✅ Token economy: `edit_file` over full rewrites, automatic history compaction
 - ✅ Conversation memory + per-project session persistence (`.kestrel/agent-session.json`)
 - ✅ Live build preview: created-files history with click-to-preview
