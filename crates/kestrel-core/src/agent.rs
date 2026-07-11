@@ -196,13 +196,17 @@ pub fn agent_loop_system_prompt(root: &Path) -> String {
          - install_tool(command[, package]): check whether a CLI tool exists and install it via \
            winget if missing. Use this FIRST when a build needs a toolchain that may be absent \
            (e.g. composer/php for Laravel, node, python).\n\
-         - start_app(command) / list_apps() / stop_app(pid): run a dev server or app in the \
-           background, see what's running, and stop it.\n\
+         - start_app(command) / app_logs(pid) / list_apps() / stop_app(pid): run a dev server \
+           or app in the background, read its output/logs, see what's running, and stop it.\n\
          - open_url(url): open a preview in the user's browser.\n\
          - screenshot(): capture the screen for visual review.\n\n\
          When a project needs tools that may not be installed, check with install_tool before \
-         building. To show the user a running app, start_app the dev server and open_url its \
-         address.\n\n\
+         building. NEVER run a server or any long-running process (e.g. `node server.js`, \
+         `npm run dev`, `php artisan serve`, watchers) with run_command — it will block. Use \
+         start_app for those; then app_logs(pid) to read the server's output and debug it, \
+         http_get to hit an endpoint, and open_url to preview. To restart after a fix, just call \
+         start_app again (it stops the previous instance). When something is broken (e.g. a bad \
+         database query), read app_logs and the code, fix it, restart, and re-check.\n\n\
          Work step by step: inspect what you need with read_file/list_dir/http_get, then create \
          the project by calling write_file for each file with its ENTIRE contents (never partial \
          snippets). Prefer fewer, complete, runnable files.\n\n\
@@ -358,6 +362,17 @@ pub fn builtin_tools() -> Vec<ToolSpec> {
             }),
         },
         ToolSpec {
+            name: "app_logs".to_string(),
+            description: "Read the recent stdout/stderr of a background app started by start_app, \
+                          by its pid. Use it to debug a server (errors, crashes, requests)."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": { "pid": { "type": "integer" } },
+                "required": ["pid"],
+            }),
+        },
+        ToolSpec {
             name: "list_apps".to_string(),
             description: "List the background apps Kestrel started that are still running."
                 .to_string(),
@@ -420,6 +435,7 @@ pub fn describe_call(call: &ToolCall) -> String {
         "verify" => "✅ Verifying".to_string(),
         "open_url" => format!("🖥 Opening {}", arg("url")),
         "start_app" => format!("🚀 Starting: {}", arg("command")),
+        "app_logs" => format!("📋 Reading logs (pid {})", arg("pid")),
         "list_apps" => "📋 Listing running apps".to_string(),
         "stop_app" => format!("🛑 Stopping app {}", arg("pid")),
         "screenshot" => "📸 Taking a screenshot".to_string(),
@@ -483,6 +499,13 @@ pub fn execute_tool(root: &Path, call: &ToolCall) -> String {
             let command = arg("command");
             if command.trim().is_empty() {
                 "error: empty command".to_string()
+            } else if crate::syscap::is_long_running(&command) {
+                format!(
+                    "This looks like a long-running server/watcher (\"{command}\"). Not running \
+                     it with run_command — that would block. Use start_app(\"{command}\") to run \
+                     it in the background, then app_logs(pid) to read its output and http_get / \
+                     open_url to check it."
+                )
             } else {
                 run_shell(root, &command, COMMAND_TIMEOUT)
             }
@@ -498,6 +521,10 @@ pub fn execute_tool(root: &Path, call: &ToolCall) -> String {
         "verify" => project_verify(root),
         "open_url" => crate::syscap::open_url(&arg("url")),
         "start_app" => crate::syscap::start_app(root, &arg("command")),
+        "app_logs" => match call.input.get("pid").and_then(|v| v.as_u64()) {
+            Some(pid) => crate::syscap::app_logs(root, pid as u32),
+            None => "error: pid must be an integer".to_string(),
+        },
         "list_apps" => crate::syscap::list_apps(root),
         "stop_app" => match call.input.get("pid").and_then(|v| v.as_u64()) {
             Some(pid) => crate::syscap::stop_app(root, pid as u32),
@@ -1377,6 +1404,7 @@ pub fn run_agent(
                         | "git"
                         | "install_tool"
                         | "start_app"
+                        | "app_logs"
                         | "list_apps"
                         | "stop_app"
                         | "open_url"

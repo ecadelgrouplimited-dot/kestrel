@@ -37,7 +37,7 @@ cargo run -p kestrel-ui
   - `write_file` — create/overwrite a file **inside the project** (paths that are absolute or escape via `..` are refused)
   - `edit_file` — replace an exact snippet in an existing file (a diff-style edit, far cheaper in tokens than rewriting the whole file); the agent is told to prefer it for changes
   - `install_tool` — detect whether a CLI tool is present and, if missing, install it via **winget** (so it can, say, install `composer`/`php` before scaffolding a Laravel app)
-  - `start_app` / `list_apps` / `stop_app` — run a dev server or app in the **background**, see what's running, and stop it
+  - `start_app` / `app_logs` / `list_apps` / `stop_app` — run a dev server or app in the **background** (output captured to a log, with a startup health check and clean re-runs), read its logs to debug, see what's running, and stop it. `run_command` refuses to launch long-running servers (which would block) and points the agent to `start_app`.
   - `open_url` — open a **preview** in your browser
   - `screenshot` — capture the screen for visual review (Windows)
   - `run_command` — run a shell command in the project root (`npm install`, `npm run build`, `npx tsc --noEmit`, `cargo test`, …), capturing stdout/stderr and the exit code; killed after a few minutes
