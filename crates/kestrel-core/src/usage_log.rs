@@ -124,6 +124,25 @@ pub fn now_epoch() -> u64 {
         .unwrap_or(0)
 }
 
+/// The UTC midnight (epoch seconds) of the day containing `now`.
+pub fn start_of_day_utc(now: u64) -> u64 {
+    now - now % 86_400
+}
+
+/// Total cost of records at or after `since` (epoch seconds).
+pub fn cost_since(records: &[UsageRecord], since: u64) -> f64 {
+    records
+        .iter()
+        .filter(|r| r.ts >= since)
+        .map(|r| r.cost)
+        .sum()
+}
+
+/// Total cost of records logged today (UTC).
+pub fn cost_today(records: &[UsageRecord]) -> f64 {
+    cost_since(records, start_of_day_utc(now_epoch()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

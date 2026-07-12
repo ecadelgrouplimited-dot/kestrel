@@ -23,6 +23,19 @@ pub struct Settings {
     /// Recently opened/created project paths, most recent first.
     #[serde(default)]
     pub recent_projects: Vec<String>,
+    /// Cost caps that warn/stop the agent when reached.
+    #[serde(default)]
+    pub budget: Budget,
+}
+
+/// Spend caps in USD. `None`/`0` means no limit.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Budget {
+    /// Cap for the current conversation.
+    pub session_limit: Option<f64>,
+    /// Cap for all requests today (UTC).
+    pub daily_limit: Option<f64>,
 }
 
 /// Optional identifying details for the developer.
@@ -242,6 +255,7 @@ mod tests {
             active_provider: Some("work".to_string()),
             providers: BTreeMap::new(),
             recent_projects: vec!["E:/demo".to_string()],
+            budget: Budget::default(),
         };
         let mut provider = provider_preset("deepseek").unwrap();
         provider.api_key = "sk-secret".to_string();

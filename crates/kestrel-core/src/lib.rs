@@ -47,7 +47,7 @@ pub use providers::{
 pub use secrets::{scan_secrets, SecretFinding};
 pub use settings::{
     load_settings, model_suggestions, model_suggestions_for, provider_preset, save_settings,
-    ProviderSettings, Settings, UserInfo, PROVIDER_PRESETS,
+    Budget, ProviderSettings, Settings, UserInfo, PROVIDER_PRESETS,
 };
 pub use symbols::{
     extractor_for_language, extractor_for_path, symbols_for_file, FileSymbols, Import, Symbol,
@@ -60,8 +60,8 @@ pub use syscap::{
 };
 pub use tests_select::{is_test_path, select_tests, TestSelection};
 pub use usage_log::{
-    append_usage_record, load_usage_records, now_epoch, record_savings, summarize_usage,
-    UsageRecord, UsageSummary, UsageTotals,
+    append_usage_record, cost_since, cost_today, load_usage_records, now_epoch, record_savings,
+    start_of_day_utc, summarize_usage, UsageRecord, UsageSummary, UsageTotals,
 };
 pub use verify::{plan_verification, run_verification, StepResult, VerificationReport, VerifyStep};
 pub use workspace::{

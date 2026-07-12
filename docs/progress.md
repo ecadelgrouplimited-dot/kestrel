@@ -93,12 +93,15 @@ configurable and the agent has a full engineering toolset.
   - **Usage dashboard** (📊) — per-request usage logged to `.kestrel/usage.jsonl`;
     a view with this-conversation + all-time totals, cost, per-model breakdown,
     and how much prompt caching saved (the first Phase 4 wedge)
+  - **Budget controls** — per-conversation and per-day USD caps (Settings); a
+    live budget status line, blocked send, and a hard-stop that halts the agent
+    mid-run when a cap is reached
 - ✅ Conversation memory + per-project session persistence (`.kestrel/agent-session.json`)
 - ✅ Live build preview: created-files history with click-to-preview
 
 ## Next candidates
 
-1. **Budget controls** — warn/stop when a session or day exceeds a cost cap (Phase 4).
-2. **LSP diagnostics** — surface language-server errors/warnings inline.
-3. **Policy engine** — allow/deny rules for tools, paths, and commands.
+1. **LSP diagnostics** — surface language-server errors/warnings inline.
+2. **Policy engine** — allow/deny rules for tools, paths, and commands.
+3. **Team settings / shared config** — the rest of Phase 4.
 4. **Multi-repo reasoning** — reach across repositories (Phase 5).

@@ -165,6 +165,10 @@ struct KestrelApp {
     settings: kestrel_core::Settings,
     user_name: String,
     user_email: String,
+    budget_session: String,
+    budget_daily: String,
+    /// Total cost logged today (UTC), for the daily budget check.
+    today_cost: f64,
     new_provider_name: String,
     new_provider_preset: String,
     settings_status: String,
@@ -208,6 +212,16 @@ impl Default for KestrelApp {
         let settings = kestrel_core::load_settings();
         let user_name = settings.user.name.clone().unwrap_or_default();
         let user_email = settings.user.email.clone().unwrap_or_default();
+        let budget_session = settings
+            .budget
+            .session_limit
+            .map(|v| v.to_string())
+            .unwrap_or_default();
+        let budget_daily = settings
+            .budget
+            .daily_limit
+            .map(|v| v.to_string())
+            .unwrap_or_default();
         Self {
             view: AppView::Main,
             dark_mode: true,
@@ -247,6 +261,9 @@ impl Default for KestrelApp {
             settings,
             user_name,
             user_email,
+            budget_session,
+            budget_daily,
+            today_cost: 0.0,
             new_provider_name: String::new(),
             new_provider_preset: "anthropic".to_string(),
             settings_status: String::new(),
@@ -390,6 +407,19 @@ impl KestrelApp {
                 }
                 Ok(AgentUpdate::Usage(usage)) => {
                     self.add_usage(&usage);
+                    // Hard-stop the run if a budget cap was crossed mid-run.
+                    if let Some(reason) = self.budget_blocked() {
+                        self.agent_job = None;
+                        self.chat_pending = false;
+                        self.agent_activity.clear();
+                        self.chat_history
+                            .push(kestrel_core::ChatMessage::assistant(format!(
+                                "⛔ Stopped — {reason}."
+                            )));
+                        self.status = "Stopped: over budget.".to_string();
+                        self.save_session();
+                        break;
+                    }
                     ctx.request_repaint();
                 }
                 Ok(AgentUpdate::Wrote { path, contents }) => {
@@ -737,6 +767,7 @@ impl KestrelApp {
         self.chat_error.clear();
         self.session_usage = kestrel_core::Usage::default();
         self.session_cost = 0.0;
+        self.today_cost = kestrel_core::cost_today(&kestrel_core::load_usage_records(&path));
         self.view = AppView::Main;
         self.reload_tree();
     }
@@ -1454,6 +1485,7 @@ impl KestrelApp {
             .unwrap_or(0.0);
         self.session_cost += req_cost;
         if usage.total_input() > 0 || usage.output_tokens > 0 {
+            self.today_cost += req_cost;
             let record = kestrel_core::UsageRecord {
                 ts: kestrel_core::now_epoch(),
                 provider: provider_name,
@@ -1466,6 +1498,28 @@ impl KestrelApp {
             };
             kestrel_core::append_usage_record(&self.project_path(), &record);
         }
+    }
+
+    /// If a budget cap has been reached, the reason to stop; else `None`.
+    fn budget_blocked(&self) -> Option<String> {
+        if let Some(limit) = self.settings.budget.session_limit {
+            if limit > 0.0 && self.session_cost >= limit {
+                return Some(format!(
+                    "session budget of ${:.2} reached (${:.2} spent) — raise it in Settings or \
+                     start a New chat",
+                    limit, self.session_cost
+                ));
+            }
+        }
+        if let Some(limit) = self.settings.budget.daily_limit {
+            if limit > 0.0 && self.today_cost >= limit {
+                return Some(format!(
+                    "daily budget of ${:.2} reached (${:.2} today) — raise it in Settings",
+                    limit, self.today_cost
+                ));
+            }
+        }
+        None
     }
 
     fn refresh_apps(&mut self) {
@@ -2140,6 +2194,24 @@ impl KestrelApp {
             });
         }
 
+        // Budget status, if any cap is set.
+        let budget = &self.settings.budget;
+        if budget.session_limit.is_some() || budget.daily_limit.is_some() {
+            let mut parts = Vec::new();
+            if let Some(limit) = budget.session_limit {
+                parts.push(format!("session ${:.2} / ${:.2}", self.session_cost, limit));
+            }
+            if let Some(limit) = budget.daily_limit {
+                parts.push(format!("today ${:.2} / ${:.2}", self.today_cost, limit));
+            }
+            let color = if self.budget_blocked().is_some() {
+                egui::Color32::from_rgb(220, 90, 90)
+            } else {
+                ui.visuals().weak_text_color()
+            };
+            ui.colored_label(color, format!("Budget: {}", parts.join(" · ")));
+        }
+
         if self.chat_agent_mode {
             let continuing = if self.agent_messages.is_empty() {
                 String::new()
@@ -2205,6 +2277,10 @@ impl KestrelApp {
         if provider.api_key.trim().is_empty() {
             self.chat_error =
                 "The active provider has no API key — add one in Settings.".to_string();
+            return;
+        }
+        if let Some(reason) = self.budget_blocked() {
+            self.chat_error = format!("⛔ Over budget — {reason}.");
             return;
         }
 
@@ -2355,6 +2431,38 @@ impl KestrelApp {
                         egui::TextEdit::singleline(&mut self.user_email)
                             .desired_width(320.0)
                             .hint_text("you@example.com"),
+                    );
+                    ui.end_row();
+                });
+        });
+        ui.add_space(10.0);
+
+        // --- Budget -------------------------------------------------------
+        ui.group(|ui| {
+            ui.strong("Budget (USD)");
+            ui.label(
+                egui::RichText::new(
+                    "Kestrel warns and stops the agent when a cap is reached. Blank = no limit.",
+                )
+                .weak(),
+            );
+            ui.add_space(4.0);
+            egui::Grid::new("budget-grid")
+                .num_columns(2)
+                .spacing([12.0, 6.0])
+                .show(ui, |ui| {
+                    ui.label("Per conversation");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.budget_session)
+                            .desired_width(120.0)
+                            .hint_text("e.g. 1.00"),
+                    );
+                    ui.end_row();
+                    ui.label("Per day");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.budget_daily)
+                            .desired_width(120.0)
+                            .hint_text("e.g. 10.00"),
                     );
                     ui.end_row();
                 });
@@ -2512,6 +2620,8 @@ impl KestrelApp {
             if ui.button("💾 Save").clicked() {
                 self.settings.user.name = non_empty(&self.user_name);
                 self.settings.user.email = non_empty(&self.user_email);
+                self.settings.budget.session_limit = parse_budget(&self.budget_session);
+                self.settings.budget.daily_limit = parse_budget(&self.budget_daily);
                 match kestrel_core::save_settings(&self.settings) {
                     Ok(()) => {
                         self.settings_status = format!(
@@ -2849,6 +2959,15 @@ fn kind_label(kind: kestrel_core::ProviderKind) -> &'static str {
     match kind {
         kestrel_core::ProviderKind::Anthropic => "Anthropic",
         kestrel_core::ProviderKind::Openai => "OpenAI-compatible",
+    }
+}
+
+/// Parse a budget field ("$1.00", "2", "") into a positive dollar cap.
+fn parse_budget(s: &str) -> Option<f64> {
+    let t = s.trim().trim_start_matches('$').trim();
+    match t.parse::<f64>() {
+        Ok(v) if v > 0.0 => Some(v),
+        _ => None,
     }
 }
 
