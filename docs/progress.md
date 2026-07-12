@@ -88,14 +88,17 @@ configurable and the agent has a full engineering toolset.
   - **Token-aware auto-compaction** tied to each model's real context window
   - **Real usage accounting** — actual input/output/cache tokens parsed from
     responses and streams, shown as a live session meter with cost
-  - **Live context gauge** (used / window) and **quick model switch** in the
-    chat bar (route a cheaper model mid-conversation)
+  - **Live context gauge** (used / window), **cache-savings** readout, and
+    **quick model switch** in the chat bar (route a cheaper model mid-conversation)
+  - **Usage dashboard** (📊) — per-request usage logged to `.kestrel/usage.jsonl`;
+    a view with this-conversation + all-time totals, cost, per-model breakdown,
+    and how much prompt caching saved (the first Phase 4 wedge)
 - ✅ Conversation memory + per-project session persistence (`.kestrel/agent-session.json`)
 - ✅ Live build preview: created-files history with click-to-preview
 
 ## Next candidates
 
-1. **LSP diagnostics** — surface language-server errors/warnings inline.
-2. **Policy engine** — allow/deny rules for tools, paths, and commands.
-3. **Usage dashboard** — session token/cost totals over time (Phase 4).
+1. **Budget controls** — warn/stop when a session or day exceeds a cost cap (Phase 4).
+2. **LSP diagnostics** — surface language-server errors/warnings inline.
+3. **Policy engine** — allow/deny rules for tools, paths, and commands.
 4. **Multi-repo reasoning** — reach across repositories (Phase 5).

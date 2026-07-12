@@ -14,6 +14,7 @@ pub mod symbols;
 pub mod syntax;
 pub mod syscap;
 pub mod tests_select;
+pub mod usage_log;
 pub mod verify;
 pub mod workspace;
 
@@ -58,6 +59,10 @@ pub use syscap::{
     start_app_detached, stop_app, take_screenshot, RunningApp,
 };
 pub use tests_select::{is_test_path, select_tests, TestSelection};
+pub use usage_log::{
+    append_usage_record, load_usage_records, now_epoch, record_savings, summarize_usage,
+    UsageRecord, UsageSummary, UsageTotals,
+};
 pub use verify::{plan_verification, run_verification, StepResult, VerificationReport, VerifyStep};
 pub use workspace::{
     create_dir, create_file, delete_entry, read_dir_entries, read_text_file, rename_entry,

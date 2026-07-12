@@ -93,6 +93,7 @@ enum AppView {
     Main,
     Settings,
     Chat,
+    Usage,
 }
 
 /// Which pane the central area shows in the Main view.
@@ -193,6 +194,10 @@ struct KestrelApp {
     /// Actual token usage this conversation, for the live meter.
     session_usage: kestrel_core::Usage,
     session_cost: f64,
+    /// The most recent request's usage (for the "last turn" readout).
+    last_usage: kestrel_core::Usage,
+    /// Loaded usage records for the Usage dashboard.
+    usage_records: Vec<kestrel_core::UsageRecord>,
 }
 
 impl Default for KestrelApp {
@@ -263,6 +268,8 @@ impl Default for KestrelApp {
             agent_activity: String::new(),
             session_usage: kestrel_core::Usage::default(),
             session_cost: 0.0,
+            last_usage: kestrel_core::Usage::default(),
+            usage_records: Vec::new(),
         }
     }
 }
@@ -511,6 +518,11 @@ impl eframe::App for KestrelApp {
                         if ui.button("⚙ Settings").clicked() {
                             self.view = AppView::Settings;
                         }
+                        if ui.button("📊 Usage").clicked() {
+                            self.usage_records =
+                                kestrel_core::load_usage_records(&self.project_path());
+                            self.view = AppView::Usage;
+                        }
                         if ui.button("💬 Chat").clicked() {
                             self.view = AppView::Chat;
                         }
@@ -605,6 +617,17 @@ impl eframe::App for KestrelApp {
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         self.settings_ui(ui);
+                    });
+            });
+            return;
+        }
+
+        if self.view == AppView::Usage {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        self.usage_ui(ui);
                     });
             });
             return;
@@ -1414,13 +1437,34 @@ impl KestrelApp {
         }
     }
 
-    /// Accumulate real token usage into the session total (and its cost).
+    /// Accumulate real token usage into the session total (and its cost), and
+    /// append a record to the project's usage log for the dashboard.
     fn add_usage(&mut self, usage: &kestrel_core::Usage) {
         self.session_usage.add(usage);
-        if let Some(provider) = self.settings.active() {
-            if let Some(price) = kestrel_core::model_price(&provider.model) {
-                self.session_cost += kestrel_core::cost_of_usage(price, usage);
-            }
+        self.last_usage = *usage;
+        let (provider_name, model) = match self.settings.active() {
+            Some(p) => (
+                self.settings.active_provider.clone().unwrap_or_default(),
+                p.model.clone(),
+            ),
+            None => (String::new(), String::new()),
+        };
+        let req_cost = kestrel_core::model_price(&model)
+            .map(|price| kestrel_core::cost_of_usage(price, usage))
+            .unwrap_or(0.0);
+        self.session_cost += req_cost;
+        if usage.total_input() > 0 || usage.output_tokens > 0 {
+            let record = kestrel_core::UsageRecord {
+                ts: kestrel_core::now_epoch(),
+                provider: provider_name,
+                model,
+                input: usage.input_tokens,
+                output: usage.output_tokens,
+                cache_read: usage.cache_read,
+                cache_write: usage.cache_write,
+                cost: req_cost,
+            };
+            kestrel_core::append_usage_record(&self.project_path(), &record);
         }
     }
 
@@ -1747,6 +1791,113 @@ impl KestrelApp {
         }
     }
 
+    /// The Usage dashboard: this conversation's tokens + cost, and all-time
+    /// totals with the per-model breakdown and prompt-cache savings.
+    fn usage_ui(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.heading("📊 Usage & cost");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("⟳ Refresh").clicked() {
+                    self.usage_records = kestrel_core::load_usage_records(&self.project_path());
+                }
+            });
+        });
+        ui.label(
+            egui::RichText::new(
+                "Real tokens billed by the provider, logged per request to \
+                 .kestrel/usage.jsonl.",
+            )
+            .weak(),
+        );
+        ui.add_space(8.0);
+
+        // This conversation (in-memory).
+        let s = self.session_usage;
+        let saved_session = kestrel_core::model_price(
+            self.settings
+                .active()
+                .map(|p| p.model.as_str())
+                .unwrap_or(""),
+        )
+        .map(|p| s.cache_read as f64 * p.input_per_million * 0.9 / 1_000_000.0)
+        .unwrap_or(0.0);
+        ui.group(|ui| {
+            ui.strong("This conversation");
+            ui.add_space(2.0);
+            ui.label(format!(
+                "{} input · {} output · {} cached",
+                human_tokens(s.total_input() as usize),
+                human_tokens(s.output_tokens as usize),
+                human_tokens(s.cache_read as usize),
+            ));
+            ui.label(format!("Cost: ${:.4}", self.session_cost));
+            if saved_session > 0.0 {
+                ui.colored_label(
+                    egui::Color32::from_rgb(120, 190, 120),
+                    format!(
+                        "Prompt caching saved ~${saved_session:.4} ({} tokens read from cache)",
+                        human_tokens(s.cache_read as usize)
+                    ),
+                );
+            }
+        });
+        ui.add_space(10.0);
+
+        // All-time (from the log).
+        let summary = kestrel_core::summarize_usage(&self.usage_records);
+        let t = &summary.totals;
+        ui.group(|ui| {
+            ui.strong(format!("All time · {} requests", t.requests));
+            ui.add_space(2.0);
+            ui.label(format!(
+                "{} input · {} output · {} cached",
+                human_tokens(t.input as usize),
+                human_tokens(t.output as usize),
+                human_tokens(t.cache_read as usize),
+            ));
+            ui.label(format!("Cost: ${:.4}", t.cost));
+            if summary.saved_cost > 0.0 {
+                ui.colored_label(
+                    egui::Color32::from_rgb(120, 190, 120),
+                    format!(
+                        "Prompt caching saved ~${:.4} ({} tokens) — that's off your bill.",
+                        summary.saved_cost,
+                        human_tokens(summary.saved_tokens as usize)
+                    ),
+                );
+            }
+        });
+        ui.add_space(10.0);
+
+        if summary.by_model.is_empty() {
+            ui.label(egui::RichText::new("No usage recorded yet for this project.").weak());
+            return;
+        }
+        ui.strong("By model");
+        ui.add_space(4.0);
+        egui::Grid::new("usage-by-model")
+            .num_columns(5)
+            .striped(true)
+            .spacing([16.0, 4.0])
+            .show(ui, |ui| {
+                ui.strong("Model");
+                ui.strong("Requests");
+                ui.strong("Input");
+                ui.strong("Output");
+                ui.strong("Cost");
+                ui.end_row();
+                for (model, totals) in &summary.by_model {
+                    ui.label(model);
+                    ui.label(totals.requests.to_string());
+                    ui.label(human_tokens((totals.input + totals.cache_read) as usize));
+                    ui.label(human_tokens(totals.output as usize));
+                    ui.label(format!("${:.4}", totals.cost));
+                    ui.end_row();
+                }
+            });
+    }
+
     /// The build-preview panel: a live, clickable history of the files the
     /// agent is creating, with a preview of the selected one.
     fn build_preview_ui(&mut self, ui: &mut egui::Ui) {
@@ -1946,7 +2097,11 @@ impl KestrelApp {
             } else {
                 String::new()
             };
-            ui.horizontal(|ui| {
+            let saved = kestrel_core::model_price(&model)
+                .map(|p| usage.cache_read as f64 * p.input_per_million * 0.9 / 1_000_000.0)
+                .unwrap_or(0.0);
+            let last = self.last_usage;
+            ui.horizontal_wrapped(|ui| {
                 ui.label(
                     egui::RichText::new(format!(
                         "context {} / {} ({pct}%)",
@@ -1964,6 +2119,24 @@ impl KestrelApp {
                     ))
                     .weak(),
                 );
+                if saved > 0.0 {
+                    ui.separator();
+                    ui.colored_label(
+                        egui::Color32::from_rgb(120, 190, 120),
+                        format!("cache saved ~${saved:.4}"),
+                    );
+                }
+                if last.total_input() > 0 || last.output_tokens > 0 {
+                    ui.separator();
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "last {} / {}",
+                            human_tokens(last.total_input() as usize),
+                            human_tokens(last.output_tokens as usize)
+                        ))
+                        .weak(),
+                    );
+                }
             });
         }
 
