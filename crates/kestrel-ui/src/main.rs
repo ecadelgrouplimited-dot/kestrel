@@ -56,6 +56,8 @@ enum AgentUpdate {
     Activity(String),
     /// A file the agent wrote, with its full contents for live preview.
     Wrote { path: String, contents: String },
+    /// Token usage from a completed turn, for the live meter.
+    Usage(kestrel_core::Usage),
     /// The agent finished; carries the final summary and the full conversation
     /// so a follow-up prompt can refine the same project.
     Done {
@@ -80,8 +82,8 @@ struct AgentFile {
 enum ChatUpdate {
     /// A text delta to append to the in-progress reply.
     Token(String),
-    /// The reply finished.
-    Done,
+    /// The reply finished, with its token usage.
+    Done(kestrel_core::Usage),
     /// The request failed.
     Failed(String),
 }
@@ -188,6 +190,9 @@ struct KestrelApp {
     agent_messages: Vec<kestrel_core::AgentMessage>,
     /// The agent's current activity, shown live while it works.
     agent_activity: String,
+    /// Actual token usage this conversation, for the live meter.
+    session_usage: kestrel_core::Usage,
+    session_cost: f64,
 }
 
 impl Default for KestrelApp {
@@ -256,6 +261,8 @@ impl Default for KestrelApp {
             agent_preview: None,
             agent_messages: Vec::new(),
             agent_activity: String::new(),
+            session_usage: kestrel_core::Usage::default(),
+            session_cost: 0.0,
         }
     }
 }
@@ -313,7 +320,8 @@ impl KestrelApp {
                     }
                     ctx.request_repaint();
                 }
-                Ok(ChatUpdate::Done) => {
+                Ok(ChatUpdate::Done(usage)) => {
+                    self.add_usage(&usage);
                     self.chat_pending = false;
                     self.chat_job = None;
                     self.save_session();
@@ -371,6 +379,10 @@ impl KestrelApp {
                     self.agent_activity = line.clone();
                     self.chat_history
                         .push(kestrel_core::ChatMessage::assistant(line));
+                    ctx.request_repaint();
+                }
+                Ok(AgentUpdate::Usage(usage)) => {
+                    self.add_usage(&usage);
                     ctx.request_repaint();
                 }
                 Ok(AgentUpdate::Wrote { path, contents }) => {
@@ -700,6 +712,8 @@ impl KestrelApp {
             .collect();
         self.agent_preview = self.agent_files.len().checked_sub(1);
         self.chat_error.clear();
+        self.session_usage = kestrel_core::Usage::default();
+        self.session_cost = 0.0;
         self.view = AppView::Main;
         self.reload_tree();
     }
@@ -1400,6 +1414,16 @@ impl KestrelApp {
         }
     }
 
+    /// Accumulate real token usage into the session total (and its cost).
+    fn add_usage(&mut self, usage: &kestrel_core::Usage) {
+        self.session_usage.add(usage);
+        if let Some(provider) = self.settings.active() {
+            if let Some(price) = kestrel_core::model_price(&provider.model) {
+                self.session_cost += kestrel_core::cost_of_usage(price, usage);
+            }
+        }
+    }
+
     fn refresh_apps(&mut self) {
         let root = self.project_path();
         self.run_apps = kestrel_core::running_apps(&root);
@@ -1807,39 +1831,45 @@ impl KestrelApp {
     /// Render the compose bar: provider status, controls, and the input.
     fn chat_compose_ui(&mut self, ui: &mut egui::Ui) {
         ui.add_space(4.0);
+        let mut new_active: Option<String> = None;
+        let mut new_model: Option<String> = None;
         ui.horizontal(|ui| {
-            match self.settings.active() {
-                Some(p) => {
-                    ui.label(egui::RichText::new("Model:").weak());
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "{} ({})",
-                            p.model,
-                            self.settings.active_provider.as_deref().unwrap_or("?")
-                        ))
-                        .strong(),
-                    );
-                    // Cost meter: estimated size (and cost) of the next request.
-                    let ctx_chars: usize = self.chat_history.iter().map(|m| m.content.len()).sum();
-                    let input_tokens = kestrel_core::estimate_tokens(ctx_chars + 2_000);
-                    ui.separator();
-                    let meter = match kestrel_core::model_price(&p.model) {
-                        Some(price) => format!(
-                            "≈ {} tok context · ~${:.4} in · ${:.0}/${:.0} per 1M",
-                            input_tokens,
-                            kestrel_core::estimate_cost(price, input_tokens, 0),
-                            price.input_per_million,
-                            price.output_per_million
-                        ),
-                        None => format!("≈ {input_tokens} tok context"),
-                    };
-                    ui.label(egui::RichText::new(meter).weak());
-                }
-                None => {
-                    ui.colored_label(
-                        egui::Color32::from_rgb(220, 150, 80),
-                        "No active provider — set one in Settings.",
-                    );
+            if self.settings.providers.is_empty() {
+                ui.colored_label(
+                    egui::Color32::from_rgb(220, 150, 80),
+                    "No provider — add one in Settings.",
+                );
+            } else {
+                // Quick provider switch.
+                let active = self.settings.active_provider.clone().unwrap_or_default();
+                egui::ComboBox::from_id_source("chat-provider")
+                    .selected_text(if active.is_empty() {
+                        "(none)".to_string()
+                    } else {
+                        active.clone()
+                    })
+                    .show_ui(ui, |ui| {
+                        for name in self.settings.providers.keys().cloned().collect::<Vec<_>>() {
+                            if ui.selectable_label(active == name, &name).clicked() {
+                                new_active = Some(name);
+                            }
+                        }
+                    });
+                // Quick model switch for the active provider.
+                let model_info = self
+                    .settings
+                    .active()
+                    .map(|p| (kestrel_core::model_suggestions_for(p), p.model.clone()));
+                if let Some((suggestions, current)) = model_info {
+                    egui::ComboBox::from_id_source("chat-model")
+                        .selected_text(current.clone())
+                        .show_ui(ui, |ui| {
+                            for m in suggestions {
+                                if ui.selectable_label(current == *m, *m).clicked() {
+                                    new_model = Some(m.to_string());
+                                }
+                            }
+                        });
                 }
             }
             ui.separator();
@@ -1856,6 +1886,8 @@ impl KestrelApp {
                     self.agent_files.clear();
                     self.agent_preview = None;
                     self.agent_messages.clear();
+                    self.session_usage = kestrel_core::Usage::default();
+                    self.session_cost = 0.0;
                     self.save_session();
                 }
                 if self.chat_pending && ui.button("Stop").clicked() {
@@ -1867,6 +1899,73 @@ impl KestrelApp {
                 }
             });
         });
+        if let Some(name) = new_active {
+            self.settings.active_provider = Some(name);
+            let _ = kestrel_core::save_settings(&self.settings);
+        }
+        if let Some(model) = new_model {
+            if let Some(active) = self.settings.active_provider.clone() {
+                if let Some(provider) = self.settings.providers.get_mut(&active) {
+                    provider.model = model;
+                }
+                let _ = kestrel_core::save_settings(&self.settings);
+            }
+        }
+
+        // Real-time context gauge + session token/cost meter.
+        if let Some(provider) = self.settings.active() {
+            let model = provider.model.clone();
+            let window = kestrel_core::model_context_window(&model) as usize;
+            let ctx = if !self.agent_messages.is_empty() {
+                kestrel_core::history_tokens(&self.agent_messages)
+            } else {
+                self.chat_history
+                    .iter()
+                    .map(|m| m.content.len())
+                    .sum::<usize>()
+                    / 4
+            };
+            let pct = ctx.saturating_mul(100).checked_div(window).unwrap_or(0);
+            let gauge_color = if pct >= 85 {
+                egui::Color32::from_rgb(220, 90, 90)
+            } else if pct >= 60 {
+                egui::Color32::from_rgb(220, 150, 80)
+            } else {
+                ui.visuals().weak_text_color()
+            };
+            let usage = self.session_usage;
+            let cache_note = if usage.cache_read > 0 {
+                format!(" · {} cached", human_tokens(usage.cache_read as usize))
+            } else {
+                String::new()
+            };
+            let cost_note = if self.session_cost > 0.0 {
+                format!(" · ${:.4}", self.session_cost)
+            } else if kestrel_core::model_price(&model).is_none() {
+                " · $ n/a".to_string()
+            } else {
+                String::new()
+            };
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "context {} / {} ({pct}%)",
+                        human_tokens(ctx),
+                        human_tokens(window)
+                    ))
+                    .color(gauge_color),
+                );
+                ui.separator();
+                ui.label(
+                    egui::RichText::new(format!(
+                        "session {} in · {} out{cache_note}{cost_note}",
+                        human_tokens(usage.total_input() as usize),
+                        human_tokens(usage.output_tokens as usize),
+                    ))
+                    .weak(),
+                );
+            });
+        }
 
         if self.chat_agent_mode {
             let continuing = if self.agent_messages.is_empty() {
@@ -1970,7 +2069,7 @@ impl KestrelApp {
                 let _ = tx.send(ChatUpdate::Token(token.to_string()));
             });
             let _ = match result {
-                Ok(Ok(_)) => tx.send(ChatUpdate::Done),
+                Ok(Ok((_text, usage))) => tx.send(ChatUpdate::Done(usage)),
                 Ok(Err(err)) => tx.send(ChatUpdate::Failed(err)),
                 Err(err) => tx.send(ChatUpdate::Failed(err.to_string())),
             };
@@ -2018,6 +2117,7 @@ impl KestrelApp {
                         kestrel_core::AgentEvent::Wrote { path, contents } => {
                             AgentUpdate::Wrote { path, contents }
                         }
+                        kestrel_core::AgentEvent::Usage(usage) => AgentUpdate::Usage(usage),
                     };
                     let _ = events.send(update);
                 },
@@ -2461,6 +2561,17 @@ fn diff_line_color(line: &str, default: egui::Color32) -> egui::Color32 {
         egui::Color32::from_rgb(220, 100, 100)
     } else {
         default
+    }
+}
+
+/// Format a token count compactly (12.3k, 1.2M).
+fn human_tokens(n: usize) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}k", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
     }
 }
 

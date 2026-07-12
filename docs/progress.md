@@ -80,7 +80,16 @@ configurable and the agent has a full engineering toolset.
   browser preview — a real runner beside the agent.
 - ✅ Intelligent live status (the stream shows the real action with icons) and a
   visual polish pass (amber accent, rounded widgets, iconified controls)
-- ✅ Token economy: `edit_file` over full rewrites, automatic history compaction
+- ✅ Token economy (a core differentiator):
+  - **Prompt caching** (Anthropic) — the system+tools prefix and a rolling
+    history breakpoint are cache-controlled, so repeat agent turns re-read the
+    conversation at ~10% cost instead of re-billing it
+  - **`edit_file`** snippet diffs instead of full-file rewrites
+  - **Token-aware auto-compaction** tied to each model's real context window
+  - **Real usage accounting** — actual input/output/cache tokens parsed from
+    responses and streams, shown as a live session meter with cost
+  - **Live context gauge** (used / window) and **quick model switch** in the
+    chat bar (route a cheaper model mid-conversation)
 - ✅ Conversation memory + per-project session persistence (`.kestrel/agent-session.json`)
 - ✅ Live build preview: created-files history with click-to-preview
 

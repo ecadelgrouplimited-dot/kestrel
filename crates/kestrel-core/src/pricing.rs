@@ -41,6 +41,32 @@ pub fn estimate_cost(price: ModelPrice, input_tokens: usize, output_tokens: usiz
         + output_tokens as f64 / 1_000_000.0 * price.output_per_million
 }
 
+/// USD cost of actual [`Usage`], honouring cache economics: cache reads bill at
+/// ~10% of input, cache writes at ~25% over input.
+pub fn cost_of_usage(price: ModelPrice, usage: &crate::providers::Usage) -> f64 {
+    (usage.input_tokens as f64 * price.input_per_million
+        + usage.cache_read as f64 * price.input_per_million * 0.1
+        + usage.cache_write as f64 * price.input_per_million * 1.25
+        + usage.output_tokens as f64 * price.output_per_million)
+        / 1_000_000.0
+}
+
+/// The context-window size (in tokens) for a model, matched by family, with a
+/// conservative default when unknown.
+pub fn model_context_window(model: &str) -> u64 {
+    let m = model.to_lowercase();
+    if m.starts_with("claude-haiku") {
+        200_000
+    } else if m.starts_with("claude-") {
+        1_000_000
+    } else if m.starts_with("gpt-5") || m.starts_with("gpt-4.1") {
+        400_000
+    } else {
+        // DeepSeek / GLM / Kimi and unknowns: a safe common floor.
+        128_000
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -64,5 +90,25 @@ mod tests {
         let p = model_price("claude-opus-4-8").unwrap();
         // 1M input @ $5 + 1M output @ $25 = $30.
         assert!((estimate_cost(p, 1_000_000, 1_000_000) - 30.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn cache_reads_cost_a_tenth_of_input() {
+        let p = model_price("claude-opus-4-8").unwrap();
+        let usage = crate::providers::Usage {
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read: 1_000_000,
+            cache_write: 0,
+        };
+        // 1M cache-read @ 10% of $5 = $0.50.
+        assert!((cost_of_usage(p, &usage) - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn context_windows_match_families() {
+        assert_eq!(model_context_window("claude-opus-4-8"), 1_000_000);
+        assert_eq!(model_context_window("claude-haiku-4-5"), 200_000);
+        assert_eq!(model_context_window("glm-5.2"), 128_000);
     }
 }

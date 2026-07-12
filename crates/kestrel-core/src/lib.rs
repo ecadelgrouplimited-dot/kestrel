@@ -20,7 +20,7 @@ pub mod workspace;
 pub use agent::{
     agent_loop_system_prompt, agent_session_path, agent_system_prompt, apply_file_edits,
     audit_log_path, builtin_tools, describe_call, execute_tool, git_checkpoint, git_commit_all,
-    git_init, git_log, git_restore, git_revert_all, git_review, load_agent_session,
+    git_init, git_log, git_restore, git_revert_all, git_review, history_tokens, load_agent_session,
     parse_file_edits, run_agent, run_shell_command, save_agent_session, AgentEvent, AgentOutcome,
     AgentSession, AppliedEdit, Checkpoint, FileEdit, GitReview,
 };
@@ -37,11 +37,11 @@ pub use inspect::{
     inspect_project, project_symbols, CommandKind, CommandSuggestion, FileInventory,
     LanguageSummary, ProjectInspection, ProjectMarker, SymbolSummary,
 };
-pub use pricing::{estimate_cost, model_price, ModelPrice};
+pub use pricing::{cost_of_usage, estimate_cost, model_context_window, model_price, ModelPrice};
 pub use project::{create_project, push_recent, NewProject, MAX_RECENTS};
 pub use providers::{
     chat, chat_stream, run_turn, AgentMessage, ChatMessage, ChatRequest, ProviderConfig,
-    ProviderKind, ToolCall, ToolResult, ToolSpec, TurnResult,
+    ProviderKind, ToolCall, ToolResult, ToolSpec, TurnResult, Usage,
 };
 pub use secrets::{scan_secrets, SecretFinding};
 pub use settings::{

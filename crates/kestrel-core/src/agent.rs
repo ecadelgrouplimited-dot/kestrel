@@ -9,7 +9,8 @@
 //! and verifies iteratively is the next step up from here.)
 
 use crate::providers::{
-    run_turn, AgentMessage, ChatMessage, ProviderConfig, ToolCall, ToolResult, ToolSpec, TurnResult,
+    run_turn, AgentMessage, ChatMessage, ProviderConfig, ToolCall, ToolResult, ToolSpec,
+    TurnResult, Usage,
 };
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
@@ -22,12 +23,6 @@ const TOOL_OUTPUT_CAP: usize = 60_000;
 
 /// How long a single `run_command` may run before it is killed.
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(240);
-
-/// When the conversation exceeds this many bytes it is compacted, so long
-/// sessions and refinements stay affordable in tokens.
-const HISTORY_SOFT_LIMIT: usize = 400_000;
-/// The size compaction trims the conversation back down to.
-const HISTORY_TARGET: usize = 180_000;
 
 /// The line that opens a file block: `<<<FILE relative/path>>>`.
 pub const FILE_MARKER: &str = "<<<FILE ";
@@ -170,6 +165,8 @@ pub enum AgentEvent {
     /// A file was written to the project, with its full contents for live
     /// preview in the UI.
     Wrote { path: String, contents: String },
+    /// Token usage from a completed turn, for the live meter.
+    Usage(Usage),
 }
 
 /// The system prompt for the tool-using agent loop.
@@ -1128,6 +1125,7 @@ fn project_verify(root: &Path) -> String {
 pub struct AgentOutcome {
     pub result: Result<String, String>,
     pub history: Vec<AgentMessage>,
+    pub usage: Usage,
 }
 
 /// A project's saved agent state: the tool-using conversation (so a follow-up
@@ -1249,6 +1247,11 @@ fn history_bytes(history: &[AgentMessage]) -> usize {
     history.iter().map(message_bytes).sum()
 }
 
+/// A rough token estimate for a whole agent conversation (for the context gauge).
+pub fn history_tokens(history: &[AgentMessage]) -> usize {
+    history_bytes(history) / 4
+}
+
 /// Compact a conversation to roughly `target` bytes by dropping the *middle*
 /// while keeping the first message (the original request) and the most recent
 /// turns. Cuts only on whole "rounds" (an assistant tool-call message plus its
@@ -1328,6 +1331,12 @@ pub fn run_agent(
     let tools = builtin_tools();
     history.push(AgentMessage::User(user_prompt.to_string()));
     let mut reviewed = !review;
+    let mut total_usage = Usage::default();
+    // Token-aware compaction: trigger at ~70% of the model's context window
+    // (≈4 bytes/token), compacting back to ~40%.
+    let window = crate::model_context_window(model) as usize;
+    let compact_trigger = window * 4 * 7 / 10;
+    let compact_target = window * 4 * 4 / 10;
     append_audit(
         root,
         &format!("RUN  {}", user_prompt.chars().take(140).collect::<String>()),
@@ -1336,8 +1345,8 @@ pub fn run_agent(
     for _ in 0..max_steps {
         // Keep the conversation affordable: drop the middle of a long history
         // before sending it, preserving the request and the recent turns.
-        if history_bytes(&history) > HISTORY_SOFT_LIMIT {
-            history = compact_history(std::mem::take(&mut history), HISTORY_TARGET);
+        if history_bytes(&history) > compact_trigger {
+            history = compact_history(std::mem::take(&mut history), compact_target);
         }
         let turn: TurnResult = match run_turn(config, model, 8192, Some(&system), &history, &tools)
         {
@@ -1346,15 +1355,19 @@ pub fn run_agent(
                 return AgentOutcome {
                     result: Err(msg),
                     history,
+                    usage: total_usage,
                 }
             }
             Err(err) => {
                 return AgentOutcome {
                     result: Err(err.to_string()),
                     history,
+                    usage: total_usage,
                 }
             }
         };
+        total_usage.add(&turn.usage);
+        on_event(AgentEvent::Usage(turn.usage));
         if !turn.text.trim().is_empty() {
             on_event(AgentEvent::Assistant(turn.text.clone()));
         }
@@ -1381,6 +1394,7 @@ pub fn run_agent(
             return AgentOutcome {
                 result: Ok(turn.text),
                 history,
+                usage: total_usage,
             };
         }
 
@@ -1447,6 +1461,7 @@ pub fn run_agent(
             "agent stopped after {max_steps} steps without finishing"
         )),
         history,
+        usage: total_usage,
     }
 }
 

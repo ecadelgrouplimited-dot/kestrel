@@ -103,7 +103,11 @@ pub fn build_body(kind: ProviderKind, request: &ChatRequest) -> serde_json::Valu
                 "messages": messages,
             });
             if let Some(system) = &request.system {
-                body["system"] = serde_json::json!(system);
+                body["system"] = serde_json::json!([{
+                    "type": "text",
+                    "text": system,
+                    "cache_control": { "type": "ephemeral" },
+                }]);
             }
             body
         }
@@ -182,7 +186,7 @@ pub fn chat_stream(
     config: &ProviderConfig,
     request: &ChatRequest,
     mut on_token: impl FnMut(&str),
-) -> io::Result<Result<String, String>> {
+) -> io::Result<Result<(String, Usage), String>> {
     if config.api_key.trim().is_empty() {
         return Ok(Err("no API key configured for this provider".to_string()));
     }
@@ -190,9 +194,14 @@ pub fn chat_stream(
     let header_args = headers(config.kind, &config.api_key);
     let mut body = build_body(config.kind, request);
     body["stream"] = serde_json::json!(true);
+    if config.kind == ProviderKind::Openai {
+        // Ask OpenAI-compatible providers to emit a final usage chunk.
+        body["stream_options"] = serde_json::json!({ "include_usage": true });
+    }
 
     let kind = config.kind;
     let mut full = String::new();
+    let mut usage = Usage::default();
     let mut error: Option<String> = None;
 
     post_json_stream(&url, &header_args, &body, |line| {
@@ -210,6 +219,7 @@ pub fn chat_stream(
             error = Some(message.to_string());
             return;
         }
+        accumulate_stream_usage(kind, &value, &mut usage);
         let delta = match kind {
             ProviderKind::Anthropic => {
                 if value.get("type").and_then(|t| t.as_str()) == Some("content_block_delta") {
@@ -233,7 +243,38 @@ pub fn chat_stream(
     if let Some(message) = error {
         return Ok(Err(message));
     }
-    Ok(Ok(full))
+    Ok(Ok((full, usage)))
+}
+
+/// Update running `usage` from a single streamed SSE event.
+fn accumulate_stream_usage(kind: ProviderKind, value: &serde_json::Value, usage: &mut Usage) {
+    let u = |ptr: &str| value.pointer(ptr).and_then(|v| v.as_u64());
+    match kind {
+        ProviderKind::Anthropic => match value.get("type").and_then(|t| t.as_str()) {
+            Some("message_start") => {
+                usage.input_tokens = u("/message/usage/input_tokens").unwrap_or(usage.input_tokens);
+                usage.cache_read =
+                    u("/message/usage/cache_read_input_tokens").unwrap_or(usage.cache_read);
+                usage.cache_write =
+                    u("/message/usage/cache_creation_input_tokens").unwrap_or(usage.cache_write);
+            }
+            Some("message_delta") => {
+                if let Some(o) = u("/usage/output_tokens") {
+                    usage.output_tokens = o;
+                }
+            }
+            _ => {}
+        },
+        ProviderKind::Openai => {
+            if value.get("usage").is_some() {
+                let cached = u("/usage/prompt_tokens_details/cached_tokens").unwrap_or(0);
+                let prompt = u("/usage/prompt_tokens").unwrap_or(0);
+                usage.input_tokens = prompt.saturating_sub(cached);
+                usage.cache_read = cached;
+                usage.output_tokens = u("/usage/completion_tokens").unwrap_or(usage.output_tokens);
+            }
+        }
+    }
 }
 
 /// POST a JSON body and stream the response body line by line to `on_line`
@@ -361,12 +402,39 @@ pub enum AgentMessage {
     ToolResults(Vec<ToolResult>),
 }
 
+/// Token usage for a request, including prompt-cache accounting. `input_tokens`
+/// is fresh (uncached) input; `cache_read` was served from cache (~10% cost);
+/// `cache_write` was written to cache (~25% surcharge).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Usage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+}
+
+impl Usage {
+    /// Total input tokens (fresh + cache read + cache write).
+    pub fn total_input(&self) -> u64 {
+        self.input_tokens + self.cache_read + self.cache_write
+    }
+
+    /// Accumulate another usage into this one.
+    pub fn add(&mut self, other: &Usage) {
+        self.input_tokens += other.input_tokens;
+        self.output_tokens += other.output_tokens;
+        self.cache_read += other.cache_read;
+        self.cache_write += other.cache_write;
+    }
+}
+
 /// The outcome of a single model turn in an agent loop.
 #[derive(Debug, Clone)]
 pub struct TurnResult {
     pub text: String,
     pub calls: Vec<ToolCall>,
     pub stop_reason: String,
+    pub usage: Usage,
 }
 
 /// Build the request body for one agent turn (tools + tool-aware messages).
@@ -380,7 +448,13 @@ pub fn build_agent_body(
 ) -> serde_json::Value {
     match kind {
         ProviderKind::Anthropic => {
-            let msgs: Vec<serde_json::Value> = messages.iter().map(anthropic_message).collect();
+            let mut msgs: Vec<serde_json::Value> = messages.iter().map(anthropic_message).collect();
+            // Prompt caching: a rolling breakpoint on the last message caches the
+            // whole conversation prefix, so repeated agent turns re-read it at
+            // ~10% cost instead of re-billing the full history each turn.
+            if let Some(last) = msgs.last_mut() {
+                mark_cache_control(last);
+            }
             let tool_defs: Vec<serde_json::Value> = tools
                 .iter()
                 .map(|t| {
@@ -398,7 +472,12 @@ pub fn build_agent_body(
                 "tools": tool_defs,
             });
             if let Some(system) = system {
-                body["system"] = serde_json::json!(system);
+                // Cache the (large, constant) system + tools prefix.
+                body["system"] = serde_json::json!([{
+                    "type": "text",
+                    "text": system,
+                    "cache_control": { "type": "ephemeral" },
+                }]);
             }
             body
         }
@@ -433,9 +512,25 @@ pub fn build_agent_body(
     }
 }
 
+/// Attach an ephemeral cache-control breakpoint to a message's last content
+/// block (Anthropic prompt caching). No-op if the content isn't a block array.
+fn mark_cache_control(message: &mut serde_json::Value) {
+    if let Some(content) = message.get_mut("content").and_then(|c| c.as_array_mut()) {
+        if let Some(last) = content.last_mut().and_then(|b| b.as_object_mut()) {
+            last.insert(
+                "cache_control".to_string(),
+                serde_json::json!({ "type": "ephemeral" }),
+            );
+        }
+    }
+}
+
 fn anthropic_message(message: &AgentMessage) -> serde_json::Value {
     match message {
-        AgentMessage::User(text) => serde_json::json!({ "role": "user", "content": text }),
+        AgentMessage::User(text) => serde_json::json!({
+            "role": "user",
+            "content": [{ "type": "text", "text": text }],
+        }),
         AgentMessage::Assistant { text, calls } => {
             let mut content = Vec::new();
             if !text.is_empty() {
@@ -549,6 +644,7 @@ pub fn parse_turn(kind: ProviderKind, response: &serde_json::Value) -> Result<Tu
                 text,
                 calls,
                 stop_reason,
+                usage: parse_usage(kind, response),
             })
         }
         ProviderKind::Openai => {
@@ -592,7 +688,31 @@ pub fn parse_turn(kind: ProviderKind, response: &serde_json::Value) -> Result<Tu
                 text,
                 calls,
                 stop_reason,
+                usage: parse_usage(kind, response),
             })
+        }
+    }
+}
+
+/// Extract token usage (including cache accounting) from a full response.
+pub fn parse_usage(kind: ProviderKind, response: &serde_json::Value) -> Usage {
+    let u = |ptr: &str| response.pointer(ptr).and_then(|v| v.as_u64()).unwrap_or(0);
+    match kind {
+        ProviderKind::Anthropic => Usage {
+            input_tokens: u("/usage/input_tokens"),
+            output_tokens: u("/usage/output_tokens"),
+            cache_read: u("/usage/cache_read_input_tokens"),
+            cache_write: u("/usage/cache_creation_input_tokens"),
+        },
+        ProviderKind::Openai => {
+            let cached = u("/usage/prompt_tokens_details/cached_tokens");
+            let prompt = u("/usage/prompt_tokens");
+            Usage {
+                input_tokens: prompt.saturating_sub(cached),
+                output_tokens: u("/usage/completion_tokens"),
+                cache_read: cached,
+                cache_write: 0,
+            }
         }
     }
 }
@@ -666,9 +786,11 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_body_keeps_system_top_level() {
+    fn anthropic_body_caches_system_prompt() {
         let body = build_body(ProviderKind::Anthropic, &request());
-        assert_eq!(body["system"], "be terse");
+        // System is a cache-controlled text block for prompt caching.
+        assert_eq!(body["system"][0]["text"], "be terse");
+        assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
         assert_eq!(body["messages"][0]["role"], "user");
         assert!(body.get("max_tokens").is_some());
     }
@@ -730,7 +852,13 @@ mod tests {
             &tools,
         );
         assert_eq!(anthropic["tools"][0]["name"], "read_file");
-        assert_eq!(anthropic["system"], "sys");
+        assert_eq!(anthropic["system"][0]["text"], "sys");
+        assert_eq!(anthropic["system"][0]["cache_control"]["type"], "ephemeral");
+        // The last message carries a rolling cache breakpoint.
+        assert_eq!(
+            anthropic["messages"][0]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
 
         let openai = build_agent_body(
             ProviderKind::Openai,
@@ -743,6 +871,36 @@ mod tests {
         assert_eq!(openai["tools"][0]["type"], "function");
         assert_eq!(openai["tools"][0]["function"]["name"], "read_file");
         assert_eq!(openai["messages"][0]["role"], "system");
+    }
+
+    #[test]
+    fn parse_usage_reads_cache_tokens_both_shapes() {
+        let anthropic = serde_json::json!({
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 20,
+                "cache_read_input_tokens": 900,
+                "cache_creation_input_tokens": 100
+            }
+        });
+        let u = parse_usage(ProviderKind::Anthropic, &anthropic);
+        assert_eq!(u.input_tokens, 10);
+        assert_eq!(u.output_tokens, 20);
+        assert_eq!(u.cache_read, 900);
+        assert_eq!(u.cache_write, 100);
+        assert_eq!(u.total_input(), 1010);
+
+        let openai = serde_json::json!({
+            "usage": {
+                "prompt_tokens": 1000,
+                "completion_tokens": 50,
+                "prompt_tokens_details": { "cached_tokens": 800 }
+            }
+        });
+        let u = parse_usage(ProviderKind::Openai, &openai);
+        assert_eq!(u.input_tokens, 200);
+        assert_eq!(u.cache_read, 800);
+        assert_eq!(u.output_tokens, 50);
     }
 
     #[test]
