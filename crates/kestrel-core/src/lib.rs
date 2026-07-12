@@ -2,9 +2,11 @@ pub mod agent;
 pub mod cache;
 pub mod config;
 pub mod context;
+pub mod diagnostics;
 pub mod environment;
 pub mod graph;
 pub mod inspect;
+pub mod policy;
 pub mod pricing;
 pub mod project;
 pub mod providers;
@@ -30,6 +32,7 @@ pub use context::{
     assemble_context_prompt, build_context_pack, build_context_pack_for_query, estimate_tokens,
     ContextEntry, ContextPack,
 };
+pub use diagnostics::{checker_name, run_diagnostics, Diagnostic, Severity};
 pub use environment::{discover_environment, EnvironmentReport, ToolInfo, WslInfo};
 pub use graph::{
     build_graph_from_files, build_project_graph, DependencyEdge, FileNode, ProjectGraph,
@@ -38,6 +41,7 @@ pub use inspect::{
     inspect_project, project_symbols, CommandKind, CommandSuggestion, FileInventory,
     LanguageSummary, ProjectInspection, ProjectMarker, SymbolSummary,
 };
+pub use policy::{default_denied_patterns, Policy};
 pub use pricing::{cost_of_usage, estimate_cost, model_context_window, model_price, ModelPrice};
 pub use project::{create_project, push_recent, NewProject, MAX_RECENTS};
 pub use providers::{

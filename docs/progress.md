@@ -60,8 +60,12 @@ configurable and the agent has a full engineering toolset.
   dependency graph; "Test changes" in the Diff tab runs only those)
 - ✅ **Dirty-worktree protection** (uncommitted work is checkpointed before a
   run and the user is told, so nothing is lost)
-- ⬜ LSP diagnostics integration
-- ⬜ Policy engine
+- ✅ **Diagnostics** (LSP-style, dependency-free) — run the project's checker
+  (`cargo check` / `tsc` / `ruff`), parse errors/warnings into a **⚠ Problems**
+  tab (click to open the file) and an inline strip in the editor
+- ✅ **Policy engine** — disable tools or block command patterns; a denied tool
+  call is refused (the agent adapts), enforced on every call, editable in
+  Settings, with destructive defaults blocked out of the box
 
 ## Beyond the roadmap line (shipped early because cheap and high-value)
 
@@ -101,7 +105,7 @@ configurable and the agent has a full engineering toolset.
 
 ## Next candidates
 
-1. **LSP diagnostics** — surface language-server errors/warnings inline.
-2. **Policy engine** — allow/deny rules for tools, paths, and commands.
-3. **Team settings / shared config** — the rest of Phase 4.
-4. **Multi-repo reasoning** — reach across repositories (Phase 5).
+1. **Team settings / shared config** — the rest of Phase 4.
+2. **Audit export** — export the audit + usage logs (Phase 4).
+3. **Multi-repo reasoning** — reach across repositories (Phase 5).
+4. **tree-sitter parsing** — semantic-perfect symbols (deferred Phase 0 upgrade).

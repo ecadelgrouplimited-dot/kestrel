@@ -46,6 +46,11 @@ enum JobOutcome {
     Text { output: String, status: String },
     /// A freshly loaded project directory tree.
     Tree { root: TreeNode, status: String },
+    /// Diagnostics from a checker run.
+    Diagnostics {
+        items: Vec<kestrel_core::Diagnostic>,
+        status: String,
+    },
 }
 
 /// A live update streamed from a running agent loop.
@@ -103,6 +108,7 @@ enum CentralView {
     Output,
     Diff,
     Run,
+    Problems,
 }
 
 /// A pending create/rename operation driving the entry modal.
@@ -140,6 +146,7 @@ struct KestrelApp {
     editor_original: String,
     editor_symbols: Vec<Symbol>,
     editor_status: String,
+    diagnostics: Vec<kestrel_core::Diagnostic>,
     // Create/rename modal.
     entry_op: Option<EntryOp>,
     entry_target: PathBuf,
@@ -167,6 +174,7 @@ struct KestrelApp {
     user_email: String,
     budget_session: String,
     budget_daily: String,
+    policy_patterns: String,
     /// Total cost logged today (UTC), for the daily budget check.
     today_cost: f64,
     new_provider_name: String,
@@ -222,6 +230,7 @@ impl Default for KestrelApp {
             .daily_limit
             .map(|v| v.to_string())
             .unwrap_or_default();
+        let policy_patterns = settings.policy.denied_patterns.join("\n");
         Self {
             view: AppView::Main,
             dark_mode: true,
@@ -241,6 +250,7 @@ impl Default for KestrelApp {
             editor_original: String::new(),
             editor_symbols: Vec::new(),
             editor_status: String::new(),
+            diagnostics: Vec::new(),
             entry_op: None,
             entry_target: PathBuf::new(),
             entry_name: String::new(),
@@ -263,6 +273,7 @@ impl Default for KestrelApp {
             user_email,
             budget_session,
             budget_daily,
+            policy_patterns,
             today_cost: 0.0,
             new_provider_name: String::new(),
             new_provider_preset: "anthropic".to_string(),
@@ -318,6 +329,12 @@ impl KestrelApp {
             Ok(JobOutcome::Tree { root, status }) => {
                 self.tree = Some(root);
                 self.status = status;
+                self.job = None;
+            }
+            Ok(JobOutcome::Diagnostics { items, status }) => {
+                self.diagnostics = items;
+                self.status = status;
+                self.central = CentralView::Problems;
                 self.job = None;
             }
             Err(TryRecvError::Empty) => ctx.request_repaint(),
@@ -605,6 +622,9 @@ impl eframe::App for KestrelApp {
                         if ui.button("✅ Verify").clicked() {
                             self.run_text(verify);
                         }
+                        if ui.button("⚠ Check").clicked() {
+                            self.run_diagnostics();
+                        }
                         if ui.button("🖥 Env").clicked() {
                             self.spawn(environment);
                         }
@@ -713,6 +733,12 @@ impl eframe::App for KestrelApp {
                 {
                     self.refresh_apps();
                 }
+                let problems_label = if self.diagnostics.is_empty() {
+                    "⚠ Problems".to_string()
+                } else {
+                    format!("⚠ Problems ({})", self.diagnostics.len())
+                };
+                ui.selectable_value(&mut self.central, CentralView::Problems, problems_label);
             });
             ui.separator();
             match self.central {
@@ -729,6 +755,7 @@ impl eframe::App for KestrelApp {
                 }
                 CentralView::Diff => self.diff_ui(ui),
                 CentralView::Run => self.run_ui(ui),
+                CentralView::Problems => self.problems_ui(ui),
             }
         });
     }
@@ -1174,6 +1201,37 @@ impl KestrelApp {
                     }
                 });
         }
+
+        // Inline diagnostics for this file, if a check has been run.
+        let here: Vec<&kestrel_core::Diagnostic> = self
+            .diagnostics
+            .iter()
+            .filter(|d| self.project_path().join(&d.file) == path)
+            .collect();
+        if !here.is_empty() {
+            egui::CollapsingHeader::new(format!("⚠ Problems in this file ({})", here.len()))
+                .id_source("editor-diagnostics")
+                .default_open(true)
+                .show(ui, |ui| {
+                    for d in &here {
+                        let color = match d.severity {
+                            kestrel_core::Severity::Error => egui::Color32::from_rgb(220, 100, 100),
+                            kestrel_core::Severity::Warning => {
+                                egui::Color32::from_rgb(220, 170, 90)
+                            }
+                        };
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{} line {}: {}",
+                                d.severity.icon(),
+                                d.line,
+                                d.message
+                            ))
+                            .color(color),
+                        );
+                    }
+                });
+        }
         ui.separator();
 
         let language = language_for_path(&path);
@@ -1520,6 +1578,89 @@ impl KestrelApp {
             }
         }
         None
+    }
+
+    /// Run the project's checker on a worker thread and show the Problems tab.
+    fn run_diagnostics(&mut self) {
+        let root = self.project_path();
+        if kestrel_core::checker_name(&root).is_none() {
+            self.diagnostics.clear();
+            self.central = CentralView::Problems;
+            self.status =
+                "No supported checker (cargo/tsc/ruff) detected for this project.".to_string();
+            return;
+        }
+        self.spawn(move || {
+            let items = kestrel_core::run_diagnostics(&root);
+            let status = if items.is_empty() {
+                "No problems found. ✓".to_string()
+            } else {
+                format!("{} problem(s) found.", items.len())
+            };
+            JobOutcome::Diagnostics { items, status }
+        });
+    }
+
+    /// The Problems tab: the checker's diagnostics; click one to open its file.
+    fn problems_ui(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(4.0);
+        let checker = kestrel_core::checker_name(&self.project_path());
+        let mut recheck = false;
+        ui.horizontal(|ui| {
+            ui.strong(format!("Problems ({})", self.diagnostics.len()));
+            if let Some(c) = checker {
+                ui.label(egui::RichText::new(format!("· {c}")).weak());
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("⚠ Re-check").clicked() {
+                    recheck = true;
+                }
+            });
+        });
+        ui.separator();
+        if self.diagnostics.is_empty() {
+            ui.label(
+                egui::RichText::new(
+                    "No problems. Run a check with the ⚠ Check button in the action bar.",
+                )
+                .weak(),
+            );
+        } else {
+            let root = self.project_path();
+            let mut open: Option<PathBuf> = None;
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    for d in &self.diagnostics {
+                        let color = match d.severity {
+                            kestrel_core::Severity::Error => egui::Color32::from_rgb(220, 100, 100),
+                            kestrel_core::Severity::Warning => {
+                                egui::Color32::from_rgb(220, 170, 90)
+                            }
+                        };
+                        let label = format!(
+                            "{} {}:{}:{}  {}",
+                            d.severity.icon(),
+                            d.file,
+                            d.line,
+                            d.col,
+                            d.message
+                        );
+                        if ui
+                            .selectable_label(false, egui::RichText::new(label).color(color))
+                            .clicked()
+                        {
+                            open = Some(root.join(&d.file));
+                        }
+                    }
+                });
+            if let Some(path) = open {
+                self.open_file(&path);
+            }
+        }
+        if recheck {
+            self.run_diagnostics();
+        }
     }
 
     fn refresh_apps(&mut self) {
@@ -2331,6 +2472,7 @@ impl KestrelApp {
     fn start_agent(&mut self, prompt: String, provider: kestrel_core::ProviderSettings) {
         let config = provider.to_config();
         let model = provider.model.clone();
+        let policy = self.settings.policy.clone();
         let root = self.project_path();
         // Checkpoint the current state so this whole run can be rolled back —
         // and tell the user their uncommitted work was captured first.
@@ -2358,6 +2500,7 @@ impl KestrelApp {
                 &root,
                 100,
                 true,
+                &policy,
                 history,
                 |event| {
                     let update = match event {
@@ -2466,6 +2609,43 @@ impl KestrelApp {
                     );
                     ui.end_row();
                 });
+        });
+        ui.add_space(10.0);
+
+        // --- Policy (agent guardrails) ------------------------------------
+        ui.group(|ui| {
+            ui.strong("Policy — agent guardrails");
+            ui.label(
+                egui::RichText::new(
+                    "Disable tools or block command patterns. A blocked call is refused and the \
+                     agent adapts — nothing runs.",
+                )
+                .weak(),
+            );
+            ui.add_space(4.0);
+            ui.label("Disabled tools:");
+            ui.horizontal_wrapped(|ui| {
+                for tool in POLICY_TOOLS {
+                    let mut denied = self.settings.policy.denied_tools.iter().any(|t| t == tool);
+                    if ui.checkbox(&mut denied, *tool).changed() {
+                        if denied {
+                            self.settings.policy.denied_tools.push(tool.to_string());
+                        } else {
+                            self.settings.policy.denied_tools.retain(|t| t != tool);
+                        }
+                    }
+                }
+            });
+            ui.add_space(4.0);
+            ui.label("Blocked command patterns (one per line):");
+            ui.add(
+                egui::TextEdit::multiline(&mut self.policy_patterns)
+                    .desired_rows(4)
+                    .desired_width(360.0),
+            );
+            if ui.button("Reset to safe defaults").clicked() {
+                self.policy_patterns = kestrel_core::default_denied_patterns().join("\n");
+            }
         });
         ui.add_space(10.0);
 
@@ -2622,6 +2802,12 @@ impl KestrelApp {
                 self.settings.user.email = non_empty(&self.user_email);
                 self.settings.budget.session_limit = parse_budget(&self.budget_session);
                 self.settings.budget.daily_limit = parse_budget(&self.budget_daily);
+                self.settings.policy.denied_patterns = self
+                    .policy_patterns
+                    .lines()
+                    .map(|l| l.trim().to_string())
+                    .filter(|l| !l.is_empty())
+                    .collect();
                 match kestrel_core::save_settings(&self.settings) {
                     Ok(()) => {
                         self.settings_status = format!(
@@ -2961,6 +3147,20 @@ fn kind_label(kind: kestrel_core::ProviderKind) -> &'static str {
         kestrel_core::ProviderKind::Openai => "OpenAI-compatible",
     }
 }
+
+/// The side-effecting tools a policy can disable (reads are always allowed).
+const POLICY_TOOLS: &[&str] = &[
+    "run_command",
+    "install_tool",
+    "git",
+    "start_app",
+    "stop_app",
+    "write_file",
+    "edit_file",
+    "http_get",
+    "open_url",
+    "screenshot",
+];
 
 /// Parse a budget field ("$1.00", "2", "") into a positive dollar cap.
 fn parse_budget(s: &str) -> Option<f64> {

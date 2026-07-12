@@ -26,6 +26,9 @@ pub struct Settings {
     /// Cost caps that warn/stop the agent when reached.
     #[serde(default)]
     pub budget: Budget,
+    /// Allow/deny rules gating the agent's tools.
+    #[serde(default)]
+    pub policy: crate::policy::Policy,
 }
 
 /// Spend caps in USD. `None`/`0` means no limit.
@@ -256,6 +259,7 @@ mod tests {
             providers: BTreeMap::new(),
             recent_projects: vec!["E:/demo".to_string()],
             budget: Budget::default(),
+            policy: crate::policy::Policy::default(),
         };
         let mut provider = provider_preset("deepseek").unwrap();
         provider.api_key = "sk-secret".to_string();

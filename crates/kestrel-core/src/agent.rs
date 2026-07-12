@@ -1324,6 +1324,7 @@ pub fn run_agent(
     root: &Path,
     max_steps: usize,
     review: bool,
+    policy: &crate::policy::Policy,
     mut history: Vec<AgentMessage>,
     mut on_event: impl FnMut(AgentEvent),
 ) -> AgentOutcome {
@@ -1404,7 +1405,18 @@ pub fn run_agent(
         });
         let mut results = Vec::new();
         for call in &turn.calls {
-            let content = if call.name == "write_file" || call.name == "edit_file" {
+            // Policy gate: a denied call is not executed; the model sees why.
+            let content = if let Err(reason) = policy.check(call) {
+                on_event(AgentEvent::Tool(format!(
+                    "⛔ Blocked: {}",
+                    describe_call(call)
+                )));
+                append_audit(
+                    root,
+                    &format!("BLOCKED  {}  ({reason})", describe_call(call)),
+                );
+                format!("error: {reason}")
+            } else if call.name == "write_file" || call.name == "edit_file" {
                 let path = call
                     .input
                     .get("path")
