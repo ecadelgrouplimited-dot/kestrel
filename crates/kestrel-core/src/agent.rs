@@ -9,8 +9,8 @@
 //! and verifies iteratively is the next step up from here.)
 
 use crate::providers::{
-    run_turn, AgentMessage, ChatMessage, ProviderConfig, ToolCall, ToolResult, ToolSpec,
-    TurnResult, Usage,
+    run_turn, run_turn_streaming, AgentMessage, ChatMessage, ProviderConfig, ToolCall, ToolResult,
+    ToolSpec, TurnEvent, TurnResult, Usage,
 };
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
@@ -165,6 +165,10 @@ pub enum AgentEvent {
     /// A file was written to the project, with its full contents for live
     /// preview in the UI.
     Wrote { path: String, contents: String },
+    /// A file is being written *right now*, streamed token-by-token as the model
+    /// emits it — the (partial) contents so far, for real-time preview before the
+    /// write actually lands. Superseded by `Wrote` once the tool runs.
+    Writing { path: String, contents: String },
     /// Token usage from a completed turn, for the live meter.
     Usage(Usage),
 }
@@ -1003,6 +1007,76 @@ pub fn git_review(root: &Path) -> GitReview {
     }
 }
 
+/// Extract the current (possibly partial) value of a string field from an
+/// **incomplete** JSON object being streamed — e.g. pull the growing `contents`
+/// out of a half-arrived `write_file` tool-call argument blob, so the UI can
+/// show a file as it's written. Returns the decoded string so far, or `None` if
+/// the field/opening quote hasn't streamed in yet.
+pub fn partial_json_string_field(buf: &str, field: &str) -> Option<String> {
+    let key = format!("\"{field}\"");
+    let bytes = buf.as_bytes();
+    let mut idx = buf.find(&key)? + key.len();
+    // Skip whitespace, then the ':' , then whitespace, then the opening quote.
+    while idx < bytes.len() && (bytes[idx] as char).is_whitespace() {
+        idx += 1;
+    }
+    if idx >= bytes.len() || bytes[idx] != b':' {
+        return None;
+    }
+    idx += 1;
+    while idx < bytes.len() && (bytes[idx] as char).is_whitespace() {
+        idx += 1;
+    }
+    if idx >= bytes.len() || bytes[idx] != b'"' {
+        return None;
+    }
+    idx += 1;
+
+    let chars: Vec<char> = buf[idx..].chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '"' {
+            return Some(out); // reached the closing quote — value complete
+        }
+        if c == '\\' {
+            let Some(&e) = chars.get(i + 1) else {
+                break; // dangling backslash at the stream's edge
+            };
+            match e {
+                'n' => out.push('\n'),
+                't' => out.push('\t'),
+                'r' => out.push('\r'),
+                '"' => out.push('"'),
+                '\\' => out.push('\\'),
+                '/' => out.push('/'),
+                'b' => out.push('\u{08}'),
+                'f' => out.push('\u{0C}'),
+                'u' => {
+                    if i + 5 < chars.len() {
+                        let hex: String = chars[i + 2..i + 6].iter().collect();
+                        if let Ok(n) = u32::from_str_radix(&hex, 16) {
+                            if let Some(ch) = char::from_u32(n) {
+                                out.push(ch);
+                            }
+                        }
+                        i += 6;
+                        continue;
+                    }
+                    break; // incomplete \uXXXX at the edge
+                }
+                other => out.push(other),
+            }
+            i += 2;
+            continue;
+        }
+        out.push(c);
+        i += 1;
+    }
+    Some(out) // partial value: the stream ended before the closing quote
+}
+
 /// The added/removed line counts of a unified diff, ignoring the `+++`/`---`
 /// file headers (so only real content lines are counted).
 pub fn diff_line_stats(diff: &str) -> (usize, usize) {
@@ -1459,6 +1533,65 @@ fn review_prompt(request: &str) -> String {
 /// set, the first time the model believes it is done it is asked to critique
 /// and fix its own work before finishing. `on_event` reports progress live.
 #[allow(clippy::too_many_arguments)]
+/// Run one agent turn with streaming, translating live tool-argument deltas into
+/// [`AgentEvent::Writing`] so the UI shows files as they're typed. Falls back to a
+/// buffered [`run_turn`] if the provider can't stream (transport error or an
+/// empty stream), so no provider is worse off than before.
+fn streamed_turn<F: FnMut(AgentEvent)>(
+    config: &ProviderConfig,
+    model: &str,
+    system: &str,
+    history: &[AgentMessage],
+    tools: &[ToolSpec],
+    on_event: &mut F,
+) -> std::io::Result<Result<TurnResult, String>> {
+    // Throttle live previews: only re-emit once a file's streamed contents have
+    // grown by a chunk, so we don't flood the channel with tiny deltas.
+    let mut last_len: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let stream = run_turn_streaming(config, model, 8192, Some(system), history, tools, |ev| {
+        let TurnEvent::ToolProgress { name, args } = ev else {
+            return;
+        };
+        let field = match name {
+            "write_file" => "contents",
+            "edit_file" => "new",
+            _ => return,
+        };
+        // Only preview once the body field has started streaming. Because
+        // the body key (`contents`/`new`) comes after `path` in the emitted
+        // JSON, its presence means `path`'s value has fully closed — so the
+        // path we read is complete, never a half-streamed phantom filename.
+        let Some(contents) = partial_json_string_field(args, field) else {
+            return;
+        };
+        let Some(path) = partial_json_string_field(args, "path") else {
+            return;
+        };
+        if path.is_empty() {
+            return;
+        }
+        let entry = last_len.entry(path.clone()).or_insert(0);
+        if contents.len() >= *entry + 24 || contents.len() < *entry {
+            *entry = contents.len();
+            on_event(AgentEvent::Writing { path, contents });
+        }
+    });
+    match stream {
+        // A stream that produced nothing usable → fall back to a buffered turn.
+        Ok(Ok(turn))
+            if turn.calls.is_empty()
+                && turn.text.trim().is_empty()
+                && turn.stop_reason.is_empty() =>
+        {
+            run_turn(config, model, 8192, Some(system), history, tools)
+        }
+        Ok(result) => Ok(result),
+        // Transport failure after retries → fall back to the buffered path.
+        Err(_) => run_turn(config, model, 8192, Some(system), history, tools),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn run_agent(
     config: &ProviderConfig,
     model: &str,
@@ -1491,24 +1624,26 @@ pub fn run_agent(
         if history_bytes(&history) > compact_trigger {
             history = compact_history(std::mem::take(&mut history), compact_target);
         }
-        let turn: TurnResult = match run_turn(config, model, 8192, Some(&system), &history, &tools)
-        {
-            Ok(Ok(turn)) => turn,
-            Ok(Err(msg)) => {
-                return AgentOutcome {
-                    result: Err(msg),
-                    history,
-                    usage: total_usage,
+        // Stream the turn so the UI can show files being written in real time.
+        // Falls back to a plain (buffered) turn if the provider can't stream.
+        let turn: TurnResult =
+            match streamed_turn(config, model, &system, &history, &tools, &mut on_event) {
+                Ok(Ok(turn)) => turn,
+                Ok(Err(msg)) => {
+                    return AgentOutcome {
+                        result: Err(msg),
+                        history,
+                        usage: total_usage,
+                    }
                 }
-            }
-            Err(err) => {
-                return AgentOutcome {
-                    result: Err(err.to_string()),
-                    history,
-                    usage: total_usage,
+                Err(err) => {
+                    return AgentOutcome {
+                        result: Err(err.to_string()),
+                        history,
+                        usage: total_usage,
+                    }
                 }
-            }
-        };
+            };
         total_usage.add(&turn.usage);
         on_event(AgentEvent::Usage(turn.usage));
         if !turn.text.trim().is_empty() {
@@ -1903,6 +2038,32 @@ mod tests {
         );
         assert!(err.starts_with("error:"), "unknown repo: {err}");
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn partial_json_field_extracts_streaming_contents() {
+        // Complete value.
+        assert_eq!(
+            partial_json_string_field(r#"{"path":"a.txt","contents":"hello"}"#, "contents"),
+            Some("hello".to_string())
+        );
+        // Partial value (stream cut off before the closing quote).
+        assert_eq!(
+            partial_json_string_field(r#"{"path":"a.txt","contents":"line1\nline"#, "contents"),
+            Some("line1\nline".to_string())
+        );
+        // Escapes decode; a dangling backslash at the edge is dropped.
+        assert_eq!(
+            partial_json_string_field(r#"{"contents":"a\tb\"c\"#, "contents"),
+            Some("a\tb\"c".to_string())
+        );
+        // Path streams in first and stays stable.
+        assert_eq!(
+            partial_json_string_field(r#"{"path":"src/main.rs","cont"#, "path"),
+            Some("src/main.rs".to_string())
+        );
+        // Field not present yet.
+        assert_eq!(partial_json_string_field(r#"{"path":"#, "contents"), None);
     }
 
     #[test]

@@ -63,6 +63,13 @@ configurable and the agent has a full engineering toolset.
   dependency graph; "Test changes" in the Diff tab runs only those)
 - ✅ **Dirty-worktree protection** (uncommitted work is checkpointed before a
   run and the user is told, so nothing is lost)
+- ✅ **Resilient networking** — model calls over `curl` now retry transient
+  connection failures (TLS/reset/timeout, e.g. `curl (35)`/`(56)`) with backoff
+  instead of aborting the run; a mid-stream drop still surfaces cleanly
+- ✅ **Live code streaming** — the agent turn now streams; files are shown being
+  written **token-by-token in real time** (like an IDE) via partial tool-argument
+  parsing, instead of appearing all at once after the model finishes the file.
+  Falls back to the buffered turn for any provider that can't stream tool calls
 - ✅ **Diagnostics** (LSP-style, dependency-free) — run the project's checker
   (`cargo check` / `tsc` / `ruff`), parse errors/warnings into a **⚠ Problems**
   tab (click to open the file) and an inline strip in the editor

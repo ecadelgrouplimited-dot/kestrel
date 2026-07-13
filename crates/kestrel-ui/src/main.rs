@@ -61,6 +61,9 @@ enum AgentUpdate {
     Activity(String),
     /// A file the agent wrote, with its full contents for live preview.
     Wrote { path: String, contents: String },
+    /// A file being streamed *right now* (partial contents), for real-time
+    /// preview before the write lands on disk.
+    Writing { path: String, contents: String },
     /// Token usage from a completed turn, for the live meter.
     Usage(kestrel_core::Usage),
     /// The agent finished; carries the final summary and the full conversation
@@ -465,6 +468,19 @@ impl KestrelApp {
                         self.status = "Stopped: over budget.".to_string();
                         self.save_session();
                         break;
+                    }
+                    ctx.request_repaint();
+                }
+                Ok(AgentUpdate::Writing { path, contents }) => {
+                    // Live, token-by-token preview as the model types the file —
+                    // no disk write and no tree refresh yet; that happens on Wrote.
+                    self.agent_activity = format!("✍ Writing {path}…");
+                    if let Some(idx) = self.agent_files.iter().position(|f| f.path == path) {
+                        self.agent_files[idx].contents = contents;
+                        self.agent_preview = Some(idx);
+                    } else {
+                        self.agent_files.push(AgentFile { path, contents });
+                        self.agent_preview = Some(self.agent_files.len() - 1);
                     }
                     ctx.request_repaint();
                 }
@@ -3020,6 +3036,9 @@ impl KestrelApp {
                         kestrel_core::AgentEvent::Tool(call) => AgentUpdate::Activity(call),
                         kestrel_core::AgentEvent::Wrote { path, contents } => {
                             AgentUpdate::Wrote { path, contents }
+                        }
+                        kestrel_core::AgentEvent::Writing { path, contents } => {
+                            AgentUpdate::Writing { path, contents }
                         }
                         kestrel_core::AgentEvent::Usage(usage) => AgentUpdate::Usage(usage),
                     };

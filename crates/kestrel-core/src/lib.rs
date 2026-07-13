@@ -28,9 +28,9 @@ pub use agent::{
     agent_loop_system_prompt, agent_session_path, agent_system_prompt, apply_file_edits,
     audit_log_path, builtin_tools, describe_call, diff_line_stats, diff_stats_by_file,
     execute_tool, git_checkpoint, git_commit_all, git_init, git_log, git_restore, git_revert_all,
-    git_review, history_tokens, load_agent_session, parse_file_edits, porcelain_path, run_agent,
-    run_shell_command, save_agent_session, AgentEvent, AgentOutcome, AgentSession, AppliedEdit,
-    Checkpoint, FileEdit, GitReview,
+    git_review, history_tokens, load_agent_session, parse_file_edits, partial_json_string_field,
+    porcelain_path, run_agent, run_shell_command, save_agent_session, AgentEvent, AgentOutcome,
+    AgentSession, AppliedEdit, Checkpoint, FileEdit, GitReview,
 };
 pub use config::{load_config, Config, ConfigLoad, PolicyConfig};
 pub use context::{
@@ -51,8 +51,8 @@ pub use policy::{default_denied_patterns, effective_policy, Policy};
 pub use pricing::{cost_of_usage, estimate_cost, model_context_window, model_price, ModelPrice};
 pub use project::{create_project, push_recent, NewProject, MAX_RECENTS};
 pub use providers::{
-    chat, chat_stream, run_turn, AgentMessage, ChatMessage, ChatRequest, ProviderConfig,
-    ProviderKind, ToolCall, ToolResult, ToolSpec, TurnResult, Usage,
+    chat, chat_stream, run_turn, run_turn_streaming, AgentMessage, ChatMessage, ChatRequest,
+    ProviderConfig, ProviderKind, ToolCall, ToolResult, ToolSpec, TurnEvent, TurnResult, Usage,
 };
 pub use repos::{
     link_repo, load_workspace, resolve_repo, save_workspace, unlink_repo, Repo, Workspace,

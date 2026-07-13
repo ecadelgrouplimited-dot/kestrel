@@ -277,9 +277,48 @@ fn accumulate_stream_usage(kind: ProviderKind, value: &serde_json::Value, usage:
     }
 }
 
+/// How many times to attempt a request before giving up.
+const CURL_MAX_ATTEMPTS: usize = 3;
+
+/// Whether a curl exit code is a transient network failure worth retrying —
+/// connection resets/timeouts/empty replies, not auth or malformed-request
+/// errors. Notably 35 (SSL/TLS handshake) and 56 (recv failure: reset), which
+/// are the flaky-connection cases users hit mid-run.
+fn curl_is_transient(code: Option<i32>) -> bool {
+    matches!(code, Some(6 | 7 | 16 | 18 | 28 | 35 | 52 | 55 | 56 | 92))
+}
+
+/// Build a curl command for a POST to `url` with `headers`, reading the body
+/// from stdin. `stream` toggles `-N` (unbuffered) for SSE.
+fn curl_command(url: &str, headers: &[(String, String)], stream: bool) -> Command {
+    let mut command = Command::new("curl");
+    command.arg("-sS");
+    if stream {
+        command.arg("-N");
+    }
+    // Bound the handshake/idle waits so a dead connection fails fast enough to
+    // retry rather than hanging the turn.
+    command.args(["--connect-timeout", "30"]);
+    command.arg(url);
+    for (key, value) in headers {
+        command.arg("-H").arg(format!("{key}: {value}"));
+    }
+    command.args(["--data-binary", "@-"]);
+    command.stdin(Stdio::piped());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+    command
+}
+
+/// Sleep a short, growing backoff between retry attempts.
+fn retry_backoff(attempt: usize) {
+    std::thread::sleep(std::time::Duration::from_millis(400 * (attempt as u64 + 1)));
+}
+
 /// POST a JSON body and stream the response body line by line to `on_line`
-/// (used for SSE). The request body is written and stdin closed before reading,
-/// so there is no pipe deadlock for the small requests we send.
+/// (used for SSE). Retries transient connection failures, but only while nothing
+/// has been streamed yet — once lines have been delivered a retry would double
+/// them, so a mid-stream drop surfaces as an error.
 fn post_json_stream(
     url: &str,
     headers: &[(String, String)],
@@ -287,77 +326,76 @@ fn post_json_stream(
     mut on_line: impl FnMut(&str),
 ) -> io::Result<()> {
     let body_str = serde_json::to_string(body).unwrap_or_default();
-    let mut command = Command::new("curl");
-    command.arg("-sS").arg("-N").arg(url);
-    for (key, value) in headers {
-        command.arg("-H").arg(format!("{key}: {value}"));
-    }
-    command.args(["--data-binary", "@-"]);
-    command.stdin(Stdio::piped());
-    command.stdout(Stdio::piped());
-    command.stderr(Stdio::piped());
+    let mut last_err = String::new();
 
-    let mut child = command.spawn()?;
-    {
-        let mut stdin = child
-            .stdin
+    for attempt in 0..CURL_MAX_ATTEMPTS {
+        let mut child = curl_command(url, headers, true).spawn()?;
+        {
+            let mut stdin = child
+                .stdin
+                .take()
+                .ok_or_else(|| io::Error::other("failed to open curl stdin"))?;
+            // Tolerate a broken pipe (server hung up early) — the curl exit code
+            // below carries the real error.
+            let _ = stdin.write_all(body_str.as_bytes());
+        }
+        let stdout = child
+            .stdout
             .take()
-            .ok_or_else(|| io::Error::other("failed to open curl stdin"))?;
-        stdin.write_all(body_str.as_bytes())?;
-    }
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| io::Error::other("failed to open curl stdout"))?;
-    for line in BufReader::new(stdout).lines() {
-        on_line(&line?);
-    }
-    let status = child.wait()?;
-    if !status.success() {
+            .ok_or_else(|| io::Error::other("failed to open curl stdout"))?;
+        let mut delivered = false;
+        for line in BufReader::new(stdout).lines() {
+            delivered = true;
+            on_line(&line?);
+        }
+        let status = child.wait()?;
+        if status.success() {
+            return Ok(());
+        }
         let mut stderr = String::new();
         if let Some(mut pipe) = child.stderr.take() {
             let _ = pipe.read_to_string(&mut stderr);
         }
-        return Err(io::Error::other(format!(
-            "curl request failed: {}",
-            stderr.trim()
-        )));
+        last_err = stderr.trim().to_string();
+        // Only safe to retry if we streamed nothing yet.
+        if !delivered && attempt + 1 < CURL_MAX_ATTEMPTS && curl_is_transient(status.code()) {
+            retry_backoff(attempt);
+            continue;
+        }
+        break;
     }
-    Ok(())
+    Err(io::Error::other(format!("curl request failed: {last_err}")))
 }
 
 /// POST a JSON body to `url` with the given headers via the system `curl`,
-/// piping the body through stdin (no temp files). Returns raw response bytes.
+/// piping the body through stdin (no temp files). Retries transient connection
+/// failures (resets/timeouts) with a short backoff. Returns raw response bytes.
 fn post_json(
     url: &str,
     headers: &[(String, String)],
     body: &serde_json::Value,
 ) -> io::Result<Vec<u8>> {
     let body_str = serde_json::to_string(body).unwrap_or_default();
-    let mut command = Command::new("curl");
-    command.arg("-sS").arg(url);
-    for (key, value) in headers {
-        command.arg("-H").arg(format!("{key}: {value}"));
-    }
-    command.args(["--data-binary", "@-"]);
-    command.stdin(Stdio::piped());
-    command.stdout(Stdio::piped());
-    command.stderr(Stdio::piped());
+    let mut last_err = String::new();
 
-    let mut child = command.spawn()?;
-    child
-        .stdin
-        .take()
-        .ok_or_else(|| io::Error::other("failed to open curl stdin"))?
-        .write_all(body_str.as_bytes())?;
-    let output = child.wait_with_output()?;
-    if !output.status.success() {
-        return Err(io::Error::other(format!(
-            "curl request failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
+    for attempt in 0..CURL_MAX_ATTEMPTS {
+        let mut child = curl_command(url, headers, false).spawn()?;
+        if let Some(mut stdin) = child.stdin.take() {
+            // Tolerate a broken pipe; the exit code carries the real error.
+            let _ = stdin.write_all(body_str.as_bytes());
+        }
+        let output = child.wait_with_output()?;
+        if output.status.success() {
+            return Ok(output.stdout);
+        }
+        last_err = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if attempt + 1 < CURL_MAX_ATTEMPTS && curl_is_transient(output.status.code()) {
+            retry_backoff(attempt);
+            continue;
+        }
+        break;
     }
-    Ok(output.stdout)
+    Err(io::Error::other(format!("curl request failed: {last_err}")))
 }
 
 // ---------------------------------------------------------------------------
@@ -745,6 +783,230 @@ pub fn run_turn(
     Ok(parse_turn(config.kind, &response))
 }
 
+/// A live event from a streaming agent turn, for real-time display.
+pub enum TurnEvent<'a> {
+    /// A chunk of the model's narration text.
+    Text(&'a str),
+    /// A tool call's arguments *so far* (the accumulated JSON string). Emitted on
+    /// every delta, so a consumer can show a file being written as it streams.
+    ToolProgress { name: &'a str, args: &'a str },
+}
+
+/// A tool call being assembled from a stream.
+#[derive(Default)]
+struct StreamTool {
+    id: String,
+    name: String,
+    args: String,
+}
+
+/// Accumulates a streamed turn (text + tool calls + usage) into a [`TurnResult`].
+#[derive(Default)]
+struct StreamState {
+    text: String,
+    stop_reason: String,
+    usage: Usage,
+    tools: std::collections::BTreeMap<usize, StreamTool>,
+}
+
+impl StreamState {
+    /// Fold one parsed SSE event into the state, emitting live events.
+    fn handle(
+        &mut self,
+        kind: ProviderKind,
+        value: &serde_json::Value,
+        on_event: &mut dyn FnMut(TurnEvent),
+    ) {
+        match kind {
+            ProviderKind::Anthropic => self.handle_anthropic(value, on_event),
+            ProviderKind::Openai => self.handle_openai(value, on_event),
+        }
+    }
+
+    fn handle_anthropic(&mut self, value: &serde_json::Value, on_event: &mut dyn FnMut(TurnEvent)) {
+        match value.get("type").and_then(|t| t.as_str()) {
+            Some("content_block_start") => {
+                let index = value.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
+                let block = value.get("content_block");
+                if block.and_then(|b| b.get("type")).and_then(|t| t.as_str()) == Some("tool_use") {
+                    let id = block
+                        .and_then(|b| b.get("id"))
+                        .and_then(|i| i.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let name = block
+                        .and_then(|b| b.get("name"))
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    self.tools.insert(
+                        index,
+                        StreamTool {
+                            id,
+                            name,
+                            args: String::new(),
+                        },
+                    );
+                }
+            }
+            Some("content_block_delta") => {
+                let index = value.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
+                let delta = value.get("delta");
+                match delta.and_then(|d| d.get("type")).and_then(|t| t.as_str()) {
+                    Some("text_delta") => {
+                        if let Some(t) = delta.and_then(|d| d.get("text")).and_then(|t| t.as_str())
+                        {
+                            self.text.push_str(t);
+                            on_event(TurnEvent::Text(t));
+                        }
+                    }
+                    Some("input_json_delta") => {
+                        if let Some(pj) = delta
+                            .and_then(|d| d.get("partial_json"))
+                            .and_then(|p| p.as_str())
+                        {
+                            if let Some(tool) = self.tools.get_mut(&index) {
+                                tool.args.push_str(pj);
+                            }
+                            if let Some(tool) = self.tools.get(&index) {
+                                on_event(TurnEvent::ToolProgress {
+                                    name: &tool.name,
+                                    args: &tool.args,
+                                });
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Some("message_delta") => {
+                if let Some(reason) = value.pointer("/delta/stop_reason").and_then(|s| s.as_str()) {
+                    self.stop_reason = reason.to_string();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_openai(&mut self, value: &serde_json::Value, on_event: &mut dyn FnMut(TurnEvent)) {
+        if let Some(t) = value
+            .pointer("/choices/0/delta/content")
+            .and_then(|c| c.as_str())
+        {
+            if !t.is_empty() {
+                self.text.push_str(t);
+                on_event(TurnEvent::Text(t));
+            }
+        }
+        if let Some(reason) = value
+            .pointer("/choices/0/finish_reason")
+            .and_then(|s| s.as_str())
+        {
+            self.stop_reason = reason.to_string();
+        }
+        if let Some(calls) = value
+            .pointer("/choices/0/delta/tool_calls")
+            .and_then(|t| t.as_array())
+        {
+            for call in calls {
+                let index = call.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
+                let tool = self.tools.entry(index).or_default();
+                if let Some(id) = call.get("id").and_then(|i| i.as_str()) {
+                    if !id.is_empty() {
+                        tool.id = id.to_string();
+                    }
+                }
+                if let Some(name) = call.pointer("/function/name").and_then(|n| n.as_str()) {
+                    if !name.is_empty() {
+                        tool.name = name.to_string();
+                    }
+                }
+                if let Some(args) = call.pointer("/function/arguments").and_then(|a| a.as_str()) {
+                    tool.args.push_str(args);
+                }
+                let tool = &self.tools[&index];
+                on_event(TurnEvent::ToolProgress {
+                    name: &tool.name,
+                    args: &tool.args,
+                });
+            }
+        }
+    }
+
+    /// Assemble the final turn once the stream is complete.
+    fn into_turn(self) -> TurnResult {
+        let calls = self
+            .tools
+            .into_values()
+            .filter(|t| !t.name.is_empty())
+            .map(|t| ToolCall {
+                id: t.id,
+                name: t.name,
+                input: serde_json::from_str(&t.args).unwrap_or_else(|_| serde_json::json!({})),
+            })
+            .collect();
+        TurnResult {
+            text: self.text,
+            calls,
+            stop_reason: self.stop_reason,
+            usage: self.usage,
+        }
+    }
+}
+
+/// Run one agent turn with **streaming**, emitting [`TurnEvent`]s as text and
+/// tool arguments arrive, and returning the assembled [`TurnResult`]. Mirrors
+/// [`run_turn`] but lets the UI show a file being written in real time.
+#[allow(clippy::too_many_arguments)]
+pub fn run_turn_streaming(
+    config: &ProviderConfig,
+    model: &str,
+    max_tokens: u64,
+    system: Option<&str>,
+    messages: &[AgentMessage],
+    tools: &[ToolSpec],
+    mut on_event: impl FnMut(TurnEvent),
+) -> io::Result<Result<TurnResult, String>> {
+    if config.api_key.trim().is_empty() {
+        return Ok(Err("no API key configured for this provider".to_string()));
+    }
+    let url = endpoint(config.kind, &config.base_url);
+    let header_args = headers(config.kind, &config.api_key);
+    let mut body = build_agent_body(config.kind, model, max_tokens, system, messages, tools);
+    body["stream"] = serde_json::json!(true);
+    if config.kind == ProviderKind::Openai {
+        body["stream_options"] = serde_json::json!({ "include_usage": true });
+    }
+
+    let kind = config.kind;
+    let mut state = StreamState::default();
+    let mut api_error: Option<String> = None;
+
+    post_json_stream(&url, &header_args, &body, |line| {
+        let Some(data) = line.trim().strip_prefix("data:") else {
+            return;
+        };
+        let data = data.trim();
+        if data.is_empty() || data == "[DONE]" {
+            return;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(data) else {
+            return;
+        };
+        if let Some(message) = value.pointer("/error/message").and_then(|m| m.as_str()) {
+            api_error = Some(message.to_string());
+            return;
+        }
+        accumulate_stream_usage(kind, &value, &mut state.usage);
+        state.handle(kind, &value, &mut on_event);
+    })?;
+
+    if let Some(message) = api_error {
+        return Ok(Err(message));
+    }
+    Ok(Ok(state.into_turn()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -935,5 +1197,46 @@ mod tests {
         assert_eq!(turn.calls.len(), 1);
         assert_eq!(turn.calls[0].name, "read_file");
         assert_eq!(turn.calls[0].input["path"], "a.rs");
+    }
+
+    #[test]
+    fn transient_curl_codes_retry_but_auth_errors_dont() {
+        // 35 (TLS) and 56 (recv reset) are the flaky-connection cases.
+        assert!(curl_is_transient(Some(35)));
+        assert!(curl_is_transient(Some(56)));
+        assert!(curl_is_transient(Some(28)));
+        // A malformed URL (3) or auth-level failure is not retried.
+        assert!(!curl_is_transient(Some(3)));
+        assert!(!curl_is_transient(Some(22)));
+        assert!(!curl_is_transient(None));
+    }
+
+    #[test]
+    fn stream_state_assembles_anthropic_tool_call_with_live_events() {
+        let events = [
+            serde_json::json!({"type": "content_block_start", "index": 0,
+                "content_block": {"type": "tool_use", "id": "t1", "name": "write_file"}}),
+            serde_json::json!({"type": "content_block_delta", "index": 0,
+                "delta": {"type": "input_json_delta", "partial_json": "{\"path\":\"a.txt\",\"cont"}}),
+            serde_json::json!({"type": "content_block_delta", "index": 0,
+                "delta": {"type": "input_json_delta", "partial_json": "ents\":\"hello\"}"}}),
+            serde_json::json!({"type": "message_delta", "delta": {"stop_reason": "tool_use"}}),
+        ];
+        let mut state = StreamState::default();
+        let mut progress_seen = 0;
+        for ev in &events {
+            state.handle(ProviderKind::Anthropic, ev, &mut |e| {
+                if matches!(e, TurnEvent::ToolProgress { .. }) {
+                    progress_seen += 1;
+                }
+            });
+        }
+        assert!(progress_seen >= 1, "should emit live tool progress");
+        let turn = state.into_turn();
+        assert_eq!(turn.stop_reason, "tool_use");
+        assert_eq!(turn.calls.len(), 1);
+        assert_eq!(turn.calls[0].name, "write_file");
+        assert_eq!(turn.calls[0].input["path"], "a.txt");
+        assert_eq!(turn.calls[0].input["contents"], "hello");
     }
 }
