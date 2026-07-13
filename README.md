@@ -272,6 +272,10 @@ cargo clippy --all-targets -- -D warnings   # lint with warnings treated as erro
 
 All three should pass cleanly before you commit. `cargo test` alone is enough for a quick check while iterating.
 
+### Try it on real projects
+
+[docs/test-projects.md](docs/test-projects.md) is a battery of ready-to-paste agent prompts that exercise every capability across many languages and frameworks — from a Rust CLI to Flutter, FastAPI, .NET, and Laravel — plus research-required builds, multi-repo tracing, the workflows/marketplace, the safety rails, and a capstone: **building Kestrel's own product website**, a story told through its features.
+
 ## Toolchain note
 
 Kestrel builds with the standard **`x86_64-pc-windows-msvc`** toolchain (Visual Studio Build Tools 2022 + Windows SDK). No special setup is required beyond a normal Rust install and the C++ build tools.

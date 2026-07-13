@@ -51,7 +51,8 @@ configurable and the agent has a full engineering toolset.
 ## Phase 3 — Professional Reliability 🟡 (active focus)
 
 - ✅ Shadow Build repair loop (agent self-critique + verify-and-fix; CLI `--repair`)
-- ✅ Diff review / better code-review surface (colored git diff, Keep/Revert)
+- ✅ Diff review / better code-review surface (colored git diff, Keep/Revert,
+  and **red/green +/− line-change counts** — total and per file)
 - ✅ **Checkpoints & rollback** (auto-checkpoint before each agent run; restore
   any recent checkpoint from the Diff tab)
 - ✅ **Secret scanner** (dependency-free; flags likely keys/tokens/private keys
@@ -73,7 +74,12 @@ configurable and the agent has a full engineering toolset.
 
 - ✅ Native file explorer: create/rename/delete files & folders
 - ✅ Source editor: syntax highlighting (dependency-free), symbol outline,
-  save, `rustfmt`
+  save, and **multi-language Format** — dispatches to the right tool by file
+  type (rustfmt, gofmt, black, prettier), gracefully reporting when one isn't
+  installed
+- ✅ **Any language, any framework** — the agent is instructed to build in any
+  stack, to **research unfamiliar frameworks/APIs from the docs before writing**
+  (via `http_get`), and to scaffold with each ecosystem's own tools
 - ✅ Light/dark theme
 - ✅ Agent toolset: `read_file`, `list_dir`, `http_get`, `search`, `write_file`,
   `edit_file` (diff-style), `run_command`, `git`, `verify`

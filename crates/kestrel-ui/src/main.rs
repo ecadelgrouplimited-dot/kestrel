@@ -1249,18 +1249,21 @@ impl KestrelApp {
         let Some(path) = self.editor_path.clone() else {
             return;
         };
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        if ext != "rs" {
+        let filename = path.to_string_lossy();
+        let Some(formatter) = kestrel_core::formatter_for(&filename) else {
             self.editor_status =
-                "Formatting is available for Rust files (.rs) via rustfmt.".to_string();
+                "No formatter is configured for this file type (Rust, Go, Python, JS/TS, CSS, \
+                 HTML, JSON, Markdown, YAML, …)."
+                    .to_string();
             return;
-        }
-        match rustfmt_source(&self.editor_text) {
+        };
+        let label = formatter.label;
+        match kestrel_core::format_source(&filename, &self.editor_text) {
             Ok(formatted) => {
                 self.editor_text = formatted;
-                self.editor_status = "Formatted with rustfmt.".to_string();
+                self.editor_status = format!("Formatted with {label}.");
             }
-            Err(err) => self.editor_status = format!("rustfmt failed: {err}"),
+            Err(err) => self.editor_status = err,
         }
     }
 
@@ -1286,9 +1289,12 @@ impl KestrelApp {
                 ui.colored_label(egui::Color32::from_rgb(220, 150, 80), "● unsaved");
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let can_fmt = kestrel_core::can_format(&path.to_string_lossy());
                 if ui
-                    .button("Format")
-                    .on_hover_text("rustfmt (Rust files)")
+                    .add_enabled(can_fmt, egui::Button::new("Format"))
+                    .on_hover_text(
+                        "Format with the language's formatter (rustfmt, prettier, black, gofmt, …)",
+                    )
                     .clicked()
                 {
                     do_format = true;
@@ -1421,6 +1427,19 @@ impl KestrelApp {
             } else {
                 ui.horizontal(|ui| {
                     ui.strong(&review.summary);
+                    if !review.files.is_empty() {
+                        let (added, removed) = kestrel_core::diff_line_stats(&review.diff);
+                        ui.label(
+                            egui::RichText::new(format!("+{added}"))
+                                .monospace()
+                                .color(DIFF_ADD),
+                        );
+                        ui.label(
+                            egui::RichText::new(format!("−{removed}"))
+                                .monospace()
+                                .color(DIFF_DEL),
+                        );
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.button("⟳ Refresh").clicked() {
                             refresh = true;
@@ -1507,11 +1526,30 @@ impl KestrelApp {
                     );
                 } else {
                     let text_color = ui.visuals().text_color();
+                    let per_file = kestrel_core::diff_stats_by_file(&review.diff);
                     egui::ScrollArea::both()
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
                             for entry in &review.files {
-                                ui.label(egui::RichText::new(entry).monospace().weak());
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new(entry).monospace().weak());
+                                    if let Some((added, removed)) =
+                                        per_file.get(&kestrel_core::porcelain_path(entry))
+                                    {
+                                        ui.label(
+                                            egui::RichText::new(format!("+{added}"))
+                                                .monospace()
+                                                .small()
+                                                .color(DIFF_ADD),
+                                        );
+                                        ui.label(
+                                            egui::RichText::new(format!("−{removed}"))
+                                                .monospace()
+                                                .small()
+                                                .color(DIFF_DEL),
+                                        );
+                                    }
+                                });
                             }
                             ui.separator();
                             for line in review.diff.lines() {
@@ -3404,32 +3442,6 @@ fn count_files(node: &TreeNode) -> usize {
     }
 }
 
-/// Format Rust `source` with the system `rustfmt`, returning the formatted text
-/// or an error message. Uses a temp file (rustfmt formats files in place).
-fn rustfmt_source(source: &str) -> Result<String, String> {
-    let tmp = std::env::temp_dir().join(format!(
-        "kestrel-fmt-{}-{}.rs",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    std::fs::write(&tmp, source).map_err(|e| e.to_string())?;
-    let output = std::process::Command::new("rustfmt")
-        .arg("--edition")
-        .arg("2021")
-        .arg(&tmp)
-        .output();
-    let result = match output {
-        Ok(out) if out.status.success() => std::fs::read_to_string(&tmp).map_err(|e| e.to_string()),
-        Ok(out) => Err(String::from_utf8_lossy(&out.stderr).trim().to_string()),
-        Err(err) => Err(format!("rustfmt not found on PATH ({err})")),
-    };
-    let _ = std::fs::remove_file(&tmp);
-    result
-}
-
 /// Build the system prompt for a chat turn. When `include` is set and the
 /// project graph builds, the most relevant files for `query` are attached as
 /// background context. Runs on the chat worker thread (graph building is slow),
@@ -3457,6 +3469,9 @@ fn chat_system_prompt(include: bool, project: &Path, query: &str) -> String {
 
 /// Kestrel's amber accent colour (a kestrel is a russet falcon).
 const ACCENT: egui::Color32 = egui::Color32::from_rgb(0xE8, 0x8A, 0x2E);
+/// Green for added lines / counts, red for removed — shared across the Diff view.
+const DIFF_ADD: egui::Color32 = egui::Color32::from_rgb(90, 190, 110);
+const DIFF_DEL: egui::Color32 = egui::Color32::from_rgb(220, 100, 100);
 
 /// Apply Kestrel's visual style over the base light/dark theme: comfortable
 /// spacing, rounded widgets, and an amber accent for selection and links.
@@ -3499,9 +3514,9 @@ fn diff_line_color(line: &str, default: egui::Color32) -> egui::Color32 {
     } else if line.starts_with("@@") {
         egui::Color32::from_rgb(90, 170, 220)
     } else if line.starts_with('+') {
-        egui::Color32::from_rgb(90, 190, 110)
+        DIFF_ADD
     } else if line.starts_with('-') {
-        egui::Color32::from_rgb(220, 100, 100)
+        DIFF_DEL
     } else {
         default
     }

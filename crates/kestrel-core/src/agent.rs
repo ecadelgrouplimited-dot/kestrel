@@ -205,6 +205,21 @@ pub fn agent_loop_system_prompt(root: &Path) -> String {
          To restart after a fix, just call start_app again (it stops the previous instance). When \
          something is broken (e.g. a bad database query), read app_logs and the code, fix it, \
          restart, and re-check.\n\n\
+         ANY LANGUAGE, ANY FRAMEWORK: you can build in whatever stack the user asks for — Rust, \
+         Go, Python, TypeScript/Node, React/Next/Vue/Svelte, Swift, Kotlin, C#/.NET, PHP/Laravel, \
+         Ruby/Rails, Flutter, Unity, embedded, CLIs, games, anything. If the user doesn't specify \
+         a stack, pick the one best suited to the goal and say why. NEVER refuse or downgrade a \
+         request because a stack is unfamiliar.\n\n\
+         RESEARCH WHAT YOU DON'T KNOW: when a framework, API, library version, or file format is \
+         unfamiliar or may have changed, do not guess — use http_get to read the official docs, a \
+         package registry (crates.io, npm, PyPI, pkg.go.dev, Packagist), or a raw GitHub file to \
+         confirm the current API, the right dependency versions, and the correct project layout \
+         BEFORE writing code. Verify commands and config against reality. A short research step up \
+         front prevents broken builds.\n\n\
+         Scaffold with the ecosystem's own tools when that's the idiomatic path (e.g. \
+         `cargo new`, `npm create vite@latest`, `npx create-next-app`, `dotnet new`, \
+         `composer create-project`) via run_command, then edit from there — but never run a \
+         command that blocks waiting for a server; use start_app for those.\n\n\
          Work step by step: inspect what you need with read_file/list_dir/http_get, then create \
          the project by calling write_file for each file with its ENTIRE contents (never partial \
          snippets). Prefer fewer, complete, runnable files.\n\n\
@@ -988,8 +1003,56 @@ pub fn git_review(root: &Path) -> GitReview {
     }
 }
 
+/// The added/removed line counts of a unified diff, ignoring the `+++`/`---`
+/// file headers (so only real content lines are counted).
+pub fn diff_line_stats(diff: &str) -> (usize, usize) {
+    let mut added = 0;
+    let mut removed = 0;
+    for line in diff.lines() {
+        if line.starts_with("+++") || line.starts_with("---") {
+            continue;
+        }
+        if line.starts_with('+') {
+            added += 1;
+        } else if line.starts_with('-') {
+            removed += 1;
+        }
+    }
+    (added, removed)
+}
+
+/// Per-file added/removed line counts, keyed by the file's (project-relative)
+/// path, parsed from the `diff --git a/… b/…` section headers.
+pub fn diff_stats_by_file(diff: &str) -> std::collections::HashMap<String, (usize, usize)> {
+    let mut stats: std::collections::HashMap<String, (usize, usize)> =
+        std::collections::HashMap::new();
+    let mut current: Option<String> = None;
+    for line in diff.lines() {
+        if let Some(rest) = line.strip_prefix("diff --git ") {
+            // "a/path b/path" — take the b/ side (survives renames/deletes).
+            current = rest
+                .split(" b/")
+                .nth(1)
+                .map(|p| p.trim().trim_matches('"').to_string());
+            continue;
+        }
+        if line.starts_with("+++") || line.starts_with("---") {
+            continue;
+        }
+        if let Some(path) = &current {
+            let entry = stats.entry(path.clone()).or_insert((0, 0));
+            if line.starts_with('+') {
+                entry.0 += 1;
+            } else if line.starts_with('-') {
+                entry.1 += 1;
+            }
+        }
+    }
+    stats
+}
+
 /// Extract the file path from a `git status --porcelain` line.
-fn porcelain_path(line: &str) -> String {
+pub fn porcelain_path(line: &str) -> String {
     let rest = line.get(3..).unwrap_or("").trim();
     if let Some(idx) = rest.find("-> ") {
         rest[idx + 3..].trim().trim_matches('"').to_string()
@@ -1840,6 +1903,27 @@ mod tests {
         );
         assert!(err.starts_with("error:"), "unknown repo: {err}");
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn diff_stats_count_added_and_removed() {
+        let diff = "diff --git a/src/lib.rs b/src/lib.rs\n\
+                    index 1..2 100644\n\
+                    --- a/src/lib.rs\n\
+                    +++ b/src/lib.rs\n\
+                    @@ -1,2 +1,3 @@\n\
+                    -old line\n\
+                    +new line\n\
+                    +another new line\n\
+                    diff --git a/README.md b/README.md\n\
+                    --- a/README.md\n\
+                    +++ b/README.md\n\
+                    @@ -0,0 +1 @@\n\
+                    +hello\n";
+        assert_eq!(diff_line_stats(diff), (3, 1));
+        let by_file = diff_stats_by_file(diff);
+        assert_eq!(by_file.get("src/lib.rs"), Some(&(2, 1)));
+        assert_eq!(by_file.get("README.md"), Some(&(1, 0)));
     }
 
     #[test]

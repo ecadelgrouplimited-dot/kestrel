@@ -4,6 +4,7 @@ pub mod config;
 pub mod context;
 pub mod diagnostics;
 pub mod environment;
+pub mod format;
 pub mod graph;
 pub mod inspect;
 pub mod policy;
@@ -25,10 +26,11 @@ pub mod workspace;
 
 pub use agent::{
     agent_loop_system_prompt, agent_session_path, agent_system_prompt, apply_file_edits,
-    audit_log_path, builtin_tools, describe_call, execute_tool, git_checkpoint, git_commit_all,
-    git_init, git_log, git_restore, git_revert_all, git_review, history_tokens, load_agent_session,
-    parse_file_edits, run_agent, run_shell_command, save_agent_session, AgentEvent, AgentOutcome,
-    AgentSession, AppliedEdit, Checkpoint, FileEdit, GitReview,
+    audit_log_path, builtin_tools, describe_call, diff_line_stats, diff_stats_by_file,
+    execute_tool, git_checkpoint, git_commit_all, git_init, git_log, git_restore, git_revert_all,
+    git_review, history_tokens, load_agent_session, parse_file_edits, porcelain_path, run_agent,
+    run_shell_command, save_agent_session, AgentEvent, AgentOutcome, AgentSession, AppliedEdit,
+    Checkpoint, FileEdit, GitReview,
 };
 pub use config::{load_config, Config, ConfigLoad, PolicyConfig};
 pub use context::{
@@ -37,6 +39,7 @@ pub use context::{
 };
 pub use diagnostics::{checker_name, run_diagnostics, Diagnostic, Severity};
 pub use environment::{discover_environment, EnvironmentReport, ToolInfo, WslInfo};
+pub use format::{can_format, format_source, formatter_for, Formatter};
 pub use graph::{
     build_graph_from_files, build_project_graph, DependencyEdge, FileNode, ProjectGraph,
 };
