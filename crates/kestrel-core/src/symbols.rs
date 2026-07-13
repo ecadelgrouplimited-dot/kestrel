@@ -4,13 +4,14 @@
 //! declarations (functions, types, classes, and so on) that a model needs in
 //! order to reason about a file without reading every line of it.
 //!
-//! The extractors here are deliberately dependency-free heuristic scanners.
-//! They handle well-formatted, idiomatic code for the priority languages and
-//! are intentionally hidden behind the [`SymbolExtractor`] trait so that a
-//! full tree-sitter backend can replace any one of them later without changing
-//! a single caller. That swappability is the whole point: per the technical
-//! architecture, the MVP component must be the literal substrate of its
-//! horizon successor (the Living System Model), not throwaway scaffolding.
+//! Extraction runs behind the [`SymbolExtractor`] trait. The default backend is
+//! now **tree-sitter** (see [`crate::treesitter`]) — a real parser, so symbols
+//! are precise. The heuristic scanners in this module remain as the tree-sitter
+//! backend's fallback (if a grammar fails to load) and still supply the
+//! import/reference edges the dependency graph is built from. That the MVP
+//! heuristic could be swapped for the real parser with no caller change — the
+//! trait was the seam all along — is the point: the component is the literal
+//! substrate of its horizon successor (the Living System Model), not scaffolding.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -114,23 +115,45 @@ pub trait SymbolExtractor {
     }
 }
 
-/// Return an extractor for a `language_for_path`-style display name.
+/// Return an extractor for a `language_for_path`-style display name. Uses the
+/// tree-sitter backend, which falls back to the heuristic scanner internally.
 pub fn extractor_for_language(language: &str) -> Option<Box<dyn SymbolExtractor>> {
-    match language {
-        "Rust" => Some(Box::new(RustExtractor)),
-        "TypeScript" | "JavaScript" => Some(Box::new(TypeScriptExtractor)),
-        "Python" => Some(Box::new(PythonExtractor)),
-        _ => None,
-    }
+    use crate::treesitter::{TreeSitterExtractor, TsLang};
+    let (lang, display) = match language {
+        "Rust" => (TsLang::Rust, "Rust"),
+        "TypeScript" | "JavaScript" | "TypeScript/JavaScript" => {
+            (TsLang::TypeScript, "TypeScript/JavaScript")
+        }
+        "Python" => (TsLang::Python, "Python"),
+        _ => return None,
+    };
+    Some(Box::new(TreeSitterExtractor::new(lang, display)))
 }
 
 /// Return an extractor based on a file's extension, or `None` if unsupported.
 pub fn extractor_for_path(path: &Path) -> Option<Box<dyn SymbolExtractor>> {
+    use crate::treesitter::{TreeSitterExtractor, TsLang};
     let ext = path.extension().and_then(|e| e.to_str())?;
-    match ext {
-        "rs" => Some(Box::new(RustExtractor)),
-        "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" => Some(Box::new(TypeScriptExtractor)),
-        "py" | "pyw" => Some(Box::new(PythonExtractor)),
+    let (lang, display) = match ext {
+        "rs" => (TsLang::Rust, "Rust"),
+        "tsx" => (TsLang::Tsx, "TypeScript/JavaScript"),
+        "ts" | "mts" | "cts" => (TsLang::TypeScript, "TypeScript/JavaScript"),
+        "js" | "jsx" | "mjs" | "cjs" => (TsLang::JavaScript, "TypeScript/JavaScript"),
+        "py" | "pyw" => (TsLang::Python, "Python"),
+        _ => return None,
+    };
+    Some(Box::new(TreeSitterExtractor::new(lang, display)))
+}
+
+/// The heuristic (dependency-free) extractor for a display language, used as the
+/// tree-sitter backend's fallback and for imports/reference extraction.
+pub(crate) fn heuristic_for_language(language: &str) -> Option<Box<dyn SymbolExtractor>> {
+    match language {
+        "Rust" => Some(Box::new(RustExtractor)),
+        "TypeScript" | "JavaScript" | "TypeScript/JavaScript" => {
+            Some(Box::new(TypeScriptExtractor))
+        }
+        "Python" => Some(Box::new(PythonExtractor)),
         _ => None,
     }
 }

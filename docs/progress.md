@@ -16,14 +16,16 @@ configurable and the agent has a full engineering toolset.
 
 **Tests:** 94 core + 8 CLI, all green. Clippy/fmt clean on every commit.
 
-## Phase 0 — Foundation ✅ (tree-sitter deferred)
+## Phase 0 — Foundation ✅
 
 - ✅ Rust workspace scaffold (core/cli/ui)
 - ✅ Project open flow, file inventory, Git root detection, `.gitignore` awareness
 - ✅ Local incremental index cache (`.kestrel/index.json`, keyed by size+mtime)
 - ✅ CLI inspection commands: `inspect`, `symbols`, `graph`, `related`, `context`
-- 🟡 Parsing: dependency-free heuristic extractors (Rust/TS/JS/Python) behind a
-  swappable `SymbolExtractor` trait — tree-sitter backend deferred, not blocking
+- ✅ Parsing: **tree-sitter** backend (Rust/TS/TSX/JS/Python) behind the
+  `SymbolExtractor` trait — precise symbols (nested methods, exported arrow fns,
+  decorated Python defs); heuristic scanners kept as the fallback and for the
+  import/reference edges the graph is built from
 - ⬜ Native Windows service prototype (running as an app, not a service)
 
 ## Phase 1 — MVP Agent ✅

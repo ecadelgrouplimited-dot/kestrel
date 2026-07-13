@@ -16,6 +16,7 @@ pub mod symbols;
 pub mod syntax;
 pub mod syscap;
 pub mod tests_select;
+pub mod treesitter;
 pub mod usage_log;
 pub mod verify;
 pub mod workspace;
