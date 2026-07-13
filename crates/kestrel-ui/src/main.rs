@@ -214,6 +214,8 @@ struct KestrelApp {
     /// Available workflows and the parameter values being filled in.
     workflows: Vec<kestrel_core::Workflow>,
     workflow_params: std::collections::HashMap<String, String>,
+    /// Repositories linked to the current project (the multi-repo workspace).
+    workspace_repos: Vec<kestrel_core::Repo>,
 }
 
 impl Default for KestrelApp {
@@ -235,6 +237,7 @@ impl Default for KestrelApp {
             .map(|v| v.to_string())
             .unwrap_or_default();
         let policy_patterns = settings.policy.denied_patterns.join("\n");
+        let workspace_repos = kestrel_core::load_workspace(std::path::Path::new(&path)).repos;
         Self {
             view: AppView::Main,
             dark_mode: true,
@@ -304,6 +307,7 @@ impl Default for KestrelApp {
             usage_records: Vec::new(),
             workflows: kestrel_core::all_workflows(),
             workflow_params: std::collections::HashMap::new(),
+            workspace_repos,
         }
     }
 }
@@ -816,6 +820,7 @@ impl KestrelApp {
         self.session_usage = kestrel_core::Usage::default();
         self.session_cost = 0.0;
         self.today_cost = kestrel_core::cost_today(&kestrel_core::load_usage_records(&path));
+        self.workspace_repos = kestrel_core::load_workspace(&path).repos;
         self.view = AppView::Main;
         self.reload_tree();
     }
@@ -856,8 +861,17 @@ impl KestrelApp {
             if ui.button("+ Folder").clicked() {
                 self.begin_new_entry(true);
             }
+            if ui
+                .button("🔗 Repo")
+                .on_hover_text("Link another repository so the agent can reason across them")
+                .clicked()
+            {
+                self.link_repo();
+            }
         });
         ui.separator();
+
+        self.workspace_repos_ui(ui);
 
         let mut actions: Vec<TreeAction> = Vec::new();
         egui::ScrollArea::vertical()
@@ -895,6 +909,74 @@ impl KestrelApp {
                     });
                 }
             }
+        }
+    }
+
+    /// Pick a folder and link it to the current project as a workspace repo.
+    fn link_repo(&mut self) {
+        let root = self.project_path();
+        if let Some(dir) = rfd::FileDialog::new()
+            .set_title("Link a repository")
+            .set_directory(&root)
+            .pick_folder()
+        {
+            match kestrel_core::link_repo(&root, &dir) {
+                Ok(ws) => {
+                    self.workspace_repos = ws.repos;
+                    self.status = format!("Linked {}", dir.display());
+                }
+                Err(err) => self.status = format!("Could not link repo: {err}"),
+            }
+        }
+    }
+
+    /// The linked-repositories section of the explorer: each repo can be opened
+    /// as the primary project or unlinked. The agent reaches them via list_repos.
+    fn workspace_repos_ui(&mut self, ui: &mut egui::Ui) {
+        if self.workspace_repos.is_empty() {
+            return;
+        }
+        enum RepoAction {
+            Open(PathBuf),
+            Unlink(String),
+        }
+        let mut action: Option<RepoAction> = None;
+        egui::CollapsingHeader::new(format!("🔗 Linked repos ({})", self.workspace_repos.len()))
+            .default_open(true)
+            .show(ui, |ui| {
+                for repo in &self.workspace_repos {
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button("↗")
+                            .on_hover_text(format!("Open {} as the project", repo.path))
+                            .clicked()
+                        {
+                            action = Some(RepoAction::Open(PathBuf::from(&repo.path)));
+                        }
+                        if ui.button("✕").on_hover_text("Unlink").clicked() {
+                            action = Some(RepoAction::Unlink(repo.path.clone()));
+                        }
+                        ui.label(&repo.name).on_hover_text(&repo.path);
+                    });
+                }
+            });
+        ui.separator();
+
+        match action {
+            Some(RepoAction::Open(path)) => {
+                if path.is_dir() {
+                    self.open_project_path(path);
+                } else {
+                    self.status = "That repository folder no longer exists.".to_string();
+                }
+            }
+            Some(RepoAction::Unlink(path)) => {
+                let root = self.project_path();
+                if let Ok(ws) = kestrel_core::unlink_repo(&root, &path) {
+                    self.workspace_repos = ws.repos;
+                }
+            }
+            None => {}
         }
     }
 

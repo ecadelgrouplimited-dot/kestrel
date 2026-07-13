@@ -10,6 +10,7 @@ pub mod policy;
 pub mod pricing;
 pub mod project;
 pub mod providers;
+pub mod repos;
 pub mod secrets;
 pub mod settings;
 pub mod symbols;
@@ -49,6 +50,9 @@ pub use project::{create_project, push_recent, NewProject, MAX_RECENTS};
 pub use providers::{
     chat, chat_stream, run_turn, AgentMessage, ChatMessage, ChatRequest, ProviderConfig,
     ProviderKind, ToolCall, ToolResult, ToolSpec, TurnResult, Usage,
+};
+pub use repos::{
+    link_repo, load_workspace, resolve_repo, save_workspace, unlink_repo, Repo, Workspace,
 };
 pub use secrets::{scan_secrets, SecretFinding};
 pub use settings::{

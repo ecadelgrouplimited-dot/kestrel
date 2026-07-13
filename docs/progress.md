@@ -14,7 +14,7 @@ projects. Model calls go over the system `curl` (no bundled TLS) — a constrain
 that turned into a strength (zero heavy deps). All model providers are
 configurable and the agent has a full engineering toolset.
 
-**Tests:** 94 core + 8 CLI, all green. Clippy/fmt clean on every commit.
+**Tests:** 126 core + 8 CLI, all green. Clippy/fmt clean on every commit.
 
 ## Phase 0 — Foundation ✅
 
@@ -116,7 +116,12 @@ configurable and the agent has a full engineering toolset.
   assistant** (root-cause a log), raise test coverage, update dependencies. User
   workflows persist to `<config>/kestrel/workflows.toml` — a shareable file that
   seeds a **workflow marketplace**.
-- ⬜ Multi-repository reasoning · private deployment · marketplace UI
+- ✅ **Multi-repository reasoning** (🔗) — link sibling repos into a workspace
+  (stored in `.kestrel/workspace.json`); the agent gets `list_repos()` and a
+  `repo`-scoped `search(query, repo="name")`, and reads any linked repo by
+  absolute path, so it can trace and reason across repo boundaries (writes stay
+  in the primary project). Link/open/unlink repos from the Explorer.
+- ⬜ Private deployment · marketplace UI
 
 ## Next candidates
 

@@ -219,8 +219,29 @@ pub fn agent_loop_system_prompt(root: &Path) -> String {
          effort. Do not claim success without verifying.\n\n\
          When you are finished, stop calling tools and reply with a short summary of what you \
          built and what verification showed.\n\n\
-         The current project root is: {}",
+         {}The current project root is: {}",
+        multi_repo_prompt(root),
         root.display()
+    )
+}
+
+/// If the project is linked to other repositories, tell the agent how to reason
+/// across them; otherwise contribute nothing.
+fn multi_repo_prompt(root: &Path) -> String {
+    let ws = crate::repos::load_workspace(root);
+    if ws.repos.is_empty() {
+        return String::new();
+    }
+    let mut list = String::new();
+    for r in &ws.repos {
+        list.push_str(&format!("\"{}\" ({}), ", r.name, r.path));
+    }
+    let list = list.trim_end_matches(", ");
+    format!(
+        "This project is part of a MULTI-REPOSITORY workspace. Linked repositories: {list}. Call \
+         list_repos() to see them all with their paths. To reason across repos, search a linked \
+         repo with search(query, repo=\"name\"), and read a file from one with read_file using \
+         its absolute path. Writes still go only to the primary project.\n\n"
     )
 }
 
@@ -292,18 +313,29 @@ pub fn builtin_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "search".to_string(),
-            description: "Search the project's text files for a query string (case-insensitive) \
-                          and return matching `path:line: text` results. Optionally scope to a \
-                          sub-path."
+            description: "Search text files for a query string (case-insensitive) and return \
+                          matching `path:line: text` results. Optionally scope to a sub-path. To \
+                          search a linked repository instead of the primary project, pass its name \
+                          as `repo` (see list_repos)."
                 .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "query": { "type": "string" },
                     "path": { "type": "string" },
+                    "repo": { "type": "string" },
                 },
                 "required": ["query"],
             }),
+        },
+        ToolSpec {
+            name: "list_repos".to_string(),
+            description: "List the repositories in this workspace — the primary project plus any \
+                          linked repositories — with their names and absolute paths. Use it to \
+                          reason across repos: search a linked repo with search(repo=\"name\"), or \
+                          read a file from one with read_file using its absolute path."
+                .to_string(),
+            input_schema: serde_json::json!({ "type": "object", "properties": {} }),
         },
         ToolSpec {
             name: "git".to_string(),
@@ -436,7 +468,15 @@ pub fn describe_call(call: &ToolCall) -> String {
         "read_file" => format!("📖 Reading {}", arg("path")),
         "list_dir" => format!("📁 Listing {}", arg("path")),
         "http_get" => format!("🌐 Fetching {}", arg("url")),
-        "search" => format!("🔎 Searching \"{}\"", arg("query")),
+        "search" => {
+            let repo = arg("repo");
+            if repo.is_empty() {
+                format!("🔎 Searching \"{}\"", arg("query"))
+            } else {
+                format!("🔎 Searching \"{}\" in {}", arg("query"), repo)
+            }
+        }
+        "list_repos" => "🗂 Listing repositories".to_string(),
         "write_file" => format!("✍ Writing {}", arg("path")),
         "edit_file" => format!("✏ Editing {}", arg("path")),
         "run_command" => format!("▶ Running: {}", arg("command")),
@@ -496,14 +536,46 @@ pub fn execute_tool(root: &Path, call: &ToolCall) -> String {
             if query.trim().is_empty() {
                 "error: empty query".to_string()
             } else {
+                let repo = arg("repo");
+                let base = if repo.trim().is_empty() {
+                    root.to_path_buf()
+                } else {
+                    match crate::repos::resolve_repo(root, &repo) {
+                        Some(p) => p,
+                        None => {
+                            return format!(
+                                "error: no repository named \"{repo}\" in this workspace (use \
+                                 list_repos to see the available repositories)"
+                            )
+                        }
+                    }
+                };
                 let scope = arg("path");
                 let scope = if scope.trim().is_empty() {
                     None
                 } else {
                     Some(scope)
                 };
-                search_project(root, &query, scope.as_deref(), 200)
+                search_project(&base, &query, scope.as_deref(), 200)
             }
+        }
+        "list_repos" => {
+            let ws = crate::repos::load_workspace(root);
+            let mut out = format!(
+                "primary \"{}\": {}\n",
+                repo_display_name(root),
+                root.display()
+            );
+            for r in &ws.repos {
+                out.push_str(&format!("repo \"{}\": {}\n", r.name, r.path));
+            }
+            if ws.repos.is_empty() {
+                out.push_str(
+                    "(no linked repositories — the user can link more in the Explorer, then \
+                     search(repo=\"name\") reaches them)\n",
+                );
+            }
+            out
         }
         "run_command" => {
             let command = arg("command");
@@ -756,6 +828,13 @@ fn run_shell(root: &Path, command: &str, timeout: Duration) -> String {
 
 /// Search the project's text files for `query` (case-insensitive substring),
 /// returning up to `max` `path:line: text` matches. Build/VCS dirs are skipped.
+/// The folder name of a repo root, for display.
+fn repo_display_name(root: &Path) -> String {
+    root.file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| root.display().to_string())
+}
+
 fn search_project(root: &Path, query: &str, scope: Option<&str>, max: usize) -> String {
     let needle = query.to_lowercase();
     let base = match scope {
@@ -1704,6 +1783,63 @@ mod tests {
         assert_eq!(loaded.transcript.len(), 1);
         assert_eq!(loaded.created_files, vec!["src/main.rs".to_string()]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn multi_repo_search_and_list() {
+        let base = std::env::temp_dir().join(format!("kestrel-mr-{}", std::process::id()));
+        let primary = base.join("app");
+        let lib = base.join("shared-lib");
+        std::fs::create_dir_all(&primary).unwrap();
+        std::fs::create_dir_all(&lib).unwrap();
+        std::fs::write(lib.join("token.rs"), "fn mint_UNIQUEXYZ_token() {}").unwrap();
+        crate::repos::link_repo(&primary, &lib).unwrap();
+
+        // list_repos names both the primary and the linked repo.
+        let listed = execute_tool(
+            &primary,
+            &ToolCall {
+                id: "1".into(),
+                name: "list_repos".into(),
+                input: serde_json::json!({}),
+            },
+        );
+        assert!(listed.contains("shared-lib"), "list_repos: {listed}");
+        assert!(listed.contains("app"), "list_repos: {listed}");
+
+        // A repo-scoped search finds text that lives only in the linked repo.
+        let hit = execute_tool(
+            &primary,
+            &ToolCall {
+                id: "2".into(),
+                name: "search".into(),
+                input: serde_json::json!({ "query": "UNIQUEXYZ", "repo": "shared-lib" }),
+            },
+        );
+        assert!(hit.contains("token.rs"), "cross-repo search: {hit}");
+
+        // The same search scoped to the primary finds nothing there.
+        let miss = execute_tool(
+            &primary,
+            &ToolCall {
+                id: "3".into(),
+                name: "search".into(),
+                input: serde_json::json!({ "query": "UNIQUEXYZ" }),
+            },
+        );
+        assert!(!miss.contains("token.rs"), "primary search: {miss}");
+
+        // An unknown repo name is an error, not a silent empty search.
+        let err = execute_tool(
+            &primary,
+            &ToolCall {
+                id: "4".into(),
+                name: "search".into(),
+                input: serde_json::json!({ "query": "x", "repo": "ghost" }),
+            },
+        );
+        assert!(err.starts_with("error:"), "unknown repo: {err}");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
