@@ -15,6 +15,17 @@ use std::path::Path;
 pub struct Config {
     pub defaults: Defaults,
     pub verify: VerifyConfig,
+    /// Shared agent guardrails a team can commit to the repo.
+    pub policy: PolicyConfig,
+}
+
+/// Project-level agent guardrails, merged (union) with the user's policy so a
+/// team can pin the least a teammate's agent must respect.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PolicyConfig {
+    pub denied_tools: Vec<String>,
+    pub denied_patterns: Vec<String>,
 }
 
 /// Default settings for model-backed commands (`ask`, `edit`).
@@ -112,6 +123,18 @@ steps = ["cargo fmt --all -- --check", "cargo clippy -- -D warnings", "cargo tes
     #[test]
     fn unknown_key_is_rejected() {
         assert!(toml::from_str::<Config>("[defaults]\nmodle = \"x\"\n").is_err());
+    }
+
+    #[test]
+    fn parses_project_policy() {
+        let text =
+            "[policy]\ndenied_tools = [\"run_command\"]\ndenied_patterns = [\"npm publish\"]\n";
+        let config: Config = toml::from_str(text).unwrap();
+        assert_eq!(config.policy.denied_tools, vec!["run_command".to_string()]);
+        assert_eq!(
+            config.policy.denied_patterns,
+            vec!["npm publish".to_string()]
+        );
     }
 
     #[test]

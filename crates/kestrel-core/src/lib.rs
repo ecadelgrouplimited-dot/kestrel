@@ -27,7 +27,7 @@ pub use agent::{
     parse_file_edits, run_agent, run_shell_command, save_agent_session, AgentEvent, AgentOutcome,
     AgentSession, AppliedEdit, Checkpoint, FileEdit, GitReview,
 };
-pub use config::{load_config, Config, ConfigLoad};
+pub use config::{load_config, Config, ConfigLoad, PolicyConfig};
 pub use context::{
     assemble_context_prompt, build_context_pack, build_context_pack_for_query, estimate_tokens,
     ContextEntry, ContextPack,
@@ -41,7 +41,7 @@ pub use inspect::{
     inspect_project, project_symbols, CommandKind, CommandSuggestion, FileInventory,
     LanguageSummary, ProjectInspection, ProjectMarker, SymbolSummary,
 };
-pub use policy::{default_denied_patterns, Policy};
+pub use policy::{default_denied_patterns, effective_policy, Policy};
 pub use pricing::{cost_of_usage, estimate_cost, model_context_window, model_price, ModelPrice};
 pub use project::{create_project, push_recent, NewProject, MAX_RECENTS};
 pub use providers::{
@@ -64,8 +64,9 @@ pub use syscap::{
 };
 pub use tests_select::{is_test_path, select_tests, TestSelection};
 pub use usage_log::{
-    append_usage_record, cost_since, cost_today, load_usage_records, now_epoch, record_savings,
-    start_of_day_utc, summarize_usage, UsageRecord, UsageSummary, UsageTotals,
+    append_usage_record, cost_since, cost_today, format_ts, load_usage_records, now_epoch,
+    record_savings, start_of_day_utc, summarize_usage, usage_csv, UsageRecord, UsageSummary,
+    UsageTotals,
 };
 pub use verify::{plan_verification, run_verification, StepResult, VerificationReport, VerifyStep};
 pub use workspace::{

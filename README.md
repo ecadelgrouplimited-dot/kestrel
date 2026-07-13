@@ -188,6 +188,13 @@ steps = [
   "cargo clippy --all-targets -- -D warnings",
   "cargo test",
 ]
+
+[policy]
+# Shared agent guardrails a team can commit to the repo. These are merged
+# (union) with each user's own policy, so a teammate's agent can only be MORE
+# restricted, never less.
+denied_tools = ["install_tool"]
+denied_patterns = ["npm publish", "git push --force"]
 ```
 
 `kestrel verify` reports whether it used the detected ladder or your `kestrel.toml`, and `ask`/`edit` fall back to the config's defaults when you omit `--model`/`--budget`/`--max-tokens`.

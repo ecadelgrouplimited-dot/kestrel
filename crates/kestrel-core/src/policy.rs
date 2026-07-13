@@ -29,6 +29,13 @@ impl Default for Policy {
     }
 }
 
+/// The effective policy for a project: the user's policy unioned with any
+/// `[policy]` rules committed to the project's `kestrel.toml`.
+pub fn effective_policy(root: &std::path::Path, user: &Policy) -> Policy {
+    let config = crate::config::load_config(root).config();
+    user.merged_with(&config.policy.denied_tools, &config.policy.denied_patterns)
+}
+
 /// Destructive command fragments blocked out of the box.
 pub fn default_denied_patterns() -> Vec<String> {
     [
@@ -51,6 +58,27 @@ pub fn default_denied_patterns() -> Vec<String> {
 }
 
 impl Policy {
+    /// Union this policy with extra denied tools/patterns (e.g. from a project's
+    /// `kestrel.toml`). Deny lists combine — the most restrictive rule wins.
+    pub fn merged_with(&self, tools: &[String], patterns: &[String]) -> Policy {
+        let mut denied_tools = self.denied_tools.clone();
+        for t in tools {
+            if !denied_tools.iter().any(|x| x.eq_ignore_ascii_case(t)) {
+                denied_tools.push(t.clone());
+            }
+        }
+        let mut denied_patterns = self.denied_patterns.clone();
+        for p in patterns {
+            if !denied_patterns.iter().any(|x| x == p) {
+                denied_patterns.push(p.clone());
+            }
+        }
+        Policy {
+            denied_tools,
+            denied_patterns,
+        }
+    }
+
     /// Check a tool call against the policy, returning why it is denied (if so).
     pub fn check(&self, call: &ToolCall) -> Result<(), String> {
         if self

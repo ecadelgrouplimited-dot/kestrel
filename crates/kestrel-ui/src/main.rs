@@ -1996,6 +1996,24 @@ impl KestrelApp {
                 if ui.button("⟳ Refresh").clicked() {
                     self.usage_records = kestrel_core::load_usage_records(&self.project_path());
                 }
+                if ui
+                    .add_enabled(
+                        !self.usage_records.is_empty(),
+                        egui::Button::new("⬇ Export CSV"),
+                    )
+                    .clicked()
+                {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .set_file_name("kestrel-usage.csv")
+                        .save_file()
+                    {
+                        let csv = kestrel_core::usage_csv(&self.usage_records);
+                        match std::fs::write(&path, csv) {
+                            Ok(()) => self.status = format!("Exported usage to {}", path.display()),
+                            Err(err) => self.status = format!("Export failed: {err}"),
+                        }
+                    }
+                }
             });
         });
         ui.label(
@@ -2472,8 +2490,10 @@ impl KestrelApp {
     fn start_agent(&mut self, prompt: String, provider: kestrel_core::ProviderSettings) {
         let config = provider.to_config();
         let model = provider.model.clone();
-        let policy = self.settings.policy.clone();
         let root = self.project_path();
+        // Merge the user's policy with any guardrails the project committed to
+        // its kestrel.toml (union — most restrictive wins).
+        let policy = kestrel_core::effective_policy(&root, &self.settings.policy);
         // Checkpoint the current state so this whole run can be rolled back —
         // and tell the user their uncommitted work was captured first.
         let label: String = prompt.chars().take(60).collect();

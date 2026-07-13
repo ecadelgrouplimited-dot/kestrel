@@ -96,10 +96,12 @@ configurable and the agent has a full engineering toolset.
     **quick model switch** in the chat bar (route a cheaper model mid-conversation)
   - **Usage dashboard** (📊) — per-request usage logged to `.kestrel/usage.jsonl`;
     a view with this-conversation + all-time totals, cost, per-model breakdown,
-    and how much prompt caching saved (the first Phase 4 wedge)
+    how much prompt caching saved, and **CSV export** (Phase 4 wedge)
   - **Budget controls** — per-conversation and per-day USD caps (Settings); a
     live budget status line, blocked send, and a hard-stop that halts the agent
     mid-run when a cap is reached
+  - **Shared policy** — a `[policy]` section in `kestrel.toml` a team commits to
+    the repo, merged (union) with each user's policy (more restricted, never less)
 - ✅ Conversation memory + per-project session persistence (`.kestrel/agent-session.json`)
 - ✅ Live build preview: created-files history with click-to-preview
 
