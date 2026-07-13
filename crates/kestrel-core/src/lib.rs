@@ -19,6 +19,7 @@ pub mod tests_select;
 pub mod treesitter;
 pub mod usage_log;
 pub mod verify;
+pub mod workflows;
 pub mod workspace;
 
 pub use agent::{
@@ -70,6 +71,10 @@ pub use usage_log::{
     UsageTotals,
 };
 pub use verify::{plan_verification, run_verification, StepResult, VerificationReport, VerifyStep};
+pub use workflows::{
+    all_workflows, builtin_workflows, load_user_workflows, save_user_workflows, workflows_path,
+    Workflow,
+};
 pub use workspace::{
     create_dir, create_file, delete_entry, read_dir_entries, read_text_file, rename_entry,
     validate_entry_name, write_text_file, WorkspaceEntry,

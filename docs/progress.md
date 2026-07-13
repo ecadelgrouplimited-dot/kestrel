@@ -107,6 +107,17 @@ configurable and the agent has a full engineering toolset.
 - ✅ Conversation memory + per-project session persistence (`.kestrel/agent-session.json`)
 - ✅ Live build preview: created-files history with click-to-preview
 
+## Phase 5 — Category Leadership 🟡 (started)
+
+- ✅ **Autonomous verified workflows** (⚡) — named, reusable agent recipes that
+  run the agent (with checkpoints, verification, policy, budgets) on a filled
+  prompt. Built-ins deliver the roadmap's specialized agents: **release
+  readiness**, **security remediation**, **migration** (from→to), **incident
+  assistant** (root-cause a log), raise test coverage, update dependencies. User
+  workflows persist to `<config>/kestrel/workflows.toml` — a shareable file that
+  seeds a **workflow marketplace**.
+- ⬜ Multi-repository reasoning · private deployment · marketplace UI
+
 ## Next candidates
 
 1. **Team settings / shared config** — the rest of Phase 4.

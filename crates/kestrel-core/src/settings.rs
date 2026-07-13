@@ -165,7 +165,7 @@ pub fn settings_path() -> PathBuf {
 }
 
 /// The platform user config directory.
-fn config_dir() -> PathBuf {
+pub(crate) fn config_dir() -> PathBuf {
     if cfg!(windows) {
         if let Ok(appdata) = std::env::var("APPDATA") {
             return PathBuf::from(appdata);

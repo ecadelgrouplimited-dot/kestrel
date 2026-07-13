@@ -99,6 +99,7 @@ enum AppView {
     Settings,
     Chat,
     Usage,
+    Workflows,
 }
 
 /// Which pane the central area shows in the Main view.
@@ -210,6 +211,9 @@ struct KestrelApp {
     last_usage: kestrel_core::Usage,
     /// Loaded usage records for the Usage dashboard.
     usage_records: Vec<kestrel_core::UsageRecord>,
+    /// Available workflows and the parameter values being filled in.
+    workflows: Vec<kestrel_core::Workflow>,
+    workflow_params: std::collections::HashMap<String, String>,
 }
 
 impl Default for KestrelApp {
@@ -298,6 +302,8 @@ impl Default for KestrelApp {
             session_cost: 0.0,
             last_usage: kestrel_core::Usage::default(),
             usage_records: Vec::new(),
+            workflows: kestrel_core::all_workflows(),
+            workflow_params: std::collections::HashMap::new(),
         }
     }
 }
@@ -570,6 +576,10 @@ impl eframe::App for KestrelApp {
                                 kestrel_core::load_usage_records(&self.project_path());
                             self.view = AppView::Usage;
                         }
+                        if ui.button("⚡ Workflows").clicked() {
+                            self.workflows = kestrel_core::all_workflows();
+                            self.view = AppView::Workflows;
+                        }
                         if ui.button("💬 Chat").clicked() {
                             self.view = AppView::Chat;
                         }
@@ -678,6 +688,17 @@ impl eframe::App for KestrelApp {
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         self.usage_ui(ui);
+                    });
+            });
+            return;
+        }
+
+        if self.view == AppView::Workflows {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        self.workflows_ui(ui);
                     });
             });
             return;
@@ -2109,6 +2130,90 @@ impl KestrelApp {
                     ui.end_row();
                 }
             });
+    }
+
+    /// The Workflows view: pick a recipe, fill any parameters, and run it as a
+    /// verified agent run on the current project.
+    fn workflows_ui(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(6.0);
+        ui.heading("⚡ Workflows");
+        ui.label(
+            egui::RichText::new(
+                "Named, verified agent recipes. Running one starts the agent on the current \
+                 project — with checkpoints, verification, policy, and your budget applied.",
+            )
+            .weak(),
+        );
+        ui.add_space(8.0);
+
+        let workflows = self.workflows.clone();
+        let mut run: Option<(
+            kestrel_core::Workflow,
+            std::collections::BTreeMap<String, String>,
+        )> = None;
+        for wf in &workflows {
+            ui.group(|ui| {
+                ui.horizontal(|ui| {
+                    ui.strong(&wf.name);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("▶ Run").clicked() {
+                            let mut values = std::collections::BTreeMap::new();
+                            for p in &wf.params {
+                                let key = format!("{}::{}", wf.id, p);
+                                values.insert(
+                                    p.clone(),
+                                    self.workflow_params.get(&key).cloned().unwrap_or_default(),
+                                );
+                            }
+                            run = Some((wf.clone(), values));
+                        }
+                    });
+                });
+                ui.label(egui::RichText::new(&wf.description).weak());
+                if !wf.params.is_empty() {
+                    ui.add_space(2.0);
+                    egui::Grid::new(format!("wf-params-{}", wf.id))
+                        .num_columns(2)
+                        .spacing([10.0, 4.0])
+                        .show(ui, |ui| {
+                            for p in &wf.params {
+                                ui.label(p);
+                                let key = format!("{}::{}", wf.id, p);
+                                let entry = self.workflow_params.entry(key).or_default();
+                                ui.add(
+                                    egui::TextEdit::singleline(entry)
+                                        .desired_width(360.0)
+                                        .hint_text(format!("{p}…")),
+                                );
+                                ui.end_row();
+                            }
+                        });
+                }
+            });
+            ui.add_space(8.0);
+        }
+
+        if let Some((wf, values)) = run {
+            self.run_workflow(&wf, &values);
+        }
+    }
+
+    /// Fill a workflow's prompt and run it as an agent build on the project.
+    fn run_workflow(
+        &mut self,
+        wf: &kestrel_core::Workflow,
+        values: &std::collections::BTreeMap<String, String>,
+    ) {
+        for p in &wf.params {
+            if values.get(p).map(|v| v.trim().is_empty()).unwrap_or(true) {
+                self.status = format!("Fill in '{p}' before running “{}”.", wf.name);
+                return;
+            }
+        }
+        self.chat_input = wf.fill(values);
+        self.chat_agent_mode = true;
+        self.view = AppView::Chat;
+        self.send_chat();
     }
 
     /// The build-preview panel: a live, clickable history of the files the
