@@ -76,8 +76,9 @@ pub use usage_log::{
 };
 pub use verify::{plan_verification, run_verification, StepResult, VerificationReport, VerifyStep};
 pub use workflows::{
-    all_workflows, builtin_workflows, load_user_workflows, save_user_workflows, workflows_path,
-    Workflow,
+    all_workflows, builtin_workflows, catalog_workflows, export_workflows_to,
+    import_workflows_from, install_workflow, is_builtin_workflow, load_user_workflows,
+    remove_user_workflow, save_user_workflows, workflows_path, Workflow,
 };
 pub use workspace::{
     create_dir, create_file, delete_entry, read_dir_entries, read_text_file, rename_entry,

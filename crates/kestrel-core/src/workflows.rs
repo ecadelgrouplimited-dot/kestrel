@@ -117,6 +117,89 @@ pub fn builtin_workflows() -> Vec<Workflow> {
     ]
 }
 
+/// The curated catalog: extra ready-made recipes a user can install into their
+/// own set with one click. Unlike the built-ins (always present), these are the
+/// "marketplace" gallery — installing one copies it into the user's workflows so
+/// it appears in the list and can be edited.
+pub fn catalog_workflows() -> Vec<Workflow> {
+    let w = |id: &str, name: &str, description: &str, prompt: &str, params: &[&str]| Workflow {
+        id: id.to_string(),
+        name: name.to_string(),
+        description: description.to_string(),
+        prompt: prompt.to_string(),
+        params: params.iter().map(|s| s.to_string()).collect(),
+    };
+    vec![
+        w(
+            "document-project",
+            "Document the project",
+            "Write/refresh a clear README and inline docs for the public API.",
+            "Improve this project's documentation. Inspect the codebase to understand what it \
+             does, then write or refresh a clear README (what it is, how to install, run, and \
+             test, and a short architecture overview) and add concise doc comments to the main \
+             public functions/types. Keep it accurate to the actual code — verify commands you \
+             mention. Summarize what you documented.",
+            &[],
+        ),
+        w(
+            "performance-pass",
+            "Performance pass",
+            "Find and fix obvious performance problems, verified.",
+            "Do a performance review of this project. Look for obvious problems: needless \
+             allocations/clones in hot paths, N+1 queries, work repeated in loops, missing \
+             caching, sync I/O on hot paths, and inefficient algorithms/data structures. Fix the \
+             safe, clear wins with edit_file and explain each; FLAG risky changes for review. Keep \
+             the build/tests green (run_command/verify). Summarize the improvements and their \
+             expected impact.",
+            &[],
+        ),
+        w(
+            "accessibility-audit",
+            "Accessibility audit",
+            "Audit a web UI for accessibility and fix the clear issues.",
+            "Audit this project's user interface for accessibility (WCAG). Check for missing alt \
+             text, unlabeled form controls, poor color contrast, missing ARIA roles/landmarks, \
+             keyboard-navigation gaps, and non-semantic markup. Fix the clear issues with \
+             edit_file and flag anything that needs a design decision. Verify the build still \
+             passes and summarize what you fixed.",
+            &[],
+        ),
+        w(
+            "dockerize",
+            "Dockerize",
+            "Add a production-ready Dockerfile (and compose) for the project.",
+            "Containerize this project. Detect its stack and add a correct, production-ready \
+             multi-stage Dockerfile (small final image, non-root user, sensible caching), a \
+             .dockerignore, and — if it needs services (db, cache) — a docker-compose.yml. Do not \
+             run Docker; just produce correct files and document how to build and run them in the \
+             README. Summarize what you added.",
+            &[],
+        ),
+        w(
+            "api-from-spec",
+            "Build API from a spec",
+            "Scaffold endpoints from a description or OpenAPI spec.",
+            "Build API endpoints for this project from the following specification:\n\n{spec}\n\n\
+             Follow the project's existing framework and conventions (inspect first). Implement \
+             the routes, request/response handling, validation, and error handling, add focused \
+             tests, and run the build/tests to confirm they pass. Summarize the endpoints you \
+             created and how to call them.",
+            &["spec"],
+        ),
+        w(
+            "cleanup-dead-code",
+            "Remove dead code",
+            "Find and safely remove unused code, imports, and files.",
+            "Find and remove dead code in this project — unused functions, imports, variables, \
+             and files that nothing references. Use search and the symbol/graph structure to \
+             confirm each is truly unused before deleting it. Be conservative: when unsure, leave \
+             it and note it. After removing, run the build/tests (run_command/verify) to confirm \
+             nothing broke. Summarize what you removed.",
+            &[],
+        ),
+    ]
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct WorkflowFile {
     #[serde(default)]
@@ -177,6 +260,57 @@ pub fn all_workflows() -> Vec<Workflow> {
     out
 }
 
+/// Add a workflow to the user's set (replacing any with the same id) and save.
+pub fn install_workflow(workflow: &Workflow) -> std::io::Result<()> {
+    let mut user = load_user_workflows();
+    upsert(&mut user, workflow.clone());
+    save_user_workflows(&user)
+}
+
+/// Remove a user workflow by id and save. Removing a built-in's id just drops
+/// the user override, restoring the built-in.
+pub fn remove_user_workflow(id: &str) -> std::io::Result<()> {
+    let mut user = load_user_workflows();
+    user.retain(|w| w.id != id);
+    save_user_workflows(&user)
+}
+
+/// Whether an id belongs to a built-in workflow (which can't be truly deleted,
+/// only overridden).
+pub fn is_builtin_workflow(id: &str) -> bool {
+    builtin_workflows().iter().any(|w| w.id == id)
+}
+
+/// Import workflows from a shared `.toml` file, merging them into the user's set
+/// (same id replaces). Returns the number imported.
+pub fn import_workflows_from(path: &std::path::Path) -> std::io::Result<usize> {
+    let incoming = load_user_workflows_from(path);
+    if incoming.is_empty() {
+        return Ok(0);
+    }
+    let mut user = load_user_workflows();
+    let count = incoming.len();
+    for wf in incoming {
+        upsert(&mut user, wf);
+    }
+    save_user_workflows(&user)?;
+    Ok(count)
+}
+
+/// Export the given workflows to a shareable `.toml` file others can import.
+pub fn export_workflows_to(path: &std::path::Path, workflows: &[Workflow]) -> std::io::Result<()> {
+    save_user_workflows_to(path, workflows)
+}
+
+/// Insert `wf` into `list`, replacing any existing entry with the same id.
+fn upsert(list: &mut Vec<Workflow>, wf: Workflow) {
+    if let Some(existing) = list.iter_mut().find(|w| w.id == wf.id) {
+        *existing = wf;
+    } else {
+        list.push(wf);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,6 +344,33 @@ mod tests {
         let loaded = load_user_workflows_from(&path);
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].name, "My release check");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn catalog_is_distinct_from_builtins() {
+        let catalog = catalog_workflows();
+        assert!(!catalog.is_empty());
+        for c in &catalog {
+            assert!(
+                !is_builtin_workflow(&c.id),
+                "catalog id {} collides with a built-in",
+                c.id
+            );
+            assert!(!c.name.is_empty() && !c.prompt.is_empty());
+        }
+    }
+
+    #[test]
+    fn export_then_import_file_round_trips() {
+        let dir = std::env::temp_dir().join(format!("kestrel-mkt-{}", std::process::id()));
+        let path = dir.join("shared.toml");
+        let shared = vec![catalog_workflows()[0].clone()];
+        export_workflows_to(&path, &shared).unwrap();
+        // Importing reads the same shape back out.
+        let reloaded = load_user_workflows_from(&path);
+        assert_eq!(reloaded.len(), 1);
+        assert_eq!(reloaded[0].id, shared[0].id);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

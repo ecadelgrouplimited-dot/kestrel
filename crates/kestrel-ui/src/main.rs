@@ -130,6 +130,19 @@ enum TreeAction {
     NewIn(PathBuf, bool),
 }
 
+/// A workflow being authored or edited in the marketplace editor.
+#[derive(Default, Clone)]
+struct WorkflowDraft {
+    /// Empty when authoring a brand-new workflow; set when editing an existing one.
+    id: String,
+    name: String,
+    description: String,
+    prompt: String,
+    /// Comma-separated `{param}` names.
+    params: String,
+    status: String,
+}
+
 struct KestrelApp {
     view: AppView,
     dark_mode: bool,
@@ -214,6 +227,10 @@ struct KestrelApp {
     /// Available workflows and the parameter values being filled in.
     workflows: Vec<kestrel_core::Workflow>,
     workflow_params: std::collections::HashMap<String, String>,
+    /// Whether the marketplace catalog gallery is expanded.
+    show_catalog: bool,
+    /// The workflow editor (author/edit), open when `Some`.
+    wf_editor: Option<WorkflowDraft>,
     /// Repositories linked to the current project (the multi-repo workspace).
     workspace_repos: Vec<kestrel_core::Repo>,
 }
@@ -307,6 +324,8 @@ impl Default for KestrelApp {
             usage_records: Vec::new(),
             workflows: kestrel_core::all_workflows(),
             workflow_params: std::collections::HashMap::new(),
+            show_catalog: false,
+            wf_editor: None,
             workspace_repos,
         }
     }
@@ -547,6 +566,7 @@ impl eframe::App for KestrelApp {
         self.delete_modal(ctx);
         self.revert_modal(ctx);
         self.restore_modal(ctx);
+        self.workflow_editor(ctx);
 
         egui::TopBottomPanel::top("controls").show(ctx, |ui| {
             ui.add_space(6.0);
@@ -2218,7 +2238,33 @@ impl KestrelApp {
     /// verified agent run on the current project.
     fn workflows_ui(&mut self, ui: &mut egui::Ui) {
         ui.add_space(6.0);
-        ui.heading("⚡ Workflows");
+        ui.horizontal(|ui| {
+            ui.heading("⚡ Workflows");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .button("⭱ Export…")
+                    .on_hover_text("Save your workflows to a shareable file")
+                    .clicked()
+                {
+                    self.export_workflows();
+                }
+                if ui
+                    .button("⭳ Import…")
+                    .on_hover_text("Import workflows someone shared with you")
+                    .clicked()
+                {
+                    self.import_workflows();
+                }
+                if ui
+                    .button("＋ New")
+                    .on_hover_text("Author a workflow")
+                    .clicked()
+                {
+                    self.wf_editor = Some(WorkflowDraft::default());
+                }
+                ui.toggle_value(&mut self.show_catalog, "🛍 Catalog");
+            });
+        });
         ui.label(
             egui::RichText::new(
                 "Named, verified agent recipes. Running one starts the agent on the current \
@@ -2228,55 +2274,276 @@ impl KestrelApp {
         );
         ui.add_space(8.0);
 
-        let workflows = self.workflows.clone();
-        let mut run: Option<(
-            kestrel_core::Workflow,
-            std::collections::BTreeMap<String, String>,
-        )> = None;
-        for wf in &workflows {
+        let user_ids: std::collections::HashSet<String> = kestrel_core::load_user_workflows()
+            .into_iter()
+            .map(|w| w.id)
+            .collect();
+
+        enum WfAction {
+            Run(
+                kestrel_core::Workflow,
+                std::collections::BTreeMap<String, String>,
+            ),
+            Edit(kestrel_core::Workflow),
+            Remove(String),
+            Install(kestrel_core::Workflow),
+        }
+        let mut action: Option<WfAction> = None;
+
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                if self.show_catalog {
+                    self.catalog_ui(ui, &mut |a| action = Some(a), &|wf| WfAction::Install(wf));
+                    ui.add_space(6.0);
+                    ui.separator();
+                    ui.add_space(6.0);
+                    ui.strong("Your workflows");
+                    ui.add_space(6.0);
+                }
+
+                let workflows = self.workflows.clone();
+                for wf in &workflows {
+                    let is_user = user_ids.contains(&wf.id);
+                    let is_builtin = kestrel_core::is_builtin_workflow(&wf.id);
+                    ui.group(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.strong(&wf.name);
+                            if is_user && is_builtin {
+                                ui.label(egui::RichText::new("· customized").weak().small());
+                            }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui.button("▶ Run").clicked() {
+                                        let mut values = std::collections::BTreeMap::new();
+                                        for p in &wf.params {
+                                            let key = format!("{}::{}", wf.id, p);
+                                            values.insert(
+                                                p.clone(),
+                                                self.workflow_params
+                                                    .get(&key)
+                                                    .cloned()
+                                                    .unwrap_or_default(),
+                                            );
+                                        }
+                                        action = Some(WfAction::Run(wf.clone(), values));
+                                    }
+                                    if ui.button("✎").on_hover_text("Edit").clicked() {
+                                        action = Some(WfAction::Edit(wf.clone()));
+                                    }
+                                    // User workflows can be removed; a customized
+                                    // built-in reverts to its default; pure
+                                    // built-ins have nothing to remove.
+                                    if is_user {
+                                        let hint = if is_builtin {
+                                            "Reset to the built-in default"
+                                        } else {
+                                            "Delete this workflow"
+                                        };
+                                        if ui.button("🗑").on_hover_text(hint).clicked() {
+                                            action = Some(WfAction::Remove(wf.id.clone()));
+                                        }
+                                    }
+                                },
+                            );
+                        });
+                        ui.label(egui::RichText::new(&wf.description).weak());
+                        if !wf.params.is_empty() {
+                            ui.add_space(2.0);
+                            egui::Grid::new(format!("wf-params-{}", wf.id))
+                                .num_columns(2)
+                                .spacing([10.0, 4.0])
+                                .show(ui, |ui| {
+                                    for p in &wf.params {
+                                        ui.label(p);
+                                        let key = format!("{}::{}", wf.id, p);
+                                        let entry = self.workflow_params.entry(key).or_default();
+                                        ui.add(
+                                            egui::TextEdit::singleline(entry)
+                                                .desired_width(360.0)
+                                                .hint_text(format!("{p}…")),
+                                        );
+                                        ui.end_row();
+                                    }
+                                });
+                        }
+                    });
+                    ui.add_space(8.0);
+                }
+            });
+
+        match action {
+            Some(WfAction::Run(wf, values)) => self.run_workflow(&wf, &values),
+            Some(WfAction::Edit(wf)) => self.wf_editor = Some(draft_from(&wf)),
+            Some(WfAction::Remove(id)) => {
+                if let Err(err) = kestrel_core::remove_user_workflow(&id) {
+                    self.status = format!("Could not remove workflow: {err}");
+                } else {
+                    self.reload_workflows();
+                    self.status = "Workflow removed.".to_string();
+                }
+            }
+            Some(WfAction::Install(wf)) => {
+                if let Err(err) = kestrel_core::install_workflow(&wf) {
+                    self.status = format!("Could not install workflow: {err}");
+                } else {
+                    self.reload_workflows();
+                    self.status = format!("Installed “{}”.", wf.name);
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// The catalog gallery: ready-made recipes not yet installed, each with an
+    /// Install button. `emit` records the chosen action (kept generic so the
+    /// caller owns the action enum).
+    fn catalog_ui<T>(
+        &self,
+        ui: &mut egui::Ui,
+        emit: &mut dyn FnMut(T),
+        install: &dyn Fn(kestrel_core::Workflow) -> T,
+    ) {
+        ui.strong("🛍 Catalog");
+        ui.label(
+            egui::RichText::new("Ready-made recipes — install one to add it to your workflows.")
+                .weak()
+                .small(),
+        );
+        ui.add_space(4.0);
+        let installed: std::collections::HashSet<String> =
+            self.workflows.iter().map(|w| w.id.clone()).collect();
+        let available: Vec<kestrel_core::Workflow> = kestrel_core::catalog_workflows()
+            .into_iter()
+            .filter(|w| !installed.contains(&w.id))
+            .collect();
+        if available.is_empty() {
+            ui.label(
+                egui::RichText::new("Everything in the catalog is already installed. 🎉").weak(),
+            );
+            return;
+        }
+        for wf in available {
             ui.group(|ui| {
                 ui.horizontal(|ui| {
                     ui.strong(&wf.name);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("▶ Run").clicked() {
-                            let mut values = std::collections::BTreeMap::new();
-                            for p in &wf.params {
-                                let key = format!("{}::{}", wf.id, p);
-                                values.insert(
-                                    p.clone(),
-                                    self.workflow_params.get(&key).cloned().unwrap_or_default(),
-                                );
-                            }
-                            run = Some((wf.clone(), values));
+                        if ui.button("⬇ Install").clicked() {
+                            emit(install(wf.clone()));
                         }
                     });
                 });
                 ui.label(egui::RichText::new(&wf.description).weak());
-                if !wf.params.is_empty() {
-                    ui.add_space(2.0);
-                    egui::Grid::new(format!("wf-params-{}", wf.id))
-                        .num_columns(2)
-                        .spacing([10.0, 4.0])
-                        .show(ui, |ui| {
-                            for p in &wf.params {
-                                ui.label(p);
-                                let key = format!("{}::{}", wf.id, p);
-                                let entry = self.workflow_params.entry(key).or_default();
-                                ui.add(
-                                    egui::TextEdit::singleline(entry)
-                                        .desired_width(360.0)
-                                        .hint_text(format!("{p}…")),
-                                );
-                                ui.end_row();
+            });
+            ui.add_space(6.0);
+        }
+    }
+
+    /// Reload the merged workflow list (built-ins + user).
+    fn reload_workflows(&mut self) {
+        self.workflows = kestrel_core::all_workflows();
+    }
+
+    /// Import workflows from a shared `.toml` file the user picks.
+    fn import_workflows(&mut self) {
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("Workflow file", &["toml"])
+            .set_title("Import workflows")
+            .pick_file()
+        {
+            match kestrel_core::import_workflows_from(&path) {
+                Ok(0) => self.status = "No workflows found in that file.".to_string(),
+                Ok(n) => {
+                    self.reload_workflows();
+                    self.status = format!("Imported {n} workflow(s).");
+                }
+                Err(err) => self.status = format!("Import failed: {err}"),
+            }
+        }
+    }
+
+    /// Export the user's own workflows to a shareable `.toml` file.
+    fn export_workflows(&mut self) {
+        let user = kestrel_core::load_user_workflows();
+        if user.is_empty() {
+            self.status =
+                "No personal workflows yet — install one from the Catalog or create one first."
+                    .to_string();
+            return;
+        }
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("Workflow file", &["toml"])
+            .set_title("Export workflows")
+            .set_file_name("kestrel-workflows.toml")
+            .save_file()
+        {
+            match kestrel_core::export_workflows_to(&path, &user) {
+                Ok(()) => self.status = format!("Exported {} workflow(s).", user.len()),
+                Err(err) => self.status = format!("Export failed: {err}"),
+            }
+        }
+    }
+
+    /// The author/edit workflow window; open when `wf_editor` is `Some`.
+    fn workflow_editor(&mut self, ctx: &egui::Context) {
+        let Some(mut draft) = self.wf_editor.take() else {
+            return;
+        };
+        let editing = !draft.id.is_empty();
+        let mut open = true;
+        let mut close = false;
+        egui::Window::new(if editing {
+            "Edit workflow"
+        } else {
+            "New workflow"
+        })
+        .collapsible(false)
+        .resizable(true)
+        .default_width(520.0)
+        .open(&mut open)
+        .show(ctx, |ui| {
+            ui.label("Name");
+            ui.text_edit_singleline(&mut draft.name);
+            ui.add_space(4.0);
+            ui.label("Description");
+            ui.text_edit_singleline(&mut draft.description);
+            ui.add_space(4.0);
+            ui.label("Parameters (comma-separated, referenced as {name} in the prompt)");
+            ui.text_edit_singleline(&mut draft.params);
+            ui.add_space(4.0);
+            ui.label("Prompt — the instruction the agent runs");
+            ui.add(
+                egui::TextEdit::multiline(&mut draft.prompt)
+                    .desired_rows(8)
+                    .desired_width(f32::INFINITY),
+            );
+            if !draft.status.is_empty() {
+                ui.colored_label(egui::Color32::from_rgb(0xd9, 0x53, 0x4f), &draft.status);
+            }
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if ui.button("💾 Save").clicked() {
+                    match build_workflow(&draft) {
+                        Ok(wf) => {
+                            if let Err(err) = kestrel_core::install_workflow(&wf) {
+                                draft.status = format!("Could not save: {err}");
+                            } else {
+                                self.reload_workflows();
+                                self.status = format!("Saved “{}”.", wf.name);
+                                close = true;
                             }
-                        });
+                        }
+                        Err(msg) => draft.status = msg,
+                    }
+                }
+                if ui.button("Cancel").clicked() {
+                    close = true;
                 }
             });
-            ui.add_space(8.0);
-        }
-
-        if let Some((wf, values)) = run {
-            self.run_workflow(&wf, &values);
+        });
+        if open && !close {
+            self.wf_editor = Some(draft);
         }
     }
 
@@ -3249,6 +3516,76 @@ fn human_tokens(n: usize) -> String {
     } else {
         n.to_string()
     }
+}
+
+/// Build an editor draft from an existing workflow.
+fn draft_from(wf: &kestrel_core::Workflow) -> WorkflowDraft {
+    WorkflowDraft {
+        id: wf.id.clone(),
+        name: wf.name.clone(),
+        description: wf.description.clone(),
+        prompt: wf.prompt.clone(),
+        params: wf.params.join(", "),
+        status: String::new(),
+    }
+}
+
+/// Turn a name into a stable kebab-case id.
+fn slugify(name: &str) -> String {
+    let mut out = String::new();
+    let mut prev_dash = false;
+    for ch in name.trim().chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            prev_dash = false;
+        } else if !prev_dash && !out.is_empty() {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    out.trim_matches('-').to_string()
+}
+
+/// Validate an editor draft and build a `Workflow`, or return an error message.
+fn build_workflow(draft: &WorkflowDraft) -> Result<kestrel_core::Workflow, String> {
+    let name = draft.name.trim();
+    if name.is_empty() {
+        return Err("Give the workflow a name.".to_string());
+    }
+    if draft.prompt.trim().is_empty() {
+        return Err("The prompt can't be empty.".to_string());
+    }
+    // Keep an existing id when editing; derive one from the name for new ones.
+    let id = if draft.id.is_empty() {
+        let slug = slugify(name);
+        if slug.is_empty() {
+            return Err("Use letters or numbers in the name.".to_string());
+        }
+        slug
+    } else {
+        draft.id.clone()
+    };
+    let params: Vec<String> = draft
+        .params
+        .split(',')
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .collect();
+    // Every declared param must actually appear in the prompt.
+    for p in &params {
+        if !draft.prompt.contains(&format!("{{{p}}}")) {
+            return Err(format!(
+                "Parameter '{p}' isn't used in the prompt (add {{{p}}})."
+            ));
+        }
+    }
+    Ok(kestrel_core::Workflow {
+        id,
+        name: name.to_string(),
+        description: draft.description.trim().to_string(),
+        prompt: draft.prompt.trim().to_string(),
+        params,
+    })
 }
 
 /// The default dev/run command for a project (from its markers, else a sane

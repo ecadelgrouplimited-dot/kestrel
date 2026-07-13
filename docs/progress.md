@@ -14,7 +14,7 @@ projects. Model calls go over the system `curl` (no bundled TLS) — a constrain
 that turned into a strength (zero heavy deps). All model providers are
 configurable and the agent has a full engineering toolset.
 
-**Tests:** 126 core + 8 CLI, all green. Clippy/fmt clean on every commit.
+**Tests:** 128 core + 8 CLI, all green. Clippy/fmt clean on every commit.
 
 ## Phase 0 — Foundation ✅
 
@@ -121,7 +121,13 @@ configurable and the agent has a full engineering toolset.
   `repo`-scoped `search(query, repo="name")`, and reads any linked repo by
   absolute path, so it can trace and reason across repo boundaries (writes stay
   in the primary project). Link/open/unlink repos from the Explorer.
-- ⬜ Private deployment · marketplace UI
+- ✅ **Workflow marketplace** (🛍) — a curated **Catalog** of ready-made recipes
+  (document, performance pass, accessibility audit, dockerize, build-API-from-
+  spec, remove dead code) you **Install** with one click; **author your own**
+  (name/description/params/prompt, with `{param}` validation); **edit** or
+  **remove** any workflow (a customized built-in reverts to default); and
+  **Import/Export** `.toml` files to share recipes with a team or community.
+- ⬜ Private deployment
 
 ## Next candidates
 
