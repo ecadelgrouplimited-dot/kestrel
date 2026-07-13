@@ -29,6 +29,9 @@ pub struct Settings {
     /// Allow/deny rules gating the agent's tools.
     #[serde(default)]
     pub policy: crate::policy::Policy,
+    /// Prompt for permission before the agent runs commands/installs/git.
+    #[serde(default)]
+    pub ask_permission: bool,
 }
 
 /// Spend caps in USD. `None`/`0` means no limit.
@@ -260,6 +263,7 @@ mod tests {
             recent_projects: vec!["E:/demo".to_string()],
             budget: Budget::default(),
             policy: crate::policy::Policy::default(),
+            ask_permission: true,
         };
         let mut provider = provider_preset("deepseek").unwrap();
         provider.api_key = "sk-secret".to_string();
@@ -277,6 +281,7 @@ mod tests {
         assert_eq!(active.api_key, "sk-secret");
         assert_eq!(active.model, "deepseek-v4-pro");
         assert_eq!(loaded.recent_projects, vec!["E:/demo".to_string()]);
+        assert!(loaded.ask_permission);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

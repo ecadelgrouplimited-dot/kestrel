@@ -1342,6 +1342,10 @@ pub struct AgentOutcome {
     pub result: Result<String, String>,
     pub history: Vec<AgentMessage>,
     pub usage: Usage,
+    /// The agent paused without truly finishing — it hit the step budget or the
+    /// user stopped it — and can be **continued**. This is a normal, resumable
+    /// state, not a failure, so the UI offers "Continue" instead of an error.
+    pub incomplete: bool,
 }
 
 /// A project's saved agent state: the tool-using conversation (so a follow-up
@@ -1600,9 +1604,12 @@ pub fn run_agent(
     max_steps: usize,
     review: bool,
     policy: &crate::policy::Policy,
+    cancel: &std::sync::atomic::AtomicBool,
     mut history: Vec<AgentMessage>,
     mut on_event: impl FnMut(AgentEvent),
+    mut approve: impl FnMut(&ToolCall) -> bool,
 ) -> AgentOutcome {
+    use std::sync::atomic::Ordering;
     let system = agent_loop_system_prompt(root);
     let tools = builtin_tools();
     history.push(AgentMessage::User(user_prompt.to_string()));
@@ -1619,6 +1626,21 @@ pub fn run_agent(
     );
 
     for _ in 0..max_steps {
+        // Cooperative cancellation: the user stopped the run. Return the work so
+        // far as a resumable pause, not a failure.
+        if cancel.load(Ordering::Relaxed) {
+            append_audit(root, "END  stopped by user");
+            return AgentOutcome {
+                result: Ok(
+                    "⏹ Stopped at your request. Everything written so far is on disk — \
+                            click Continue to pick up where this left off."
+                        .to_string(),
+                ),
+                history,
+                usage: total_usage,
+                incomplete: true,
+            };
+        }
         // Keep the conversation affordable: drop the middle of a long history
         // before sending it, preserving the request and the recent turns.
         if history_bytes(&history) > compact_trigger {
@@ -1634,6 +1656,7 @@ pub fn run_agent(
                         result: Err(msg),
                         history,
                         usage: total_usage,
+                        incomplete: false,
                     }
                 }
                 Err(err) => {
@@ -1641,6 +1664,7 @@ pub fn run_agent(
                         result: Err(err.to_string()),
                         history,
                         usage: total_usage,
+                        incomplete: false,
                     }
                 }
             };
@@ -1673,6 +1697,7 @@ pub fn run_agent(
                 result: Ok(turn.text),
                 history,
                 usage: total_usage,
+                incomplete: false,
             };
         }
 
@@ -1693,6 +1718,17 @@ pub fn run_agent(
                     &format!("BLOCKED  {}  ({reason})", describe_call(call)),
                 );
                 format!("error: {reason}")
+            } else if !approve(call) {
+                // Permission gate: the user declined this action at the prompt.
+                // Feed that back so the model adapts instead of the run dying.
+                on_event(AgentEvent::Tool(format!(
+                    "🚫 Declined: {}",
+                    describe_call(call)
+                )));
+                append_audit(root, &format!("DECLINED  {}", describe_call(call)));
+                "error: the user declined to allow this action. Do not retry it; find another \
+                 approach or ask them what to do."
+                    .to_string()
             } else if call.name == "write_file" || call.name == "edit_file" {
                 let path = call
                     .input
@@ -1746,11 +1782,14 @@ pub fn run_agent(
     }
     append_audit(root, "END  step limit reached");
     AgentOutcome {
-        result: Err(format!(
-            "agent stopped after {max_steps} steps without finishing"
+        result: Ok(format!(
+            "⏸ I've paused after {max_steps} steps — this is a big task and I haven't fully \
+             finished. Everything written so far is on disk and verified as far as I got. Click \
+             **Continue** to keep going from exactly here, or start a New chat."
         )),
         history,
         usage: total_usage,
+        incomplete: true,
     }
 }
 

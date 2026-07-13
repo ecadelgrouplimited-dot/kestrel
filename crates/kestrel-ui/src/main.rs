@@ -14,7 +14,7 @@
 use eframe::egui;
 use kestrel_core::Symbol;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{Receiver, TryRecvError};
+use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 
 fn main() -> eframe::Result<()> {
     let native_options = eframe::NativeOptions {
@@ -72,11 +72,27 @@ enum AgentUpdate {
         summary: String,
         history: Vec<kestrel_core::AgentMessage>,
     },
+    /// The agent paused without finishing (step budget or Stop) — resumable via
+    /// Continue. Not an error.
+    Incomplete {
+        summary: String,
+        history: Vec<kestrel_core::AgentMessage>,
+    },
     /// The agent failed; still returns the conversation so far.
     Failed {
         err: String,
         history: Vec<kestrel_core::AgentMessage>,
     },
+    /// The agent is waiting for the user to permit a tool action.
+    ApprovalRequest(String),
+}
+
+/// The user's decision on a permission prompt.
+enum ApprovalDecision {
+    Allow,
+    /// Allow this and everything else for the rest of this run.
+    AllowAll,
+    Deny,
 }
 
 /// A file produced during an agent run, kept for the created-files history and
@@ -220,6 +236,16 @@ struct KestrelApp {
     agent_messages: Vec<kestrel_core::AgentMessage>,
     /// The agent's current activity, shown live while it works.
     agent_activity: String,
+    /// Set when a running agent should stop; the worker checks it each step.
+    agent_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// The last run paused (step budget or Stop) and can be continued.
+    agent_incomplete: bool,
+    /// A tool action awaiting the user's permission, if any.
+    pending_approval: Option<String>,
+    /// Channel back to the paused worker to deliver a permission decision.
+    agent_decision: Option<Sender<ApprovalDecision>>,
+    /// Whether to prompt before the agent runs commands/installs/git.
+    ask_permission: bool,
     /// Actual token usage this conversation, for the live meter.
     session_usage: kestrel_core::Usage,
     session_cost: f64,
@@ -257,6 +283,7 @@ impl Default for KestrelApp {
             .map(|v| v.to_string())
             .unwrap_or_default();
         let policy_patterns = settings.policy.denied_patterns.join("\n");
+        let ask_permission = settings.ask_permission;
         let workspace_repos = kestrel_core::load_workspace(std::path::Path::new(&path)).repos;
         Self {
             view: AppView::Main,
@@ -321,6 +348,11 @@ impl Default for KestrelApp {
             agent_preview: None,
             agent_messages: Vec::new(),
             agent_activity: String::new(),
+            agent_cancel: None,
+            agent_incomplete: false,
+            pending_approval: None,
+            agent_decision: None,
+            ask_permission,
             session_usage: kestrel_core::Usage::default(),
             session_cost: 0.0,
             last_usage: kestrel_core::Usage::default(),
@@ -427,6 +459,89 @@ impl KestrelApp {
         }
     }
 
+    /// The permission prompt: when the agent wants to run a command/install/git
+    /// and "ask permission" is on, it blocks here until the user decides.
+    fn approval_modal(&mut self, ctx: &egui::Context) {
+        let Some(desc) = self.pending_approval.clone() else {
+            return;
+        };
+        let mut decision: Option<ApprovalDecision> = None;
+        egui::Window::new("🔐 Permission needed")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.set_max_width(440.0);
+                ui.label("The agent wants to:");
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new(&desc).strong().monospace());
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui.button("✓ Allow").clicked() {
+                        decision = Some(ApprovalDecision::Allow);
+                    }
+                    if ui
+                        .button("✓✓ Allow all this run")
+                        .on_hover_text("Don't ask again until this run ends")
+                        .clicked()
+                    {
+                        decision = Some(ApprovalDecision::AllowAll);
+                    }
+                    if ui.button("✕ Deny").clicked() {
+                        decision = Some(ApprovalDecision::Deny);
+                    }
+                });
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(
+                        "Deny lets the agent try another approach — the run won't die.",
+                    )
+                    .weak()
+                    .small(),
+                );
+            });
+        if let Some(d) = decision {
+            if let Some(tx) = &self.agent_decision {
+                let _ = tx.send(d);
+            }
+            self.pending_approval = None;
+            self.agent_activity = "💭 Thinking…".to_string();
+            ctx.request_repaint();
+        }
+    }
+
+    /// Tear down a finished or stopped agent run: signal the worker to halt (so
+    /// it stops spending after a budget stop or app-side stop), drop the channels,
+    /// and clear the live status.
+    fn end_agent_run(&mut self) {
+        if let Some(cancel) = &self.agent_cancel {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.chat_pending = false;
+        self.agent_activity.clear();
+        self.agent_job = None;
+        self.agent_cancel = None;
+        self.agent_decision = None;
+        self.pending_approval = None;
+    }
+
+    /// Ask the running agent to stop; it pauses at the next step and returns its
+    /// progress as a resumable Incomplete outcome.
+    fn stop_agent(&mut self) {
+        if let Some(cancel) = &self.agent_cancel {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            self.agent_activity = "⏹ Stopping…".to_string();
+            self.status = "Stopping the agent…".to_string();
+        }
+        // If it's blocked on a permission prompt, unblock it so it can wind down.
+        if self.pending_approval.is_some() {
+            if let Some(tx) = &self.agent_decision {
+                let _ = tx.send(ApprovalDecision::Deny);
+            }
+            self.pending_approval = None;
+        }
+    }
+
     /// Drain live updates from a running agent loop into the transcript.
     fn poll_agent(&mut self, ctx: &egui::Context) {
         if self.agent_job.is_none() {
@@ -458,9 +573,7 @@ impl KestrelApp {
                     self.add_usage(&usage);
                     // Hard-stop the run if a budget cap was crossed mid-run.
                     if let Some(reason) = self.budget_blocked() {
-                        self.agent_job = None;
-                        self.chat_pending = false;
-                        self.agent_activity.clear();
+                        self.end_agent_run();
                         self.chat_history
                             .push(kestrel_core::ChatMessage::assistant(format!(
                                 "⛔ Stopped — {reason}."
@@ -506,21 +619,38 @@ impl KestrelApp {
                             .push(kestrel_core::ChatMessage::assistant(summary));
                     }
                     self.agent_messages = history;
-                    self.chat_pending = false;
-                    self.agent_activity.clear();
-                    self.agent_job = None;
+                    self.end_agent_run();
                     self.status = "Agent finished — review changes in the Diff tab.".to_string();
                     self.save_session();
                     self.diff_review = None;
                     refresh = true;
                     break;
                 }
+                Ok(AgentUpdate::Incomplete { summary, history }) => {
+                    if !summary.trim().is_empty() {
+                        self.chat_history
+                            .push(kestrel_core::ChatMessage::assistant(summary));
+                    }
+                    self.agent_messages = history;
+                    self.end_agent_run();
+                    self.agent_incomplete = true;
+                    self.status = "Agent paused — click Continue to keep going.".to_string();
+                    self.save_session();
+                    self.diff_review = None;
+                    refresh = true;
+                    break;
+                }
+                Ok(AgentUpdate::ApprovalRequest(description)) => {
+                    // The worker is blocked awaiting the user's decision.
+                    self.pending_approval = Some(description);
+                    self.agent_activity = "⏸ Waiting for your permission…".to_string();
+                    ctx.request_repaint();
+                    break;
+                }
                 Ok(AgentUpdate::Failed { err, history }) => {
                     self.chat_error = err;
                     self.agent_messages = history;
-                    self.chat_pending = false;
-                    self.agent_activity.clear();
-                    self.agent_job = None;
+                    self.end_agent_run();
                     self.save_session();
                     self.diff_review = None;
                     // Show whatever the agent managed to write before stopping.
@@ -532,8 +662,7 @@ impl KestrelApp {
                     break;
                 }
                 Err(TryRecvError::Disconnected) => {
-                    self.chat_pending = false;
-                    self.agent_job = None;
+                    self.end_agent_run();
                     break;
                 }
             }
@@ -583,6 +712,7 @@ impl eframe::App for KestrelApp {
         self.revert_modal(ctx);
         self.restore_modal(ctx);
         self.workflow_editor(ctx);
+        self.approval_modal(ctx);
 
         egui::TopBottomPanel::top("controls").show(ctx, |ui| {
             ui.add_space(6.0);
@@ -2751,23 +2881,51 @@ impl KestrelApp {
                     "Turn the request into real files written into the current project.",
                 );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("New chat").clicked() {
+                if ui
+                    .button("New chat")
+                    .on_hover_text("Stop any running agent and start a fresh conversation")
+                    .clicked()
+                {
+                    self.stop_agent();
+                    self.chat_job = None;
+                    self.end_agent_run();
                     self.chat_history.clear();
                     self.chat_error.clear();
                     self.chat_input.clear();
                     self.agent_files.clear();
                     self.agent_preview = None;
                     self.agent_messages.clear();
+                    self.agent_incomplete = false;
                     self.session_usage = kestrel_core::Usage::default();
                     self.session_cost = 0.0;
                     self.save_session();
                 }
-                if self.chat_pending && ui.button("Stop").clicked() {
-                    self.chat_job = None;
-                    self.agent_job = None;
-                    self.chat_pending = false;
-                    self.agent_activity.clear();
-                    self.chat_error = "Cancelled.".to_string();
+                if self.chat_pending {
+                    if ui
+                        .button("⏹ Stop")
+                        .on_hover_text("Halt the agent at the next step (you can Continue after)")
+                        .clicked()
+                    {
+                        // A plain chat can't be resumed; the agent can.
+                        if self.agent_job.is_some() {
+                            self.stop_agent();
+                        } else {
+                            self.chat_job = None;
+                            self.chat_pending = false;
+                            self.agent_activity.clear();
+                            self.chat_error = "Cancelled.".to_string();
+                        }
+                    }
+                } else if self.agent_incomplete
+                    && ui
+                        .button("▶ Continue")
+                        .on_hover_text("Resume the agent from where it paused")
+                        .clicked()
+                {
+                    self.agent_incomplete = false;
+                    self.chat_input = "Continue from where you left off.".to_string();
+                    self.chat_agent_mode = true;
+                    self.send_chat();
                 }
             });
         });
@@ -3014,21 +3172,35 @@ impl KestrelApp {
         }
         self.diff_review = None;
         self.agent_activity = "💭 Planning…".to_string();
+        self.agent_incomplete = false;
         // Carry the running conversation so a follow-up refines the same
         // project. The file history keeps accumulating across builds too.
         let history = self.agent_messages.clone();
 
+        // Cancellation token: Stop flips this and the worker halts at the next step.
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.agent_cancel = Some(cancel.clone());
+        // Permission channel: the worker blocks on this while a prompt is open.
+        let (decision_tx, decision_rx) = std::sync::mpsc::channel::<ApprovalDecision>();
+        self.agent_decision = Some(decision_tx);
+        let ask_permission = self.ask_permission;
+
         let (tx, rx) = std::sync::mpsc::channel();
         let events = tx.clone();
+        let approve_events = tx.clone();
         std::thread::spawn(move || {
+            let mut allow_all = false;
             let outcome = kestrel_core::run_agent(
                 &config,
                 &model,
                 &prompt,
                 &root,
-                100,
+                // A generous budget; hitting it now pauses gracefully (Continue),
+                // instead of failing.
+                250,
                 true,
                 &policy,
+                &cancel,
                 history,
                 |event| {
                     let update = match event {
@@ -3044,9 +3216,32 @@ impl KestrelApp {
                     };
                     let _ = events.send(update);
                 },
+                |call| {
+                    // Permission gate. Auto-allow when the setting is off, once
+                    // "Allow all" is chosen, or for anything but system-touching
+                    // tools. Otherwise ask the user and block for their answer.
+                    if !ask_permission || allow_all || !tool_needs_permission(&call.name) {
+                        return true;
+                    }
+                    let _ = approve_events.send(AgentUpdate::ApprovalRequest(
+                        kestrel_core::describe_call(call),
+                    ));
+                    match decision_rx.recv() {
+                        Ok(ApprovalDecision::Allow) => true,
+                        Ok(ApprovalDecision::AllowAll) => {
+                            allow_all = true;
+                            true
+                        }
+                        // Denied, or the app/channel went away → decline safely.
+                        Ok(ApprovalDecision::Deny) | Err(_) => false,
+                    }
+                },
             );
             let history = outcome.history;
             let _ = match outcome.result {
+                Ok(summary) if outcome.incomplete => {
+                    tx.send(AgentUpdate::Incomplete { summary, history })
+                }
                 Ok(summary) => tx.send(AgentUpdate::Done { summary, history }),
                 Err(err) => tx.send(AgentUpdate::Failed { err, history }),
             };
@@ -3153,6 +3348,19 @@ impl KestrelApp {
                 )
                 .weak(),
             );
+            ui.add_space(4.0);
+            if ui
+                .checkbox(
+                    &mut self.settings.ask_permission,
+                    "Ask permission before running commands / installs / git",
+                )
+                .on_hover_text(
+                    "Pops a prompt for each system-touching action; Deny lets the agent adapt.",
+                )
+                .changed()
+            {
+                self.ask_permission = self.settings.ask_permission;
+            }
             ui.add_space(4.0);
             ui.label("Disabled tools:");
             ui.horizontal_wrapped(|ui| {
@@ -3550,6 +3758,16 @@ fn human_tokens(n: usize) -> String {
     } else {
         n.to_string()
     }
+}
+
+/// Whether a tool touches the system in a way worth asking permission for —
+/// running commands, installing toolchains, or git operations. File writes stay
+/// sandboxed to the project and reads are harmless, so those never prompt.
+fn tool_needs_permission(name: &str) -> bool {
+    matches!(
+        name,
+        "run_command" | "install_tool" | "git" | "start_app" | "stop_app"
+    )
 }
 
 /// Build an editor draft from an existing workflow.

@@ -70,6 +70,16 @@ configurable and the agent has a full engineering toolset.
   written **token-by-token in real time** (like an IDE) via partial tool-argument
   parsing, instead of appearing all at once after the model finishes the file.
   Falls back to the buffered turn for any provider that can't stream tool calls
+- ✅ **No more silent death / full run control** — hitting the step budget (now
+  250, up from 100) is a graceful **pause** with a **▶ Continue** button that
+  resumes from exactly where it left off, not a failure. **⏹ Stop** now truly
+  halts the worker via a cancellation token (it used to keep running and
+  spending); **New chat** stops any running agent and resets. Budget hard-stops
+  also cancel the worker so it can't keep spending
+- ✅ **Permission prompts** — an optional "ask before running commands / installs
+  / git" mode (Settings) pops an **Allow / Allow-all-this-run / Deny** prompt
+  before each system-touching action; **Deny** feeds back so the agent adapts
+  instead of the run dying
 - ✅ **Diagnostics** (LSP-style, dependency-free) — run the project's checker
   (`cargo check` / `tsc` / `ruff`), parse errors/warnings into a **⚠ Problems**
   tab (click to open the file) and an inline strip in the editor
