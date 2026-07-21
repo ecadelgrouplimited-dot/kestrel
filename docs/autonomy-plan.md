@@ -142,8 +142,14 @@ the test-project battery (see `test-projects.md`) measurably more likely to pass
   the current docs before writing and to navigate/refactor with these tools.
   *Success:* a cross-file rename lands correctly; an unfamiliar-framework build
   researches the real API first.
-- **Phase C — Scale & Memory** (skills 5, 6). Memory + subagents. *Success:* a
-  second run on a repo is visibly faster/cheaper; a multi-module build parallelizes.
+- **Phase C — Scale & Memory** (skills 5, 6) — ✅ **shipped**. Memory + subagents.
+  Delivered: `crate::memory` (`.kestrel/memory.json`, a `remember` tool, and a
+  memory block folded into every run's system prompt) and **sub-agents** — a
+  `spawn_subagent(task)` tool that runs a focused nested agent with its own clean
+  context (bounded, non-nesting), sharing the project/policy/cancel and folding
+  its usage and file writes back to the parent. *Success:* a second run on a repo
+  starts already knowing its conventions; a big task delegates isolated chunks to
+  keep the main context lean.
 - **Phase D — Proof & Packaging** (skills 4, 8). Browser-driven acceptance + skills
   packs. *Success:* Kestrel drives a web app it built and proves the feature works;
   a shared skill sets up CI end-to-end.

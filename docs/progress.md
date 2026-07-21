@@ -93,6 +93,13 @@ configurable and the agent has a full engineering toolset.
   LSP-grade precision; `web_search` (keyless, DuckDuckGo over curl) lets it
   discover current docs/APIs before writing. The loop prompt now research-first
   and navigate-precisely by default.
+- ✅ **Scale & Memory** (Phase C) — **persistent project memory** (`.kestrel/
+  memory.json`): a `remember` tool saves durable facts (build/run commands,
+  conventions, gotchas, decisions), folded into every run's prompt so each run
+  starts smarter and cheaper. **Sub-agents**: a `spawn_subagent(task)` tool runs a
+  focused nested agent with its own clean context (bounded, non-nesting), sharing
+  the project/policy/cancel and folding its usage + file writes back to the
+  parent — isolate a big chunk of work while keeping the main context lean.
 - ✅ **Diagnostics** (LSP-style, dependency-free) — run the project's checker
   (`cargo check` / `tsc` / `ruff`), parse errors/warnings into a **⚠ Problems**
   tab (click to open the file) and an inline strip in the editor

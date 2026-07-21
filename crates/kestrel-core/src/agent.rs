@@ -186,6 +186,12 @@ pub fn agent_loop_system_prompt(root: &Path) -> String {
            Keep steps outcome-focused (\"scaffold the app and get it building\", not \"write \
            index.html\"). Do NOT report the task finished while steps remain unless you explain \
            why they are unnecessary.\n\
+         - remember(note, category): save a durable fact about THIS project (a convention, the \
+           build/run/test command, an architecture note, a gotcha, a decision) to persistent \
+           memory, so future runs start knowing it.\n\
+         - spawn_subagent(task): delegate a big, self-contained chunk of work to a fresh \
+           sub-agent with its own clean context; it returns a result summary. Use it to keep your \
+           own context lean on large tasks.\n\
          - read_file(path): read any UTF-8 text file (absolute path, or relative to the project).\n\
          - web_search(query): search the web to discover current docs/APIs, then http_get the \
            best result. definition(name)/references(name)/outline(path): precise code navigation \
@@ -252,9 +258,24 @@ pub fn agent_loop_system_prompt(root: &Path) -> String {
          effort. Do not claim success without verifying.\n\n\
          When you are finished, stop calling tools and reply with a short summary of what you \
          built and what verification showed.\n\n\
-         {}The current project root is: {}",
+         {}{}The current project root is: {}",
+        memory_prompt(root),
         multi_repo_prompt(root),
         root.display()
+    )
+}
+
+/// If the project has learned memory, fold it into the prompt so every run starts
+/// knowing it; otherwise contribute nothing.
+fn memory_prompt(root: &Path) -> String {
+    let notes = crate::memory::load_memory(root);
+    let rendered = crate::memory::render_memory(&notes);
+    if rendered.is_empty() {
+        return String::new();
+    }
+    format!(
+        "What you've already learned about THIS project (persistent memory — trust it, and keep \
+         it current with remember(note, category) when you learn something durable):\n{rendered}\n"
     )
 }
 
@@ -306,6 +327,39 @@ pub fn builtin_tools() -> Vec<ToolSpec> {
                     },
                 },
                 "required": ["steps"],
+            }),
+        },
+        ToolSpec {
+            name: "remember".to_string(),
+            description: "Save a durable fact about THIS project to persistent memory, so future \
+                          runs start knowing it — a convention, the exact build/run/test command, \
+                          an architecture note, a gotcha, or a decision. Keep each note short and \
+                          specific. Don't remember transient details."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "note": { "type": "string" },
+                    "category": {
+                        "type": "string",
+                        "enum": ["command", "convention", "architecture", "gotcha", "decision", "note"],
+                    },
+                },
+                "required": ["note"],
+            }),
+        },
+        ToolSpec {
+            name: "spawn_subagent".to_string(),
+            description: "Delegate a focused, self-contained sub-task to a fresh sub-agent with \
+                          its own clean context (it can read/search/write/run/verify on the same \
+                          project). Use it to isolate a big chunk of work — e.g. \"implement and \
+                          test the auth module\" — so your own context stays lean. Returns the \
+                          sub-agent's result summary. Sub-agents cannot spawn sub-agents."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": { "task": { "type": "string" } },
+                "required": ["task"],
             }),
         },
         ToolSpec {
@@ -589,6 +643,8 @@ pub fn describe_call(call: &ToolCall) -> String {
     };
     match call.name.as_str() {
         "update_plan" => "🗺 Updating the plan".to_string(),
+        "remember" => "🧠 Remembering a project fact".to_string(),
+        "spawn_subagent" => format!("🤝 Delegating: {}", arg("task")),
         "read_file" => format!("📖 Reading {}", arg("path")),
         "list_dir" => format!("📁 Listing {}", arg("path")),
         "http_get" => format!("🌐 Fetching {}", arg("url")),
@@ -656,6 +712,15 @@ pub fn execute_tool(root: &Path, call: &ToolCall) -> String {
                         cap(out)
                     }
                 }
+                Err(err) => format!("error: {err}"),
+            }
+        }
+        "remember" => {
+            let note = arg("note");
+            let category = arg("category");
+            match crate::memory::remember(root, &category, &note) {
+                Ok(true) => format!("Remembered ({}).", crate::memory::load_memory(root).len()),
+                Ok(false) => "Already known (or empty) — not added.".to_string(),
                 Err(err) => format!("error: {err}"),
             }
         }
@@ -1749,13 +1814,13 @@ fn review_prompt(request: &str) -> String {
 /// [`AgentEvent::Writing`] so the UI shows files as they're typed. Falls back to a
 /// buffered [`run_turn`] if the provider can't stream (transport error or an
 /// empty stream), so no provider is worse off than before.
-fn streamed_turn<F: FnMut(AgentEvent)>(
+fn streamed_turn(
     config: &ProviderConfig,
     model: &str,
     system: &str,
     history: &[AgentMessage],
     tools: &[ToolSpec],
-    on_event: &mut F,
+    on_event: &mut dyn FnMut(AgentEvent),
 ) -> std::io::Result<Result<TurnResult, String>> {
     // Throttle live previews: only re-emit once a file's streamed contents have
     // grown by a chunk, so we don't flood the channel with tiny deltas.
@@ -1803,6 +1868,8 @@ fn streamed_turn<F: FnMut(AgentEvent)>(
     }
 }
 
+/// Run the tool-using agent loop for `user_prompt`. Thin public wrapper over
+/// [`run_agent_inner`] at depth 0 (sub-agents recurse at deeper levels).
 #[allow(clippy::too_many_arguments)]
 pub fn run_agent(
     config: &ProviderConfig,
@@ -1813,9 +1880,43 @@ pub fn run_agent(
     review: bool,
     policy: &crate::policy::Policy,
     cancel: &std::sync::atomic::AtomicBool,
-    mut history: Vec<AgentMessage>,
+    history: Vec<AgentMessage>,
     mut on_event: impl FnMut(AgentEvent),
     mut approve: impl FnMut(&ToolCall) -> bool,
+) -> AgentOutcome {
+    run_agent_inner(
+        0,
+        config,
+        model,
+        user_prompt,
+        root,
+        max_steps,
+        review,
+        policy,
+        cancel,
+        history,
+        &mut on_event,
+        &mut approve,
+    )
+}
+
+/// The agent loop. `depth` is the sub-agent nesting level (0 = top). Closures are
+/// `&mut dyn` (not generic) so the loop can recurse for sub-agents without
+/// infinite monomorphization.
+#[allow(clippy::too_many_arguments)]
+fn run_agent_inner(
+    depth: usize,
+    config: &ProviderConfig,
+    model: &str,
+    user_prompt: &str,
+    root: &Path,
+    max_steps: usize,
+    review: bool,
+    policy: &crate::policy::Policy,
+    cancel: &std::sync::atomic::AtomicBool,
+    mut history: Vec<AgentMessage>,
+    on_event: &mut dyn FnMut(AgentEvent),
+    approve: &mut dyn FnMut(&ToolCall) -> bool,
 ) -> AgentOutcome {
     use std::sync::atomic::Ordering;
     let system = agent_loop_system_prompt(root);
@@ -1823,9 +1924,14 @@ pub fn run_agent(
     history.push(AgentMessage::User(user_prompt.to_string()));
     let mut reviewed = !review;
     let mut total_usage = Usage::default();
-    // The task plan (resumed if this project has one), shown live as a ledger.
-    let mut plan = crate::plan::load_plan(root);
-    if !plan.steps.is_empty() {
+    // The task plan — only the top-level agent owns the shared ledger; sub-agents
+    // keep a private, in-memory plan so they can't clobber it.
+    let mut plan = if depth == 0 {
+        crate::plan::load_plan(root)
+    } else {
+        crate::plan::Plan::default()
+    };
+    if depth == 0 && !plan.steps.is_empty() {
         on_event(AgentEvent::Plan(plan.clone()));
     }
     let mut plan_reflected = false;
@@ -1868,7 +1974,7 @@ pub fn run_agent(
         // Stream the turn so the UI can show files being written in real time.
         // Falls back to a plain (buffered) turn if the provider can't stream.
         let turn: TurnResult =
-            match streamed_turn(config, model, &system, &history, &tools, &mut on_event) {
+            match streamed_turn(config, model, &system, &history, &tools, on_event) {
                 Ok(Ok(turn)) => turn,
                 Ok(Err(msg)) => {
                     return AgentOutcome {
@@ -1968,13 +2074,61 @@ pub fn run_agent(
         for call in &turn.calls {
             // The plan tool is handled here (not in execute_tool) so it can update
             // the live ledger and persist. It is always safe — no policy/approval.
+            // Sub-agents keep a private plan (no persist/emit) to avoid clobbering.
             let content = if call.name == "update_plan" {
                 plan = crate::plan::plan_from_tool_input(&call.input);
-                let _ = crate::plan::save_plan(root, &plan);
-                on_event(AgentEvent::Plan(plan.clone()));
                 let (done, total) = plan.progress();
-                append_audit(root, &format!("PLAN  {done}/{total} steps done"));
+                if depth == 0 {
+                    let _ = crate::plan::save_plan(root, &plan);
+                    on_event(AgentEvent::Plan(plan.clone()));
+                    append_audit(root, &format!("PLAN  {done}/{total} steps done"));
+                }
                 format!("Plan updated ({done}/{total} done).\n{}", plan.render())
+            }
+            // Delegate a focused sub-task to a fresh sub-agent with its own clean
+            // context. Only the top-level agent may spawn (no unbounded nesting).
+            else if call.name == "spawn_subagent" {
+                let task = call
+                    .input
+                    .get("task")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                if depth >= 1 {
+                    "error: a sub-agent cannot spawn further sub-agents. Do this work directly."
+                        .to_string()
+                } else if task.is_empty() {
+                    "error: provide a `task` describing the self-contained work to delegate."
+                        .to_string()
+                } else {
+                    on_event(AgentEvent::Tool(format!("🤝 Delegating: {task}")));
+                    append_audit(root, &format!("SUBAGENT  {task}"));
+                    let sub = run_agent_inner(
+                        depth + 1,
+                        config,
+                        model,
+                        &task,
+                        root,
+                        60,
+                        false,
+                        policy,
+                        cancel,
+                        Vec::new(),
+                        &mut |ev| match ev {
+                            AgentEvent::Assistant(t) => {
+                                on_event(AgentEvent::Assistant(format!("  ↳ {t}")))
+                            }
+                            other => on_event(other),
+                        },
+                        approve,
+                    );
+                    total_usage.add(&sub.usage);
+                    match sub.result {
+                        Ok(summary) => format!("Sub-agent finished:\n{summary}"),
+                        Err(err) => format!("Sub-agent could not finish: {err}"),
+                    }
+                }
             }
             // Policy gate: a denied call is not executed; the model sees why.
             else if let Err(reason) = policy.check(call) {
