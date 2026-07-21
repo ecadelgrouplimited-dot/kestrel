@@ -66,6 +66,8 @@ enum AgentUpdate {
     Writing { path: String, contents: String },
     /// Token usage from a completed turn, for the live meter.
     Usage(kestrel_core::Usage),
+    /// The agent's task plan changed — the live TODO ledger.
+    Plan(kestrel_core::Plan),
     /// The agent finished; carries the final summary and the full conversation
     /// so a follow-up prompt can refine the same project.
     Done {
@@ -236,6 +238,8 @@ struct KestrelApp {
     agent_messages: Vec<kestrel_core::AgentMessage>,
     /// The agent's current activity, shown live while it works.
     agent_activity: String,
+    /// The agent's live task plan (TODO ledger), if any.
+    agent_plan: Option<kestrel_core::Plan>,
     /// Set when a running agent should stop; the worker checks it each step.
     agent_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// The last run paused (step budget or Stop) and can be continued.
@@ -348,6 +352,7 @@ impl Default for KestrelApp {
             agent_preview: None,
             agent_messages: Vec::new(),
             agent_activity: String::new(),
+            agent_plan: None,
             agent_cancel: None,
             agent_incomplete: false,
             pending_approval: None,
@@ -582,6 +587,12 @@ impl KestrelApp {
                         self.save_session();
                         break;
                     }
+                    ctx.request_repaint();
+                }
+                Ok(AgentUpdate::Plan(plan)) => {
+                    let (done, total) = plan.progress();
+                    self.agent_plan = Some(plan);
+                    self.agent_activity = format!("🗺 Plan: {done}/{total} steps done");
                     ctx.request_repaint();
                 }
                 Ok(AgentUpdate::Writing { path, contents }) => {
@@ -987,6 +998,8 @@ impl KestrelApp {
         self.session_cost = 0.0;
         self.today_cost = kestrel_core::cost_today(&kestrel_core::load_usage_records(&path));
         self.workspace_repos = kestrel_core::load_workspace(&path).repos;
+        let plan = kestrel_core::load_plan(&path);
+        self.agent_plan = (!plan.steps.is_empty()).then_some(plan);
         self.view = AppView::Main;
         self.reload_tree();
     }
@@ -2751,7 +2764,46 @@ impl KestrelApp {
 
     /// The build-preview panel: a live, clickable history of the files the
     /// agent is creating, with a preview of the selected one.
+    /// The live task plan (TODO ledger): the agent's checklist with progress,
+    /// shown above the created-files list so the user can watch it self-direct.
+    fn plan_ui(&self, ui: &mut egui::Ui) {
+        let Some(plan) = &self.agent_plan else {
+            return;
+        };
+        if plan.steps.is_empty() {
+            return;
+        }
+        let (done, total) = plan.progress();
+        egui::CollapsingHeader::new(format!("🗺 Plan — {done}/{total} done"))
+            .default_open(true)
+            .id_source("agent-plan")
+            .show(ui, |ui| {
+                if !plan.goal.trim().is_empty() {
+                    ui.label(egui::RichText::new(&plan.goal).weak().italics());
+                    ui.add_space(2.0);
+                }
+                for step in &plan.steps {
+                    let (glyph, text) = match step.status {
+                        kestrel_core::StepStatus::Done => {
+                            ("☑", egui::RichText::new(&step.title).strikethrough().weak())
+                        }
+                        kestrel_core::StepStatus::Active => {
+                            ("▶", egui::RichText::new(&step.title).strong().color(ACCENT))
+                        }
+                        kestrel_core::StepStatus::Todo => ("☐", egui::RichText::new(&step.title)),
+                    };
+                    ui.horizontal(|ui| {
+                        ui.label(glyph);
+                        ui.label(text);
+                    });
+                }
+            });
+        ui.add_space(6.0);
+        ui.separator();
+    }
+
     fn build_preview_ui(&mut self, ui: &mut egui::Ui) {
+        self.plan_ui(ui);
         ui.horizontal(|ui| {
             ui.strong(format!("Files created ({})", self.agent_files.len()));
             if self.chat_pending {
@@ -2896,6 +2948,8 @@ impl KestrelApp {
                     self.agent_preview = None;
                     self.agent_messages.clear();
                     self.agent_incomplete = false;
+                    self.agent_plan = None;
+                    kestrel_core::clear_plan(&self.project_path());
                     self.session_usage = kestrel_core::Usage::default();
                     self.session_cost = 0.0;
                     self.save_session();
@@ -3213,6 +3267,7 @@ impl KestrelApp {
                             AgentUpdate::Writing { path, contents }
                         }
                         kestrel_core::AgentEvent::Usage(usage) => AgentUpdate::Usage(usage),
+                        kestrel_core::AgentEvent::Plan(plan) => AgentUpdate::Plan(plan),
                     };
                     let _ = events.send(update);
                 },

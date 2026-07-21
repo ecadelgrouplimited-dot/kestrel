@@ -171,6 +171,8 @@ pub enum AgentEvent {
     Writing { path: String, contents: String },
     /// Token usage from a completed turn, for the live meter.
     Usage(Usage),
+    /// The agent's task plan changed — the live TODO ledger for the UI.
+    Plan(crate::plan::Plan),
 }
 
 /// The system prompt for the tool-using agent loop.
@@ -178,6 +180,12 @@ pub fn agent_loop_system_prompt(root: &Path) -> String {
     format!(
         "You are Kestrel, an autonomous coding agent running natively on the user's Windows \
          machine. You have real tools:\n\
+         - update_plan(goal, steps): your task checklist. For ANY non-trivial task, call this \
+           FIRST to break the goal into concrete, verifiable steps; then call it again as you \
+           work to mark each step done and set the next one active. Pass the full list each time. \
+           Keep steps outcome-focused (\"scaffold the app and get it building\", not \"write \
+           index.html\"). Do NOT report the task finished while steps remain unless you explain \
+           why they are unnecessary.\n\
          - read_file(path): read any UTF-8 text file (absolute path, or relative to the project).\n\
          - list_dir(path): list a directory's entries.\n\
          - http_get(url): fetch the body of an http(s) URL — an API, or a raw GitHub file such \
@@ -267,6 +275,33 @@ fn multi_repo_prompt(root: &Path) -> String {
 /// The tools the agent may call.
 pub fn builtin_tools() -> Vec<ToolSpec> {
     vec![
+        ToolSpec {
+            name: "update_plan".to_string(),
+            description: "Create or update your task plan — the checklist you work through. Call \
+                          this FIRST for any non-trivial task to break the goal into concrete \
+                          steps, then call it again as you go to mark a step \"done\" and set the \
+                          next one \"active\". Pass the FULL list each time (it replaces the plan). \
+                          The plan is shown to the user live."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "goal": { "type": "string", "description": "A short restatement of the goal." },
+                    "steps": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "title": { "type": "string" },
+                                "status": { "type": "string", "enum": ["todo", "active", "done"] },
+                            },
+                            "required": ["title", "status"],
+                        },
+                    },
+                },
+                "required": ["steps"],
+            }),
+        },
         ToolSpec {
             name: "read_file".to_string(),
             description: "Read a UTF-8 text file from the user's computer. Accepts an absolute \
@@ -484,6 +519,7 @@ pub fn describe_call(call: &ToolCall) -> String {
             .to_string()
     };
     match call.name.as_str() {
+        "update_plan" => "🗺 Updating the plan".to_string(),
         "read_file" => format!("📖 Reading {}", arg("path")),
         "list_dir" => format!("📁 Listing {}", arg("path")),
         "http_get" => format!("🌐 Fetching {}", arg("url")),
@@ -1615,6 +1651,17 @@ pub fn run_agent(
     history.push(AgentMessage::User(user_prompt.to_string()));
     let mut reviewed = !review;
     let mut total_usage = Usage::default();
+    // The task plan (resumed if this project has one), shown live as a ledger.
+    let mut plan = crate::plan::load_plan(root);
+    if !plan.steps.is_empty() {
+        on_event(AgentEvent::Plan(plan.clone()));
+    }
+    let mut plan_reflected = false;
+    // Stall detection: the previous turn's tool signature, how many times it has
+    // repeated, and a bounded nudge budget so we never loop on nudging itself.
+    let mut last_sig: Option<u64> = None;
+    let mut repeats = 0usize;
+    let mut nudges = 0usize;
     // Token-aware compaction: trigger at ~70% of the model's context window
     // (≈4 bytes/token), compacting back to ~40%.
     let window = crate::model_context_window(model) as usize;
@@ -1692,6 +1739,26 @@ pub fn run_agent(
                 history.push(AgentMessage::User(review_prompt(user_prompt)));
                 continue;
             }
+            // Plan-aware reflect: don't declare victory while the plan still has
+            // outstanding steps — send the agent back to finish or justify them.
+            if !plan_reflected && !plan.outstanding().is_empty() {
+                plan_reflected = true;
+                let outstanding = plan.outstanding().join("; ");
+                history.push(AgentMessage::Assistant {
+                    text: turn.text.clone(),
+                    calls: Vec::new(),
+                });
+                on_event(AgentEvent::Assistant(
+                    "— checking the plan before finishing —".to_string(),
+                ));
+                history.push(AgentMessage::User(format!(
+                    "Before you finish: your plan still lists these steps as not done: \
+                     {outstanding}. If they are actually needed, do them now. If they are already \
+                     done or genuinely unnecessary, call update_plan to reflect that and briefly \
+                     say why. Only then wrap up."
+                )));
+                continue;
+            }
             append_audit(root, "END  finished");
             return AgentOutcome {
                 result: Ok(turn.text),
@@ -1701,14 +1768,44 @@ pub fn run_agent(
             };
         }
 
+        // Stall detection: a signature of this turn's tool calls. If the agent
+        // repeats the exact same calls turn after turn, it's stuck.
+        let sig = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            for c in &turn.calls {
+                c.name.hash(&mut h);
+                c.input.to_string().hash(&mut h);
+            }
+            h.finish()
+        };
+        let stalled = if Some(sig) == last_sig {
+            repeats += 1;
+            repeats >= 2 && nudges < 3
+        } else {
+            repeats = 0;
+            false
+        };
+        last_sig = Some(sig);
+
         history.push(AgentMessage::Assistant {
             text: turn.text.clone(),
             calls: turn.calls.clone(),
         });
         let mut results = Vec::new();
         for call in &turn.calls {
+            // The plan tool is handled here (not in execute_tool) so it can update
+            // the live ledger and persist. It is always safe — no policy/approval.
+            let content = if call.name == "update_plan" {
+                plan = crate::plan::plan_from_tool_input(&call.input);
+                let _ = crate::plan::save_plan(root, &plan);
+                on_event(AgentEvent::Plan(plan.clone()));
+                let (done, total) = plan.progress();
+                append_audit(root, &format!("PLAN  {done}/{total} steps done"));
+                format!("Plan updated ({done}/{total} done).\n{}", plan.render())
+            }
             // Policy gate: a denied call is not executed; the model sees why.
-            let content = if let Err(reason) = policy.check(call) {
+            else if let Err(reason) = policy.check(call) {
                 on_event(AgentEvent::Tool(format!(
                     "⛔ Blocked: {}",
                     describe_call(call)
@@ -1779,6 +1876,24 @@ pub fn run_agent(
             });
         }
         history.push(AgentMessage::ToolResults(results));
+
+        // Stalled: the agent repeated the same actions with no progress. Nudge it
+        // to change tack (bounded, so nudging can't itself loop).
+        if stalled {
+            nudges += 1;
+            repeats = 0;
+            append_audit(root, "STALL  nudged to change approach");
+            on_event(AgentEvent::Assistant(
+                "⚠ You seem to be repeating yourself — trying a different approach.".to_string(),
+            ));
+            history.push(AgentMessage::User(
+                "You've repeated the same action several times without making progress. Stop \
+                 repeating it. Re-read your plan, try a DIFFERENT approach to the current step \
+                 (inspect the actual error, read the relevant file, or revise the plan). If you \
+                 are genuinely blocked, stop and explain clearly what is blocking you."
+                    .to_string(),
+            ));
+        }
     }
     append_audit(root, "END  step limit reached");
     AgentOutcome {

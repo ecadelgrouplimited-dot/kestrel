@@ -80,6 +80,13 @@ configurable and the agent has a full engineering toolset.
   / git" mode (Settings) pops an **Allow / Allow-all-this-run / Deny** prompt
   before each system-touching action; **Deny** feeds back so the agent adapts
   instead of the run dying
+- ✅ **Autonomy Core** (Phase A of [autonomy-plan.md](autonomy-plan.md)) — the
+  agent now **plans**: an `update_plan` tool decomposes a goal into a checklist it
+  works step by step, persisted to `.kestrel/plan.json` and shown as a live
+  **🗺 Plan** ledger (progress, active/done). **Stall detection** nudges it off
+  repeated no-progress actions; a **plan-aware reflect** step refuses to declare
+  "done" while steps remain. Turns "wandered off at step 100" into "worked the
+  checklist to completion."
 - ✅ **Diagnostics** (LSP-style, dependency-free) — run the project's checker
   (`cargo check` / `tsc` / `ruff`), parse errors/warnings into a **⚠ Problems**
   tab (click to open the file) and an inline strip in the editor

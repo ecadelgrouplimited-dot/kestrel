@@ -7,6 +7,7 @@ pub mod environment;
 pub mod format;
 pub mod graph;
 pub mod inspect;
+pub mod plan;
 pub mod policy;
 pub mod pricing;
 pub mod project;
@@ -46,6 +47,9 @@ pub use graph::{
 pub use inspect::{
     inspect_project, project_symbols, CommandKind, CommandSuggestion, FileInventory,
     LanguageSummary, ProjectInspection, ProjectMarker, SymbolSummary,
+};
+pub use plan::{
+    clear_plan, load_plan, plan_from_tool_input, save_plan, Plan, PlanStep, StepStatus,
 };
 pub use policy::{default_denied_patterns, effective_policy, Policy};
 pub use pricing::{cost_of_usage, estimate_cost, model_context_window, model_price, ModelPrice};
