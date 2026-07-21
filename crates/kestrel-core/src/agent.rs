@@ -187,6 +187,11 @@ pub fn agent_loop_system_prompt(root: &Path) -> String {
            index.html\"). Do NOT report the task finished while steps remain unless you explain \
            why they are unnecessary.\n\
          - read_file(path): read any UTF-8 text file (absolute path, or relative to the project).\n\
+         - web_search(query): search the web to discover current docs/APIs, then http_get the \
+           best result. definition(name)/references(name)/outline(path): precise code navigation \
+           — jump to a symbol, find everything that uses it, or map a file's structure before \
+           editing. rename_symbol(old,new): rename a symbol across the whole project safely \
+           (whole-word), then verify.\n\
          - list_dir(path): list a directory's entries.\n\
          - http_get(url): fetch the body of an http(s) URL — an API, or a raw GitHub file such \
            as https://raw.githubusercontent.com/owner/repo/branch/path.\n\
@@ -223,10 +228,11 @@ pub fn agent_loop_system_prompt(root: &Path) -> String {
          a stack, pick the one best suited to the goal and say why. NEVER refuse or downgrade a \
          request because a stack is unfamiliar.\n\n\
          RESEARCH WHAT YOU DON'T KNOW: when a framework, API, library version, or file format is \
-         unfamiliar or may have changed, do not guess — use http_get to read the official docs, a \
-         package registry (crates.io, npm, PyPI, pkg.go.dev, Packagist), or a raw GitHub file to \
-         confirm the current API, the right dependency versions, and the correct project layout \
-         BEFORE writing code. Verify commands and config against reality. A short research step up \
+         unfamiliar or may have changed, do not guess — use web_search to find the official docs, \
+         then http_get to read them (or a package registry: crates.io, npm, PyPI, pkg.go.dev, \
+         Packagist), to confirm the current API, the right dependency versions, and the correct \
+         project layout BEFORE writing code. When editing existing code, use definition/references/\
+         outline to understand it precisely and rename_symbol for safe refactors. Verify commands and config against reality. A short research step up \
          front prevents broken builds.\n\n\
          Scaffold with the ecosystem's own tools when that's the idiomatic path (e.g. \
          `cargo new`, `npm create vite@latest`, `npx create-next-app`, `dotnet new`, \
@@ -332,6 +338,69 @@ pub fn builtin_tools() -> Vec<ToolSpec> {
                 "type": "object",
                 "properties": { "url": { "type": "string" } },
                 "required": ["url"],
+            }),
+        },
+        ToolSpec {
+            name: "web_search".to_string(),
+            description: "Search the web and get back titles, URLs, and snippets. Use it to \
+                          discover the CURRENT docs/API for an unfamiliar framework or library \
+                          before writing code, then http_get the best result. Prefer this over \
+                          guessing."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": { "query": { "type": "string" } },
+                "required": ["query"],
+            }),
+        },
+        ToolSpec {
+            name: "definition".to_string(),
+            description: "Jump to where a symbol is defined: returns the file, line, kind, and \
+                          signature for every definition of `name` in the project. Precise \
+                          (tree-sitter), not grep."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": { "name": { "type": "string" } },
+                "required": ["name"],
+            }),
+        },
+        ToolSpec {
+            name: "references".to_string(),
+            description: "Find every whole-word use of `name` across the project (returns \
+                          path:line: text). Use it before changing or removing a symbol to see \
+                          what depends on it."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": { "name": { "type": "string" } },
+                "required": ["name"],
+            }),
+        },
+        ToolSpec {
+            name: "outline".to_string(),
+            description: "List the symbols (functions, types, methods…) declared in a file, with \
+                          their lines — a quick structural map before you read or edit it."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": { "path": { "type": "string" } },
+                "required": ["path"],
+            }),
+        },
+        ToolSpec {
+            name: "rename_symbol".to_string(),
+            description: "Rename a symbol across the WHOLE project: replaces every whole-word \
+                          occurrence of `old` with `new` in all text files (so `user` never \
+                          matches `username`). Verify the build afterward."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "old": { "type": "string" },
+                    "new": { "type": "string" },
+                },
+                "required": ["old", "new"],
             }),
         },
         ToolSpec {
@@ -523,6 +592,11 @@ pub fn describe_call(call: &ToolCall) -> String {
         "read_file" => format!("📖 Reading {}", arg("path")),
         "list_dir" => format!("📁 Listing {}", arg("path")),
         "http_get" => format!("🌐 Fetching {}", arg("url")),
+        "web_search" => format!("🔍 Searching the web: \"{}\"", arg("query")),
+        "definition" => format!("📍 Finding definition of {}", arg("name")),
+        "references" => format!("🔗 Finding references to {}", arg("name")),
+        "outline" => format!("🧭 Outlining {}", arg("path")),
+        "rename_symbol" => format!("✒ Renaming {} → {}", arg("old"), arg("new")),
         "search" => {
             let repo = arg("repo");
             if repo.is_empty() {
@@ -586,6 +660,104 @@ pub fn execute_tool(root: &Path, call: &ToolCall) -> String {
             }
         }
         "http_get" => http_get(&arg("url")),
+        "web_search" => match crate::websearch::web_search(&arg("query"), 8) {
+            Ok(results) if results.is_empty() => {
+                "No results found. Try a different query, or http_get a docs URL directly."
+                    .to_string()
+            }
+            Ok(results) => {
+                let mut out = String::new();
+                for r in results {
+                    out.push_str(&format!("{}\n{}\n", r.title, r.url));
+                    if !r.snippet.is_empty() {
+                        out.push_str(&format!("  {}\n", r.snippet));
+                    }
+                    out.push('\n');
+                }
+                cap(out)
+            }
+            Err(err) => format!("error: {err}"),
+        },
+        "definition" => {
+            let name = arg("name");
+            match crate::codenav::find_definitions(root, &name) {
+                Ok(hits) if hits.is_empty() => {
+                    format!("No definition found for \"{name}\".")
+                }
+                Ok(hits) => {
+                    let mut out = String::new();
+                    for h in hits {
+                        out.push_str(&format!(
+                            "{}:{}  ({})  {}\n",
+                            h.path, h.line, h.kind, h.signature
+                        ));
+                    }
+                    cap(out)
+                }
+                Err(err) => format!("error: {err}"),
+            }
+        }
+        "references" => {
+            let name = arg("name");
+            match crate::codenav::find_references(root, &name, 200) {
+                Ok(hits) if hits.is_empty() => format!("No references found for \"{name}\"."),
+                Ok(hits) => {
+                    let mut out = format!("{} reference(s):\n", hits.len());
+                    for h in hits {
+                        out.push_str(&format!("{}:{}: {}\n", h.path, h.line, h.text));
+                    }
+                    cap(out)
+                }
+                Err(err) => format!("error: {err}"),
+            }
+        }
+        "outline" => {
+            let path = arg("path");
+            match crate::codenav::outline(root, &path) {
+                Ok(symbols) if symbols.is_empty() => {
+                    format!("No symbols found in {path} (unsupported language or empty).")
+                }
+                Ok(symbols) => {
+                    let mut out = String::new();
+                    for s in symbols {
+                        let container = s
+                            .container
+                            .as_deref()
+                            .map(|c| format!(" in {c}"))
+                            .unwrap_or_default();
+                        out.push_str(&format!(
+                            "{}:  {} {}{}\n",
+                            s.line,
+                            s.kind.as_str(),
+                            s.name,
+                            container
+                        ));
+                    }
+                    cap(out)
+                }
+                Err(err) => format!("error: {err}"),
+            }
+        }
+        "rename_symbol" => {
+            let old = arg("old");
+            let new = arg("new");
+            if old.trim().is_empty() || new.trim().is_empty() {
+                "error: both `old` and `new` are required".to_string()
+            } else {
+                match crate::codenav::rename_symbol(root, &old, &new) {
+                    Ok(r) if r.occurrences == 0 => {
+                        format!("No whole-word occurrences of \"{old}\" found — nothing renamed.")
+                    }
+                    Ok(r) => format!(
+                        "Renamed \"{old}\" → \"{new}\": {} occurrence(s) across {} file(s):\n{}",
+                        r.occurrences,
+                        r.files_changed,
+                        r.changed_paths.join("\n")
+                    ),
+                    Err(err) => format!("error: {err}"),
+                }
+            }
+        }
         "search" => {
             let query = arg("query");
             if query.trim().is_empty() {

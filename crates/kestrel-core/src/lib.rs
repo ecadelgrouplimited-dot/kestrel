@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod cache;
+pub mod codenav;
 pub mod config;
 pub mod context;
 pub mod diagnostics;
@@ -22,6 +23,7 @@ pub mod tests_select;
 pub mod treesitter;
 pub mod usage_log;
 pub mod verify;
+pub mod websearch;
 pub mod workflows;
 pub mod workspace;
 
@@ -32,6 +34,9 @@ pub use agent::{
     git_review, history_tokens, load_agent_session, parse_file_edits, partial_json_string_field,
     porcelain_path, run_agent, run_shell_command, save_agent_session, AgentEvent, AgentOutcome,
     AgentSession, AppliedEdit, Checkpoint, FileEdit, GitReview,
+};
+pub use codenav::{
+    find_definitions, find_references, outline, rename_symbol, DefHit, RefHit, RenameResult,
 };
 pub use config::{load_config, Config, ConfigLoad, PolicyConfig};
 pub use context::{
@@ -82,6 +87,7 @@ pub use usage_log::{
     UsageTotals,
 };
 pub use verify::{plan_verification, run_verification, StepResult, VerificationReport, VerifyStep};
+pub use websearch::{web_search, SearchResult};
 pub use workflows::{
     all_workflows, builtin_workflows, catalog_workflows, export_workflows_to,
     import_workflows_from, install_workflow, is_builtin_workflow, load_user_workflows,

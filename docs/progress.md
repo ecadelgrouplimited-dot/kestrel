@@ -87,6 +87,12 @@ configurable and the agent has a full engineering toolset.
   repeated no-progress actions; a **plan-aware reflect** step refuses to declare
   "done" while steps remain. Turns "wandered off at step 100" into "worked the
   checklist to completion."
+- ✅ **Precision & Reach** (Phase B) — semantic navigation + research tools:
+  `definition`, `references`, `outline`, and whole-word `rename_symbol` (built on
+  the tree-sitter backend, so `user` never matches `username`) give the agent
+  LSP-grade precision; `web_search` (keyless, DuckDuckGo over curl) lets it
+  discover current docs/APIs before writing. The loop prompt now research-first
+  and navigate-precisely by default.
 - ✅ **Diagnostics** (LSP-style, dependency-free) — run the project's checker
   (`cargo check` / `tsc` / `ruff`), parse errors/warnings into a **⚠ Problems**
   tab (click to open the file) and an inline strip in the editor

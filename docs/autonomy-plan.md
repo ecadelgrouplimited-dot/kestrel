@@ -134,9 +134,14 @@ the test-project battery (see `test-projects.md`) measurably more likely to pass
   (repeated-action nudge, bounded), and a **plan-aware reflect** that refuses to
   finish while steps remain. *Success:* a large task works a visible checklist to
   completion instead of wandering into the step limit.
-- **Phase B — Precision & Reach** (skills 3, 7). Semantic nav + web search. *Success:*
-  a cross-file refactor lands correctly with `references`/`rename`; a
-  current-version framework build researches the real API first.
+- **Phase B — Precision & Reach** (skills 3, 7) — ✅ **shipped**. Semantic nav +
+  web search. Delivered: `crate::codenav` (whole-word-precise
+  `definition`/`references`/`outline`/`rename_symbol` agent tools on the
+  tree-sitter backend) and `crate::websearch` (keyless `web_search` over
+  DuckDuckGo HTML via curl). The loop prompt now tells the agent to web-search
+  the current docs before writing and to navigate/refactor with these tools.
+  *Success:* a cross-file rename lands correctly; an unfamiliar-framework build
+  researches the real API first.
 - **Phase C — Scale & Memory** (skills 5, 6). Memory + subagents. *Success:* a
   second run on a repo is visibly faster/cheaper; a multi-module build parallelizes.
 - **Phase D — Proof & Packaging** (skills 4, 8). Browser-driven acceptance + skills
