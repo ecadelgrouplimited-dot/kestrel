@@ -11,7 +11,17 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
+
+/// A template file a workflow drops into the project before it runs — the thing
+/// that turns a prompt-only recipe into a shareable **skill pack** (e.g. a CI
+/// config, a Dockerfile, a starter module).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkflowResource {
+    /// Project-relative path (absolute paths and `..` are refused).
+    pub path: String,
+    pub contents: String,
+}
 
 /// A named, reusable agent recipe.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,6 +34,9 @@ pub struct Workflow {
     /// Named parameters the user fills before running.
     #[serde(default)]
     pub params: Vec<String>,
+    /// Template files materialized into the project before the run (skill packs).
+    #[serde(default)]
+    pub resources: Vec<WorkflowResource>,
 }
 
 impl Workflow {
@@ -45,6 +58,7 @@ pub fn builtin_workflows() -> Vec<Workflow> {
         description: description.to_string(),
         prompt: prompt.to_string(),
         params: params.iter().map(|s| s.to_string()).collect(),
+        resources: Vec::new(),
     };
     vec![
         w(
@@ -128,6 +142,7 @@ pub fn catalog_workflows() -> Vec<Workflow> {
         description: description.to_string(),
         prompt: prompt.to_string(),
         params: params.iter().map(|s| s.to_string()).collect(),
+        resources: Vec::new(),
     };
     vec![
         w(
@@ -197,7 +212,70 @@ pub fn catalog_workflows() -> Vec<Workflow> {
              nothing broke. Summarize what you removed.",
             &[],
         ),
+        // A skill pack: ships a starter file the agent then adapts.
+        Workflow {
+            id: "setup-ci".to_string(),
+            name: "Set up CI (GitHub Actions)".to_string(),
+            description: "Drop a GitHub Actions workflow and adapt it to this project's real \
+                          build/test commands."
+                .to_string(),
+            prompt:
+                "Set up continuous integration for this project with GitHub Actions. A starter \
+                     workflow has been created at .github/workflows/ci.yml — inspect the project, \
+                     detect its stack, and adapt that file to the REAL build and test commands \
+                     (fix the language setup, caching, and steps to match how this project \
+                     actually builds and tests). Verify the commands you put in the file work by \
+                     running them. Summarize what you configured."
+                    .to_string(),
+            params: Vec::new(),
+            resources: vec![WorkflowResource {
+                path: ".github/workflows/ci.yml".to_string(),
+                contents: CI_TEMPLATE.to_string(),
+            }],
+        },
     ]
+}
+
+/// Starter CI workflow shipped by the `setup-ci` skill; the agent adapts it.
+const CI_TEMPLATE: &str = "# Starter CI — adapt the steps to this project's real build/test.\n\
+name: CI\n\
+on:\n\
+  push:\n\
+    branches: [ main ]\n\
+  pull_request:\n\
+\n\
+jobs:\n\
+  build-and-test:\n\
+    runs-on: ubuntu-latest\n\
+    steps:\n\
+      - uses: actions/checkout@v4\n\
+      # TODO: set up the language toolchain for this project.\n\
+      # TODO: install dependencies.\n\
+      - name: Build\n\
+        run: echo \"replace with the project's build command\"\n\
+      - name: Test\n\
+        run: echo \"replace with the project's test command\"\n";
+
+/// Materialize a workflow's resource files into the project (skill packs),
+/// refusing any absolute or `..`-escaping path. Returns the paths written.
+pub fn materialize_resources(
+    root: &Path,
+    resources: &[WorkflowResource],
+) -> std::io::Result<Vec<String>> {
+    let mut written = Vec::new();
+    for res in resources {
+        let rel = Path::new(&res.path);
+        if rel.is_absolute() || rel.components().any(|c| matches!(c, Component::ParentDir)) {
+            continue;
+        }
+        let full = root.join(rel);
+        if let Some(parent) = full.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&full, &res.contents)?;
+        written.push(res.path.clone());
+    }
+    Ok(written)
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -339,12 +417,44 @@ mod tests {
             description: "custom".to_string(),
             prompt: "do it".to_string(),
             params: vec![],
+            resources: vec![],
         }];
         save_user_workflows_to(&path, &custom).unwrap();
         let loaded = load_user_workflows_from(&path);
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].name, "My release check");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn materialize_writes_resources_and_rejects_escapes() {
+        let dir = std::env::temp_dir().join(format!("kestrel-skill-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let resources = vec![
+            WorkflowResource {
+                path: ".github/workflows/ci.yml".to_string(),
+                contents: "name: CI".to_string(),
+            },
+            WorkflowResource {
+                path: "../escape.txt".to_string(),
+                contents: "nope".to_string(),
+            },
+        ];
+        let written = materialize_resources(&dir, &resources).unwrap();
+        assert_eq!(written, vec![".github/workflows/ci.yml".to_string()]);
+        assert!(dir.join(".github/workflows/ci.yml").exists());
+        assert!(!dir.parent().unwrap().join("escape.txt").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn setup_ci_skill_carries_a_resource() {
+        let ci = catalog_workflows()
+            .into_iter()
+            .find(|w| w.id == "setup-ci")
+            .unwrap();
+        assert_eq!(ci.resources.len(), 1);
+        assert_eq!(ci.resources[0].path, ".github/workflows/ci.yml");
     }
 
     #[test]

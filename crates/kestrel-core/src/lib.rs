@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod browser;
 pub mod cache;
 pub mod codenav;
 pub mod config;
@@ -36,6 +37,7 @@ pub use agent::{
     porcelain_path, run_agent, run_shell_command, save_agent_session, AgentEvent, AgentOutcome,
     AgentSession, AppliedEdit, Checkpoint, FileEdit, GitReview,
 };
+pub use browser::{find_browser, missing_content, render_dom};
 pub use codenav::{
     find_definitions, find_references, outline, rename_symbol, DefHit, RefHit, RenameResult,
 };
@@ -93,7 +95,8 @@ pub use websearch::{web_search, SearchResult};
 pub use workflows::{
     all_workflows, builtin_workflows, catalog_workflows, export_workflows_to,
     import_workflows_from, install_workflow, is_builtin_workflow, load_user_workflows,
-    remove_user_workflow, save_user_workflows, workflows_path, Workflow,
+    materialize_resources, remove_user_workflow, save_user_workflows, workflows_path, Workflow,
+    WorkflowResource,
 };
 pub use workspace::{
     create_dir, create_file, delete_entry, read_dir_entries, read_text_file, rename_entry,

@@ -100,6 +100,14 @@ configurable and the agent has a full engineering toolset.
   focused nested agent with its own clean context (bounded, non-nesting), sharing
   the project/policy/cancel and folding its usage + file writes back to the
   parent — isolate a big chunk of work while keeping the main context lean.
+- ✅ **Proof & Packaging** (Phase D) — **browser-driven acceptance**: a
+  `check_page(url, expect)` tool renders a running page in the machine's own
+  headless Chrome/Edge (post-JavaScript DOM) and verifies the expected content is
+  actually there, so "done" is *demonstrated* — the agent is told to prove web
+  features before finishing. **Skill packs**: workflows can carry `resources`
+  (template files) materialized into the project on run; a built-in **Set up CI**
+  skill ships a GitHub Actions starter the agent adapts to the real build/test.
+  **All four autonomy phases (A–D) shipped.**
 - ✅ **Diagnostics** (LSP-style, dependency-free) — run the project's checker
   (`cargo check` / `tsc` / `ruff`), parse errors/warnings into a **⚠ Problems**
   tab (click to open the file) and an inline strip in the editor

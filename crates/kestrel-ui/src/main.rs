@@ -162,6 +162,8 @@ struct WorkflowDraft {
     /// Comma-separated `{param}` names.
     params: String,
     status: String,
+    /// Template files carried through an edit (skill packs), preserved as-is.
+    resources: Vec<kestrel_core::WorkflowResource>,
 }
 
 struct KestrelApp {
@@ -2756,6 +2758,21 @@ impl KestrelApp {
                 return;
             }
         }
+        // Skill pack: drop the workflow's template files into the project first,
+        // so the agent's prompt can reference and adapt them.
+        if !wf.resources.is_empty() {
+            match kestrel_core::materialize_resources(&self.project_path(), &wf.resources) {
+                Ok(written) if !written.is_empty() => {
+                    self.chat_history
+                        .push(kestrel_core::ChatMessage::assistant(format!(
+                            "📦 Added starter file(s): {}",
+                            written.join(", ")
+                        )));
+                }
+                Ok(_) => {}
+                Err(err) => self.status = format!("Could not add template files: {err}"),
+            }
+        }
         self.chat_input = wf.fill(values);
         self.chat_agent_mode = true;
         self.view = AppView::Chat;
@@ -3834,6 +3851,7 @@ fn draft_from(wf: &kestrel_core::Workflow) -> WorkflowDraft {
         prompt: wf.prompt.clone(),
         params: wf.params.join(", "),
         status: String::new(),
+        resources: wf.resources.clone(),
     }
 }
 
@@ -3892,6 +3910,7 @@ fn build_workflow(draft: &WorkflowDraft) -> Result<kestrel_core::Workflow, Strin
         description: draft.description.trim().to_string(),
         prompt: draft.prompt.trim().to_string(),
         params,
+        resources: draft.resources.clone(),
     })
 }
 

@@ -150,9 +150,19 @@ the test-project battery (see `test-projects.md`) measurably more likely to pass
   its usage and file writes back to the parent. *Success:* a second run on a repo
   starts already knowing its conventions; a big task delegates isolated chunks to
   keep the main context lean.
-- **Phase D — Proof & Packaging** (skills 4, 8). Browser-driven acceptance + skills
-  packs. *Success:* Kestrel drives a web app it built and proves the feature works;
-  a shared skill sets up CI end-to-end.
+- **Phase D — Proof & Packaging** (skills 4, 8) — ✅ **shipped**. Browser-driven
+  acceptance + skills packs. Delivered: `crate::browser` (renders a URL with the
+  machine's own headless Chrome/Edge — post-JS DOM — and asserts expected
+  content) behind a `check_page(url, expect)` tool, with the loop prompt told to
+  PROVE web features work before finishing; and **skill packs** — workflows now
+  carry `resources` (template files) that are materialized into the project on
+  run, with a built-in `setup-ci` skill that ships a CI starter the agent adapts.
+  *Success:* Kestrel drives a web app it built and proves the feature is there;
+  the CI skill scaffolds and adapts end-to-end.
+
+**All four autonomy phases are shipped.** The full loop — Plan → Act → Verify →
+Reflect → Remember — plus precision navigation, web research, delegation, and
+provable acceptance, is live.
 
 ## Scope guard (what we won't do now)
 

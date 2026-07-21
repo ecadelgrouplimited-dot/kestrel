@@ -256,6 +256,10 @@ pub fn agent_loop_system_prompt(root: &Path) -> String {
          type-checker with run_command (or call verify). If it fails, READ the errors, fix the \
          offending files, and run it again. Iterate until it passes or you have made a genuine \
          effort. Do not claim success without verifying.\n\n\
+         PROVE IT WORKS: for a web app or site, don't stop at \"it builds\" — start_app the \
+         server, then check_page(url, expect=[...]) to render the page in a real browser and \
+         confirm the expected content is actually there. Treat a check_page FAIL like a build \
+         failure: read the output, fix it, restart, and re-check until it passes.\n\n\
          When you are finished, stop calling tools and reply with a short summary of what you \
          built and what verification showed.\n\n\
          {}{}The current project root is: {}",
@@ -405,6 +409,27 @@ pub fn builtin_tools() -> Vec<ToolSpec> {
                 "type": "object",
                 "properties": { "query": { "type": "string" } },
                 "required": ["query"],
+            }),
+        },
+        ToolSpec {
+            name: "check_page".to_string(),
+            description: "ACCEPTANCE CHECK for a running web app: render a URL in a real headless \
+                          browser (post-JavaScript DOM) and verify the expected text/content is \
+                          actually present. Use it to PROVE a feature works before you claim done \
+                          — start_app the server first, then check_page. Falls back to the raw \
+                          HTTP body if no browser is installed."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "url": { "type": "string" },
+                    "expect": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Substrings that must appear on the rendered page.",
+                    },
+                },
+                "required": ["url"],
             }),
         },
         ToolSpec {
@@ -649,6 +674,7 @@ pub fn describe_call(call: &ToolCall) -> String {
         "list_dir" => format!("📁 Listing {}", arg("path")),
         "http_get" => format!("🌐 Fetching {}", arg("url")),
         "web_search" => format!("🔍 Searching the web: \"{}\"", arg("query")),
+        "check_page" => format!("🧪 Checking page {}", arg("url")),
         "definition" => format!("📍 Finding definition of {}", arg("name")),
         "references" => format!("🔗 Finding references to {}", arg("name")),
         "outline" => format!("🧭 Outlining {}", arg("path")),
@@ -725,6 +751,57 @@ pub fn execute_tool(root: &Path, call: &ToolCall) -> String {
             }
         }
         "http_get" => http_get(&arg("url")),
+        "check_page" => {
+            let url = arg("url");
+            if url.trim().is_empty() {
+                return "error: url is required".to_string();
+            }
+            let expects: Vec<String> = call
+                .input
+                .get("expect")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .or_else(|| {
+                    call.input
+                        .get("expect")
+                        .and_then(|v| v.as_str())
+                        .map(|s| vec![s.to_string()])
+                })
+                .unwrap_or_default();
+            // Render with a real browser (post-JS); fall back to raw HTML.
+            let (body, how) = match crate::browser::render_dom(&url) {
+                Ok(dom) => (dom, "rendered (headless browser)"),
+                Err(_) => (http_get(&url), "raw HTML (no browser installed)"),
+            };
+            if body.starts_with("error:") {
+                return format!("Could not load {url}: {body}");
+            }
+            let missing = crate::browser::missing_content(&body, &expects);
+            let mut out = if expects.is_empty() {
+                format!("Loaded {url} — {how}, {} bytes.\n", body.len())
+            } else if missing.is_empty() {
+                format!(
+                    "✅ PASS — {url} ({how}): all {} expected item(s) present.\n",
+                    expects.len()
+                )
+            } else {
+                format!(
+                    "❌ FAIL — {url} ({how}): missing {}.\n",
+                    missing
+                        .iter()
+                        .map(|m| format!("\"{m}\""))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            };
+            // A little context to help the agent debug a failure.
+            out.push_str(&tail(&strip_html_lite(&body), 800));
+            cap(out)
+        }
         "web_search" => match crate::websearch::web_search(&arg("query"), 8) {
             Ok(results) if results.is_empty() => {
                 "No results found. Try a different query, or http_get a docs URL directly."
@@ -998,6 +1075,32 @@ fn cap(mut text: String) -> String {
         text.push_str(&format!("\n… [truncated {dropped} bytes]"));
     }
     text
+}
+
+/// Strip HTML tags and collapse whitespace, for a readable text preview of a
+/// fetched/rendered page.
+fn strip_html_lite(html: &str) -> String {
+    let mut out = String::with_capacity(html.len() / 2);
+    let mut in_tag = false;
+    let mut last_ws = false;
+    for c in html.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if in_tag => {}
+            c if c.is_whitespace() => {
+                if !last_ws {
+                    out.push(' ');
+                    last_ws = true;
+                }
+            }
+            c => {
+                out.push(c);
+                last_ws = false;
+            }
+        }
+    }
+    out.trim().to_string()
 }
 
 /// Keep the last `max_bytes` of `text` (build errors usually surface at the
