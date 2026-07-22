@@ -204,6 +204,7 @@ pub fn tools_for(profile: Profile) -> Vec<ToolSpec> {
                 "write_file",
                 "write_doc",
                 "write_sheet",
+                "check_doc",
                 "edit_file",
                 "list_dir",
                 "search",
@@ -268,10 +269,13 @@ pub fn work_system_prompt(root: &Path) -> String {
             tell the user to convert anything themselves. Use write_file for .md/.txt/.csv. \
             Structure the document properly: a clear title, sections, and a short summary up \
             front.\n\
-         4. CHECK YOUR WORK before you finish, the way a careful colleague would: does the \
-            document contain every section the request asked for? Do the numbers add up and \
-            agree between the text and the data? Is every claim sourced? Re-read the file you \
-            wrote (read_file) and fix what's wrong.\n\
+         4. CHECK YOUR WORK before you finish, the way a careful colleague would. Run \
+            check_doc(path, expect=[…]) on what you produced, listing the sections, figures, and \
+            key facts that must appear. Treat a FAIL like a broken build: fix the document and \
+            re-check until it passes. Also confirm the numbers agree between the text and the \
+            data, and that every claim is sourced. In spreadsheets, put real formulas (e.g. \
+            \"=SUM(B2:B9)\") in total rows rather than hard-coded numbers, so totals stay \
+            correct.\n\
          5. Be accurate over impressive. If something can't be verified, say so plainly rather \
             than inventing it. Never fabricate data, quotes, figures, or citations.\n\n\
          Write files only inside the workspace folder below. When you are done, stop calling \
@@ -495,6 +499,26 @@ pub fn builtin_tools() -> Vec<ToolSpec> {
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": { "path": { "type": "string" } },
+                "required": ["path"],
+            }),
+        },
+        ToolSpec {
+            name: "check_doc".to_string(),
+            description: "ACCEPTANCE CHECK for a document you produced: re-open it (.docx/.xlsx/\
+                          .pdf/.md/.csv) and verify the expected content is really there. Use it \
+                          before telling the user a document is finished — it catches a missing \
+                          section, a dropped figure, or a file that didn't save."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "expect": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Substrings that must appear in the document.",
+                    },
+                },
                 "required": ["path"],
             }),
         },
@@ -827,6 +851,7 @@ pub fn describe_call(call: &ToolCall) -> String {
         "read_doc" => format!("📄 Reading document {}", arg("path")),
         "write_doc" => format!("📝 Writing Word document {}", arg("path")),
         "write_sheet" => format!("📊 Writing spreadsheet {}", arg("path")),
+        "check_doc" => format!("🧪 Checking document {}", arg("path")),
         "list_dir" => format!("📁 Listing {}", arg("path")),
         "http_get" => format!("🌐 Fetching {}", arg("url")),
         "web_search" => format!("🔍 Searching the web: \"{}\"", arg("query")),
@@ -1189,6 +1214,46 @@ pub fn execute_tool(root: &Path, call: &ToolCall) -> String {
             Ok(full) => edit_file(&full, &arg("old"), &arg("new")),
             Err(err) => format!("error: {err}"),
         },
+        "check_doc" => {
+            let path = resolve_read_path(root, &arg("path"));
+            let expects: Vec<String> = call
+                .input
+                .get("expect")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            match crate::office::read_document(&path) {
+                Err(err) => format!("❌ FAIL — could not open {}: {err}", path.display()),
+                Ok((text, _)) => {
+                    let missing = crate::browser::missing_content(&text, &expects);
+                    let words = text.split_whitespace().count();
+                    if expects.is_empty() {
+                        format!("Opened {} — {words} words.", path.display())
+                    } else if missing.is_empty() {
+                        format!(
+                            "✅ PASS — {} ({words} words): all {} expected item(s) present.",
+                            path.display(),
+                            expects.len()
+                        )
+                    } else {
+                        format!(
+                            "❌ FAIL — {} ({words} words): missing {}. Fix the document and \
+                             re-check.",
+                            path.display(),
+                            missing
+                                .iter()
+                                .map(|m| format!("\"{m}\""))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    }
+                }
+            }
+        }
         "write_doc" => match safe_join(root, &arg("path")) {
             Ok(full) => match crate::docwrite::write_docx(&full, &arg("markdown")) {
                 Ok(()) => format!(

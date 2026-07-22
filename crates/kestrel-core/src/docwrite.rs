@@ -40,6 +40,7 @@ pub fn write_xlsx(path: &Path, data: &str, sheet_name: &str) -> Result<(), Strin
         ("[Content_Types].xml", XLSX_CONTENT_TYPES.to_string()),
         ("_rels/.rels", XLSX_ROOT_RELS.to_string()),
         ("xl/_rels/workbook.xml.rels", XLSX_WB_RELS.to_string()),
+        ("xl/styles.xml", XLSX_STYLES.to_string()),
         ("xl/workbook.xml", workbook_xml(name)),
         ("xl/worksheets/sheet1.xml", sheet_xml(&rows)),
     ];
@@ -287,20 +288,28 @@ pub fn column_name(mut index: usize) -> String {
     name
 }
 
-/// Build `xl/worksheets/sheet1.xml`, writing numbers as numbers.
+/// Build `xl/worksheets/sheet1.xml`: a frozen bold header, columns sized to the
+/// content, numbers stored as numbers, and `=` cells written as live formulas.
 fn sheet_xml(rows: &[Vec<String>]) -> String {
     let mut body = String::new();
     for (r, row) in rows.iter().enumerate() {
         body.push_str(&format!("<row r=\"{}\">", r + 1));
         for (c, cell) in row.iter().enumerate() {
             let reference = format!("{}{}", column_name(c), r + 1);
-            // A cell that parses as a number is stored numerically so Excel can
-            // sum and chart it; everything else is inline text.
-            if !cell.is_empty() && cell.parse::<f64>().is_ok() {
-                body.push_str(&format!("<c r=\"{reference}\"><v>{cell}</v></c>"));
+            // Row 1 uses the bold style so the header stands out.
+            let style = if r == 0 { " s=\"1\"" } else { "" };
+            if let Some(formula) = cell.strip_prefix('=') {
+                // A live formula — Excel evaluates it on open.
+                body.push_str(&format!(
+                    "<c r=\"{reference}\"{style}><f>{}</f></c>",
+                    xml_escape(formula)
+                ));
+            } else if !cell.is_empty() && cell.parse::<f64>().is_ok() {
+                // Numeric, so Excel can sum, sort, and chart it.
+                body.push_str(&format!("<c r=\"{reference}\"{style}><v>{cell}</v></c>"));
             } else {
                 body.push_str(&format!(
-                    "<c r=\"{reference}\" t=\"inlineStr\"><is><t xml:space=\"preserve\">{}</t></is></c>",
+                    "<c r=\"{reference}\"{style} t=\"inlineStr\"><is><t xml:space=\"preserve\">{}</t></is></c>",
                     xml_escape(cell)
                 ));
             }
@@ -310,8 +319,36 @@ fn sheet_xml(rows: &[Vec<String>]) -> String {
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
          <worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">\
-         <sheetData>{body}</sheetData></worksheet>"
+         <sheetViews><sheetView workbookViewId=\"0\">\
+         <pane ySplit=\"1\" topLeftCell=\"A2\" activePane=\"bottomLeft\" state=\"frozen\"/>\
+         </sheetView></sheetViews>\
+         {cols}<sheetData>{body}</sheetData></worksheet>",
+        cols = cols_xml(rows)
     )
+}
+
+/// Size each column to its widest cell, clamped to something readable.
+fn cols_xml(rows: &[Vec<String>]) -> String {
+    let columns = rows.iter().map(|r| r.len()).max().unwrap_or(0);
+    if columns == 0 {
+        return String::new();
+    }
+    let mut out = String::from("<cols>");
+    for c in 0..columns {
+        let widest = rows
+            .iter()
+            .filter_map(|r| r.get(c))
+            .map(|cell| cell.chars().count())
+            .max()
+            .unwrap_or(8);
+        let width = (widest + 2).clamp(9, 60);
+        out.push_str(&format!(
+            "<col min=\"{n}\" max=\"{n}\" width=\"{width}\" customWidth=\"1\"/>",
+            n = c + 1
+        ));
+    }
+    out.push_str("</cols>");
+    out
 }
 
 fn workbook_xml(sheet_name: &str) -> String {
@@ -525,7 +562,27 @@ const XLSX_CONTENT_TYPES: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\" stand
 <Default Extension=\"xml\" ContentType=\"application/xml\"/>\
 <Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/>\
 <Override PartName=\"/xl/worksheets/sheet1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/>\
+<Override PartName=\"/xl/styles.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml\"/>\
 </Types>";
+
+/// Two cell formats: 0 = normal, 1 = bold (used for the header row). Excel
+/// requires the first two fills to be `none` and `gray125`.
+const XLSX_STYLES: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+<styleSheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">\
+<fonts count=\"2\">\
+<font><sz val=\"11\"/><name val=\"Calibri\"/></font>\
+<font><b/><sz val=\"11\"/><name val=\"Calibri\"/></font>\
+</fonts>\
+<fills count=\"2\">\
+<fill><patternFill patternType=\"none\"/></fill>\
+<fill><patternFill patternType=\"gray125\"/></fill>\
+</fills>\
+<borders count=\"1\"><border><left/><right/><top/><bottom/><diagonal/></border></borders>\
+<cellStyleXfs count=\"1\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\"/></cellStyleXfs>\
+<cellXfs count=\"2\">\
+<xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\"/>\
+<xf numFmtId=\"0\" fontId=\"1\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyFont=\"1\"/>\
+</cellXfs></styleSheet>";
 
 const XLSX_ROOT_RELS: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
 <Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
@@ -535,6 +592,7 @@ const XLSX_ROOT_RELS: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalon
 const XLSX_WB_RELS: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
 <Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
 <Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet1.xml\"/>\
+<Relationship Id=\"rId2\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles\" Target=\"styles.xml\"/>\
 </Relationships>";
 
 #[cfg(test)]
@@ -596,6 +654,36 @@ mod tests {
         // Text is inline; numbers are stored as numbers so Excel can sum them.
         assert!(xml.contains("t=\"inlineStr\""));
         assert!(xml.contains("<c r=\"B2\"><v>1500</v></c>"));
+    }
+
+    #[test]
+    fn formulas_header_and_layout() {
+        let rows =
+            parse_delimited("Region,Revenue\nKampala,1500\nNairobi,900\nTotal,=SUM(B2:B3)\n");
+        let xml = sheet_xml(&rows);
+        // `=` becomes a live formula Excel evaluates, not text.
+        assert!(xml.contains("<f>SUM(B2:B3)</f>"), "formula missing: {xml}");
+        assert!(!xml.contains("=SUM"), "formula must not be stored as text");
+        // The header row is styled and frozen, and columns are sized.
+        assert!(xml.contains("<c r=\"A1\" s=\"1\""), "header not bold");
+        assert!(
+            !xml.contains("<c r=\"A2\" s=\"1\""),
+            "only row 1 is a header"
+        );
+        assert!(xml.contains("state=\"frozen\""), "header not frozen");
+        assert!(xml.contains("<cols>"), "column widths missing");
+    }
+
+    #[test]
+    fn column_widths_track_the_widest_cell() {
+        let rows = vec![
+            vec!["ab".to_string(), "a-very-long-heading-value".to_string()],
+            vec!["c".to_string(), "d".to_string()],
+        ];
+        let cols = cols_xml(&rows);
+        // Narrow column clamps to the readable minimum; wide one grows.
+        assert!(cols.contains("min=\"1\" max=\"1\" width=\"9\""));
+        assert!(cols.contains("min=\"2\" max=\"2\" width=\"27\""));
     }
 
     #[test]

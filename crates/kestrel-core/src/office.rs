@@ -229,6 +229,13 @@ fn sheet_to_tsv(xml: &str, shared: &[String]) -> String {
                         .and_then(|(_, v)| v.split_once("</is>"))
                         .map(|(v, _)| xml_to_text(v))
                 })
+                .or_else(|| {
+                    // A formula with no cached value (Excel computes it on open):
+                    // show the formula so the reader isn't a blank cell.
+                    body.split_once("<f>")
+                        .and_then(|(_, f)| f.split_once("</f>"))
+                        .map(|(f, _)| format!("={}", xml_decode(f)))
+                })
                 .unwrap_or_default();
             let value = if is_shared {
                 raw.trim()
@@ -481,6 +488,15 @@ mod tests {
                      </sheetData></worksheet>";
         let tsv = sheet_to_tsv(sheet, &shared);
         assert_eq!(tsv, "Region\tRevenue\nKampala\t1500\n");
+    }
+
+    #[test]
+    fn formula_cells_without_a_cached_value_show_the_formula() {
+        // Excel computes formulas on open, so a freshly written sheet has <f>
+        // but no <v>; the reader must show the formula, not a blank.
+        let sheet = "<sheetData><row r=\"5\">\
+                     <c r=\"A5\"><f>SUM(B2:B4)</f></c></row></sheetData>";
+        assert_eq!(sheet_to_tsv(sheet, &[]), "=SUM(B2:B4)\n");
     }
 
     #[test]

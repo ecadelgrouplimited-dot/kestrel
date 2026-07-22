@@ -173,8 +173,19 @@ codebase cheaply.
   > slashes — .NET's `CreateFromDirectory` emits backslashes and Word rejects the
   > result as corrupt.)
 
-- **W2b — Spreadsheet intelligence.** Formulas, charts, cleaning, joins, and
-  number-reconciliation checks.
+- **W2b — Spreadsheet intelligence & provable documents.** ✅ **shipped.**
+  Spreadsheets now carry **live formulas** (`=SUM(B2:B9)` becomes a real formula
+  Excel evaluates, not text), a **bold frozen header row**, and **columns sized
+  to their content**. A new **`check_doc(path, expect)`** closes the acceptance
+  loop for Work — it re-opens what was produced and verifies the required
+  sections and figures are actually there, exactly as `check_page` does for web
+  apps. The Work prompt now treats a `check_doc` FAIL like a broken build and
+  tells the agent to use formulas rather than hard-coded totals.
+
+  *Verified visually in Excel:* `=SUM(B2:B4)` computed to **3600**, header bold,
+  columns auto-sized, sheet named, no repair prompt.
+
+- **W2c — Further data work.** Charts, cleaning, joins, multi-sheet workbooks.
 - **W3 — Research → report.** The wedge, end to end: research with citations →
   data → finished document → export to PDF/DOCX, with acceptance checks.
 - **W4 — Email.** Outlook triage, summarize, draft; **send is always
