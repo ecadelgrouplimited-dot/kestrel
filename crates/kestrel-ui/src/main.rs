@@ -249,6 +249,8 @@ struct KestrelApp {
     agent_plan: Option<kestrel_core::Plan>,
     /// What the model is saying/reasoning right now, shown while it works.
     agent_thought: String,
+    /// Files attached to the message being composed (screenshots, PDFs, …).
+    attachments: Vec<PathBuf>,
     /// When the current run started, for the live clock.
     agent_started: Option<std::time::Instant>,
     /// Session cost when the run began, so we can price just this run.
@@ -377,6 +379,7 @@ impl Default for KestrelApp {
             agent_activity: String::new(),
             agent_plan: None,
             agent_thought: String::new(),
+            attachments: Vec::new(),
             agent_started: None,
             run_start_cost: 0.0,
             last_run: None,
@@ -490,6 +493,112 @@ impl KestrelApp {
                 }
             }
         }
+    }
+
+    /// The attachment row above the compose box: a paperclip, and a chip per
+    /// attached file. Documents are read into the prompt; images go to the model
+    /// as pixels — the chip says which, so there's no guessing.
+    fn attachments_ui(&mut self, ui: &mut egui::Ui) {
+        let mut remove: Option<usize> = None;
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .button("📎 Attach")
+                .on_hover_text("Attach screenshots, PDFs, Word/Excel files — or just drag them in")
+                .clicked()
+            {
+                if let Some(files) = rfd::FileDialog::new()
+                    .set_title("Attach files")
+                    .pick_files()
+                {
+                    for f in files {
+                        self.attach(f);
+                    }
+                }
+            }
+            for (i, path) in self.attachments.iter().enumerate() {
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| path.display().to_string());
+                let (icon, tip) = match kestrel_core::classify(path) {
+                    kestrel_core::AttachmentKind::Image => ("🖼", "sent to the model as an image"),
+                    kestrel_core::AttachmentKind::Document => {
+                        ("📄", "text extracted into your message")
+                    }
+                    kestrel_core::AttachmentKind::Unsupported => {
+                        ("⚠", "unsupported file type — it will be skipped")
+                    }
+                };
+                ui.group(|ui| {
+                    ui.label(egui::RichText::new(format!("{icon} {name}")).small())
+                        .on_hover_text(format!("{}\n{tip}", path.display()));
+                    if ui.small_button("✕").clicked() {
+                        remove = Some(i);
+                    }
+                });
+            }
+        });
+        if let Some(i) = remove {
+            self.attachments.remove(i);
+        }
+    }
+
+    /// Add a file to the pending attachments, ignoring duplicates.
+    fn attach(&mut self, path: PathBuf) {
+        if !self.attachments.contains(&path) {
+            if kestrel_core::classify(&path) == kestrel_core::AttachmentKind::Unsupported {
+                self.status = format!(
+                    "{} can't be attached — images, PDFs, Office files and text are supported.",
+                    path.display()
+                );
+                return;
+            }
+            self.attachments.push(path);
+        }
+    }
+
+    /// Accept files dropped anywhere on the window.
+    fn absorb_dropped_files(&mut self, ctx: &egui::Context) {
+        let dropped: Vec<PathBuf> = ctx.input(|i| {
+            i.raw
+                .dropped_files
+                .iter()
+                .filter_map(|f| f.path.clone())
+                .collect()
+        });
+        for path in dropped {
+            self.attach(path);
+        }
+    }
+
+    /// Turn the pending attachments into prompt text (documents) and images,
+    /// clearing them. Anything unreadable is reported rather than silently lost.
+    fn take_attachments(&mut self) -> (String, Vec<kestrel_core::ImageAttachment>) {
+        let mut context = String::new();
+        let mut images = Vec::new();
+        let mut problems = Vec::new();
+        for path in std::mem::take(&mut self.attachments) {
+            match kestrel_core::classify(&path) {
+                kestrel_core::AttachmentKind::Image => match kestrel_core::load_image(&path) {
+                    Ok(img) => images.push(img),
+                    Err(err) => problems.push(err),
+                },
+                kestrel_core::AttachmentKind::Document => {
+                    match kestrel_core::document_context(&path) {
+                        Ok(block) => {
+                            context.push_str(&block);
+                            context.push_str("\n\n");
+                        }
+                        Err(err) => problems.push(format!("{}: {err}", path.display())),
+                    }
+                }
+                kestrel_core::AttachmentKind::Unsupported => {}
+            }
+        }
+        if !problems.is_empty() {
+            self.chat_error = problems.join("  ·  ");
+        }
+        (context, images)
     }
 
     /// The permission prompt: when the agent wants to run a command/install/git
@@ -781,6 +890,7 @@ impl eframe::App for KestrelApp {
         self.restore_modal(ctx);
         self.workflow_editor(ctx);
         self.approval_modal(ctx);
+        self.absorb_dropped_files(ctx);
 
         egui::TopBottomPanel::top("controls").show(ctx, |ui| {
             ui.add_space(6.0);
@@ -3516,6 +3626,8 @@ impl KestrelApp {
             ui.colored_label(egui::Color32::from_rgb(220, 90, 90), &self.chat_error);
         }
 
+        self.attachments_ui(ui);
+
         ui.add_space(2.0);
         ui.horizontal(|ui| {
             let hint = if self.chat_agent_mode {
@@ -3550,7 +3662,8 @@ impl KestrelApp {
     /// Send the composed message to the active provider on a worker thread.
     fn send_chat(&mut self) {
         let text = self.chat_input.trim().to_string();
-        if text.is_empty() || self.chat_pending {
+        // Attachments alone are a valid message — "what's in this?" is implied.
+        if (text.is_empty() && self.attachments.is_empty()) || self.chat_pending {
             return;
         }
         let provider = match self.settings.active() {
@@ -3572,14 +3685,37 @@ impl KestrelApp {
 
         self.chat_error.clear();
         self.chat_input.clear();
+        // Documents become prompt text; images ride along as vision content.
+        let attached_names: Vec<String> = self
+            .attachments
+            .iter()
+            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+            .collect();
+        let (doc_context, images) = self.take_attachments();
+        // The transcript shows what the user typed plus what they attached —
+        // not the extracted text, which would swamp it.
+        let shown = if attached_names.is_empty() {
+            text.clone()
+        } else {
+            format!("{text}\n📎 {}", attached_names.join(", "))
+        };
         self.chat_history
-            .push(kestrel_core::ChatMessage::user(text.clone()));
+            .push(kestrel_core::ChatMessage::user(shown));
         self.chat_pending = true;
 
+        let prompt = if doc_context.is_empty() {
+            text
+        } else if text.is_empty() {
+            format!("{doc_context}Look at the attached file(s) above and tell me what matters.")
+        } else {
+            format!("{doc_context}{text}")
+        };
+
         if self.chat_agent_mode {
-            self.start_agent(text, provider);
+            self.start_agent(prompt, provider, images);
             return;
         }
+        let text = prompt;
 
         let config = provider.to_config();
         let model = provider.model.clone();
@@ -3614,7 +3750,12 @@ impl KestrelApp {
 
     /// Start the tool-using agent loop for `prompt` on a worker thread, relaying
     /// its progress to the transcript via `agent_job`.
-    fn start_agent(&mut self, prompt: String, provider: kestrel_core::ProviderSettings) {
+    fn start_agent(
+        &mut self,
+        prompt: String,
+        provider: kestrel_core::ProviderSettings,
+        images: Vec<kestrel_core::ImageAttachment>,
+    ) {
         let config = provider.to_config();
         let model = provider.model.clone();
         // Work runs in its own scoped folder; Build runs in the project.
@@ -3668,6 +3809,7 @@ impl KestrelApp {
                 &policy,
                 &cancel,
                 profile,
+                images,
                 history,
                 |event| {
                     let update = match event {

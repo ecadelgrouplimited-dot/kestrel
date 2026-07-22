@@ -436,7 +436,17 @@ pub struct ToolResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AgentMessage {
     User(String),
-    Assistant { text: String, calls: Vec<ToolCall> },
+    /// A user message carrying images — a pasted screenshot, a photo of a
+    /// whiteboard. A separate variant rather than a field on `User` so sessions
+    /// written before attachments existed still deserialize.
+    UserWithImages {
+        text: String,
+        images: Vec<crate::media::ImageAttachment>,
+    },
+    Assistant {
+        text: String,
+        calls: Vec<ToolCall>,
+    },
     ToolResults(Vec<ToolResult>),
 }
 
@@ -569,6 +579,25 @@ fn anthropic_message(message: &AgentMessage) -> serde_json::Value {
             "role": "user",
             "content": [{ "type": "text", "text": text }],
         }),
+        AgentMessage::UserWithImages { text, images } => {
+            // Images first: models attend to them better when they precede the
+            // question that refers to them.
+            let mut content: Vec<serde_json::Value> = images
+                .iter()
+                .map(|img| {
+                    serde_json::json!({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": img.media_type,
+                            "data": img.data_base64,
+                        },
+                    })
+                })
+                .collect();
+            content.push(serde_json::json!({ "type": "text", "text": text }));
+            serde_json::json!({ "role": "user", "content": content })
+        }
         AgentMessage::Assistant { text, calls } => {
             let mut content = Vec::new();
             if !text.is_empty() {
@@ -604,6 +633,22 @@ fn openai_messages(message: &AgentMessage, out: &mut Vec<serde_json::Value>) {
     match message {
         AgentMessage::User(text) => {
             out.push(serde_json::json!({ "role": "user", "content": text }))
+        }
+        AgentMessage::UserWithImages { text, images } => {
+            // OpenAI-compatible vision takes data URIs in an image_url part.
+            let mut content: Vec<serde_json::Value> = images
+                .iter()
+                .map(|img| {
+                    serde_json::json!({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": format!("data:{};base64,{}", img.media_type, img.data_base64),
+                        },
+                    })
+                })
+                .collect();
+            content.push(serde_json::json!({ "type": "text", "text": text }));
+            out.push(serde_json::json!({ "role": "user", "content": content }));
         }
         AgentMessage::Assistant { text, calls } => {
             let tool_calls: Vec<serde_json::Value> = calls
@@ -1223,6 +1268,37 @@ mod tests {
         assert_eq!(turn.calls.len(), 1);
         assert_eq!(turn.calls[0].name, "read_file");
         assert_eq!(turn.calls[0].input["path"], "a.rs");
+    }
+
+    #[test]
+    fn attached_images_become_vision_blocks_for_both_api_shapes() {
+        let messages = vec![AgentMessage::UserWithImages {
+            text: "What's wrong in this screenshot?".to_string(),
+            images: vec![crate::media::ImageAttachment {
+                media_type: "image/png".to_string(),
+                data_base64: "Zm9vYmFy".to_string(),
+            }],
+        }];
+        let tools: Vec<ToolSpec> = Vec::new();
+
+        // Anthropic: a base64 image source block, then the question.
+        let a = build_agent_body(ProviderKind::Anthropic, "m", 100, None, &messages, &tools);
+        let content = &a["messages"][0]["content"];
+        assert_eq!(content[0]["type"], "image");
+        assert_eq!(content[0]["source"]["type"], "base64");
+        assert_eq!(content[0]["source"]["media_type"], "image/png");
+        assert_eq!(content[0]["source"]["data"], "Zm9vYmFy");
+        assert_eq!(content[1]["type"], "text");
+
+        // OpenAI-compatible: an image_url part carrying a data URI.
+        let o = build_agent_body(ProviderKind::Openai, "m", 100, None, &messages, &tools);
+        let content = &o["messages"][0]["content"];
+        assert_eq!(content[0]["type"], "image_url");
+        assert_eq!(
+            content[0]["image_url"]["url"],
+            "data:image/png;base64,Zm9vYmFy"
+        );
+        assert_eq!(content[1]["text"], "What's wrong in this screenshot?");
     }
 
     #[test]

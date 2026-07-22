@@ -11,6 +11,7 @@ pub mod format;
 pub mod graph;
 pub mod inspect;
 pub mod mail;
+pub mod media;
 pub mod memory;
 pub mod office;
 pub mod plan;
@@ -68,6 +69,9 @@ pub use inspect::{
     LanguageSummary, ProjectInspection, ProjectMarker, SymbolSummary,
 };
 pub use mail::{draft_message, list_inbox, read_message, send_message, MailSummary};
+pub use media::{
+    base64_encode, classify, document_context, load_image, AttachmentKind, ImageAttachment,
+};
 pub use memory::{load_memory, remember, render_memory, save_memory, MemoryNote};
 pub use office::{kind_for, read_document, DocKind};
 pub use plan::{

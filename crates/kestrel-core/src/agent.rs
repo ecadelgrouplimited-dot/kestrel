@@ -2458,6 +2458,11 @@ fn audit_line(content: &str) -> String {
 fn message_bytes(message: &AgentMessage) -> usize {
     match message {
         AgentMessage::User(text) => text.len(),
+        // Base64 image data dwarfs the text, and it counts against the window
+        // as tokens, so include it or compaction will badly under-estimate.
+        AgentMessage::UserWithImages { text, images } => {
+            text.len() + images.iter().map(|i| i.data_base64.len()).sum::<usize>()
+        }
         AgentMessage::Assistant { text, calls } => {
             text.len()
                 + calls
@@ -2628,6 +2633,7 @@ pub fn run_agent(
     policy: &crate::policy::Policy,
     cancel: &std::sync::atomic::AtomicBool,
     profile: Profile,
+    images: Vec<crate::media::ImageAttachment>,
     history: Vec<AgentMessage>,
     mut on_event: impl FnMut(AgentEvent),
     mut approve: impl FnMut(&ToolCall) -> bool,
@@ -2643,6 +2649,7 @@ pub fn run_agent(
         policy,
         cancel,
         profile,
+        images,
         history,
         &mut on_event,
         &mut approve,
@@ -2664,6 +2671,7 @@ fn run_agent_inner(
     policy: &crate::policy::Policy,
     cancel: &std::sync::atomic::AtomicBool,
     profile: Profile,
+    images: Vec<crate::media::ImageAttachment>,
     mut history: Vec<AgentMessage>,
     on_event: &mut dyn FnMut(AgentEvent),
     approve: &mut dyn FnMut(&ToolCall) -> bool,
@@ -2671,7 +2679,14 @@ fn run_agent_inner(
     use std::sync::atomic::Ordering;
     let system = system_prompt_for(profile, root);
     let tools = tools_for(profile);
-    history.push(AgentMessage::User(user_prompt.to_string()));
+    history.push(if images.is_empty() {
+        AgentMessage::User(user_prompt.to_string())
+    } else {
+        AgentMessage::UserWithImages {
+            text: user_prompt.to_string(),
+            images,
+        }
+    });
     let mut reviewed = !review;
     let mut total_usage = Usage::default();
     // The task plan — only the top-level agent owns the shared ledger; sub-agents
@@ -2865,6 +2880,9 @@ fn run_agent_inner(
                         policy,
                         cancel,
                         profile,
+                        // A sub-agent gets a fresh text-only brief; re-sending
+                        // the parent's images would just re-bill them.
+                        Vec::new(),
                         Vec::new(),
                         &mut |ev| match ev {
                             AgentEvent::Assistant(t) => {
