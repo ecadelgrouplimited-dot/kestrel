@@ -4205,6 +4205,273 @@ fn human_tokens(n: usize) -> String {
     }
 }
 
+/// One piece of inline markdown.
+enum Span<'a> {
+    Text(&'a str),
+    Bold(&'a str),
+    Italic(&'a str),
+    Code(&'a str),
+}
+
+/// Split a line into styled runs: `**bold**`, `*italic*`, `` `code` ``.
+fn parse_inline(line: &str) -> Vec<Span<'_>> {
+    let mut spans = Vec::new();
+    let mut plain_start = 0;
+    let mut i = 0;
+    while i < line.len() {
+        if !line.is_char_boundary(i) {
+            i += 1;
+            continue;
+        }
+        // Longest delimiter first, so `**` never reads as two `*`.
+        let found = [("**", 2usize), ("`", 1), ("*", 1)]
+            .iter()
+            .find_map(|(delim, len)| {
+                if line[i..].starts_with(delim) {
+                    let rest = &line[i + len..];
+                    rest.find(delim)
+                        .filter(|&end| end > 0)
+                        .map(|end| (*delim, *len, end))
+                } else {
+                    None
+                }
+            });
+        if let Some((delim, len, end)) = found {
+            if plain_start < i {
+                spans.push(Span::Text(&line[plain_start..i]));
+            }
+            let inner = &line[i + len..i + len + end];
+            spans.push(match delim {
+                "**" => Span::Bold(inner),
+                "`" => Span::Code(inner),
+                _ => Span::Italic(inner),
+            });
+            i = i + len + end + len;
+            plain_start = i;
+            continue;
+        }
+        i += 1;
+    }
+    if plain_start < line.len() {
+        spans.push(Span::Text(&line[plain_start..]));
+    }
+    spans
+}
+
+/// Lay out one line of inline markdown as styled text.
+fn inline_job(ui: &egui::Ui, line: &str, size: f32, strong: bool) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::default();
+    job.wrap.max_width = ui.available_width();
+    let body = ui.visuals().text_color();
+    let accent = ui.visuals().strong_text_color();
+    let mono = egui::FontId::monospace(size * 0.94);
+    let prop = egui::FontId::proportional(size);
+    for span in parse_inline(line) {
+        let (text, mut fmt) = match span {
+            // egui has no bold weight, so emphasis reads as a brighter colour —
+            // its own idiom for `strong`.
+            Span::Bold(t) => (
+                t,
+                egui::TextFormat {
+                    font_id: prop.clone(),
+                    color: accent,
+                    ..Default::default()
+                },
+            ),
+            Span::Italic(t) => (
+                t,
+                egui::TextFormat {
+                    font_id: prop.clone(),
+                    color: body,
+                    italics: true,
+                    ..Default::default()
+                },
+            ),
+            Span::Code(t) => (
+                t,
+                egui::TextFormat {
+                    font_id: mono.clone(),
+                    color: ACCENT,
+                    background: ui.visuals().extreme_bg_color,
+                    ..Default::default()
+                },
+            ),
+            Span::Text(t) => (
+                t,
+                egui::TextFormat {
+                    font_id: prop.clone(),
+                    color: body,
+                    ..Default::default()
+                },
+            ),
+        };
+        if strong {
+            fmt.color = accent;
+        }
+        job.append(text, 0.0, fmt);
+    }
+    job
+}
+
+/// Render markdown the way a person expects to read it: headings as headings,
+/// `**bold**` as emphasis, tables as tables, fenced code syntax-highlighted —
+/// instead of a wall of raw asterisks and pipes.
+fn markdown_ui(ui: &mut egui::Ui, text: &str, id: usize) {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        let trimmed = line.trim_end();
+
+        // Fenced code — highlighted with the same engine as the editor.
+        if let Some(fence) = trimmed.trim_start().strip_prefix("```") {
+            let language = language_from_fence(fence.trim());
+            let mut code = String::new();
+            i += 1;
+            while i < lines.len() && !lines[i].trim_start().starts_with("```") {
+                code.push_str(lines[i]);
+                code.push('\n');
+                i += 1;
+            }
+            i += 1; // closing fence
+            let dark = ui.visuals().dark_mode;
+            let font = egui::TextStyle::Monospace.resolve(ui.style());
+            let job = code_layout(code.trim_end(), language, dark, font);
+            egui::Frame::none()
+                .fill(ui.visuals().extreme_bg_color)
+                .rounding(4.0)
+                .inner_margin(egui::Margin::symmetric(8.0, 6.0))
+                .show(ui, |ui| {
+                    ui.add(egui::Label::new(job).selectable(true));
+                });
+            ui.add_space(4.0);
+            continue;
+        }
+
+        // Tables — a run of pipe rows becomes a real grid.
+        if trimmed.trim_start().starts_with('|') {
+            let mut rows: Vec<Vec<String>> = Vec::new();
+            while i < lines.len() && lines[i].trim_start().starts_with('|') {
+                let cells: Vec<String> = lines[i]
+                    .trim()
+                    .trim_matches('|')
+                    .split('|')
+                    .map(|c| c.trim().to_string())
+                    .collect();
+                // Drop the |---|---| separator row.
+                let is_rule = cells.iter().all(|c| {
+                    !c.is_empty() && c.chars().all(|ch| ch == '-' || ch == ':' || ch == ' ')
+                });
+                if !is_rule {
+                    rows.push(cells);
+                }
+                i += 1;
+            }
+            if !rows.is_empty() {
+                let columns = rows.iter().map(|r| r.len()).max().unwrap_or(1);
+                ui.add_space(4.0);
+                egui::Grid::new(("md-table", id, i))
+                    .striped(true)
+                    .num_columns(columns)
+                    .spacing([14.0, 5.0])
+                    .show(ui, |ui| {
+                        for (r, row) in rows.iter().enumerate() {
+                            for cell in row {
+                                ui.add(egui::Label::new(inline_job(ui, cell, 13.0, r == 0)));
+                            }
+                            ui.end_row();
+                        }
+                    });
+                ui.add_space(6.0);
+            }
+            continue;
+        }
+
+        i += 1;
+        let content = trimmed.trim_start();
+        if content.is_empty() {
+            ui.add_space(5.0);
+            continue;
+        }
+        // Horizontal rule.
+        if content == "---" || content == "***" || content == "___" {
+            ui.add_space(3.0);
+            ui.separator();
+            continue;
+        }
+        // Headings, sized by depth.
+        let heading = ["#### ", "### ", "## ", "# "]
+            .iter()
+            .find_map(|h| content.strip_prefix(h).map(|rest| (h.len() - 1, rest)));
+        if let Some((depth, rest)) = heading {
+            let size = match depth {
+                1 => 19.0,
+                2 => 16.5,
+                3 => 14.5,
+                _ => 13.5,
+            };
+            ui.add_space(if depth <= 2 { 8.0 } else { 5.0 });
+            ui.add(egui::Label::new(inline_job(ui, rest, size, true)));
+            ui.add_space(2.0);
+            continue;
+        }
+        // Block quote.
+        if let Some(rest) = content.strip_prefix("> ") {
+            ui.horizontal(|ui| {
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new("▏").color(ACCENT));
+                ui.add(egui::Label::new(inline_job(ui, rest, 13.0, false)));
+            });
+            continue;
+        }
+        // Bullets and numbered items.
+        let bullet = content
+            .strip_prefix("- ")
+            .or_else(|| content.strip_prefix("* "))
+            .map(|rest| ("•".to_string(), rest))
+            .or_else(|| {
+                let (num, rest) = content.split_once(". ")?;
+                num.chars()
+                    .all(|c| c.is_ascii_digit())
+                    .then(|| (format!("{num}."), rest))
+            });
+        if let Some((marker, rest)) = bullet {
+            ui.horizontal_top(|ui| {
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new(marker).color(ACCENT).size(13.0));
+                ui.add(egui::Label::new(inline_job(ui, rest, 13.5, false)));
+            });
+            continue;
+        }
+        ui.add(egui::Label::new(inline_job(ui, content, 13.5, false)).selectable(true));
+    }
+}
+
+/// Map a fence tag (```rust) to a highlighting language.
+fn language_from_fence(tag: &str) -> kestrel_core::Language {
+    let tag = tag.trim().to_ascii_lowercase();
+    let name = tag.split_whitespace().next().unwrap_or("");
+    language_for(&format!("x.{}", fence_extension(name)))
+}
+
+/// The file extension a fence tag corresponds to.
+fn fence_extension(tag: &str) -> &str {
+    match tag {
+        "rust" | "rs" => "rs",
+        "typescript" | "ts" => "ts",
+        "tsx" => "tsx",
+        "javascript" | "js" => "js",
+        "python" | "py" => "py",
+        "json" => "json",
+        "html" => "html",
+        "css" => "css",
+        "toml" => "toml",
+        "yaml" | "yml" => "yaml",
+        "md" | "markdown" => "md",
+        other => other,
+    }
+}
+
 /// What a finished run produced, shown as a closing card.
 struct RunSummary {
     files: usize,
@@ -4291,10 +4558,10 @@ fn entry_ui(ui: &mut egui::Ui, content: &str, index: usize) {
         return;
     }
 
-    // Otherwise it's the model talking — give it room and a readable face.
+    // Otherwise it's the model talking — render its markdown properly.
     ui.add_space(10.0);
     ui.label(egui::RichText::new("🦅 Kestrel").strong().color(ACCENT));
-    ui.add(egui::Label::new(egui::RichText::new(content)).selectable(true));
+    markdown_ui(ui, content, index);
 }
 
 /// The closing card for a finished run: what came out of it, at a glance.

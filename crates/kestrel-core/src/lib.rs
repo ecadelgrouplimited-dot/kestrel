@@ -42,7 +42,9 @@ pub use agent::{
     work_system_prompt, AgentEvent, AgentOutcome, AgentSession, AppliedEdit, Checkpoint, FileEdit,
     GitReview, Profile,
 };
-pub use browser::{find_browser, missing_content, render_dom};
+pub use browser::{
+    failed_metrics, find_browser, find_metric, missing_content, render_dom, MetricCheck,
+};
 pub use codenav::{
     find_definitions, find_references, outline, rename_symbol, DefHit, RefHit, RenameResult,
 };

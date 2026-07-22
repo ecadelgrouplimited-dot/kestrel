@@ -384,6 +384,11 @@ pub fn agent_loop_system_prompt(root: &Path) -> String {
          server, then check_page(url, expect=[...]) to render the page in a real browser and \
          confirm the expected content is actually there. Treat a check_page FAIL like a build \
          failure: read the output, fix it, restart, and re-check until it passes.\n\n\
+         MEASURE NUMERIC TARGETS, don't just implement them. If the request names a number — \
+         60fps, under 2s, zero errors — surface it on the page and assert it with \
+         check_page(measure=[{{\"label\":\"FPS\",\"min\":55}}]). Writing the optimisation is not \
+         evidence that the target was met; the measurement is. Never claim a numeric requirement \
+         is satisfied without having measured it.\n\n\
          When you are finished, stop calling tools and reply with a short summary of what you \
          built and what verification showed.\n\n\
          {}{}The current project root is: {}",
@@ -716,6 +721,24 @@ pub fn builtin_tools() -> Vec<ToolSpec> {
                         "type": "array",
                         "items": { "type": "string" },
                         "description": "Substrings that must appear on the rendered page.",
+                    },
+                    "measure": {
+                        "type": "array",
+                        "description": "Numeric targets read off the page — use these for \
+                                        performance or count requirements so a target is \
+                                        MEASURED, not merely implemented.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "label": {
+                                    "type": "string",
+                                    "description": "On-screen label before the value, e.g. FPS.",
+                                },
+                                "min": { "type": "number" },
+                                "max": { "type": "number" },
+                            },
+                            "required": ["label"],
+                        },
                     },
                 },
                 "required": ["url"],
@@ -1102,25 +1125,27 @@ pub fn execute_tool(root: &Path, call: &ToolCall) -> String {
                 return format!("Could not load {url}: {body}");
             }
             let missing = crate::browser::missing_content(&body, &expects);
-            let mut out = if expects.is_empty() {
+            // Numeric targets are measured off the page, not taken on trust.
+            let measures = metric_checks(call.input.get("measure"));
+            let text = strip_html_lite(&body);
+            let bad_metrics = crate::browser::failed_metrics(&text, &measures);
+            let mut problems: Vec<String> =
+                missing.iter().map(|m| format!("missing \"{m}\"")).collect();
+            problems.extend(bad_metrics);
+
+            let mut out = if expects.is_empty() && measures.is_empty() {
                 format!("Loaded {url} — {how}, {} bytes.\n", body.len())
-            } else if missing.is_empty() {
+            } else if problems.is_empty() {
                 format!(
-                    "✅ PASS — {url} ({how}): all {} expected item(s) present.\n",
-                    expects.len()
+                    "✅ PASS — {url} ({how}): {} content check(s) and {} measurement(s) all good.\n",
+                    expects.len(),
+                    measures.len()
                 )
             } else {
-                format!(
-                    "❌ FAIL — {url} ({how}): missing {}.\n",
-                    missing
-                        .iter()
-                        .map(|m| format!("\"{m}\""))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
+                format!("❌ FAIL — {url} ({how}): {}.\n", problems.join("; "))
             };
             // A little context to help the agent debug a failure.
-            out.push_str(&tail(&strip_html_lite(&body), 800));
+            out.push_str(&tail(&text, 800));
             cap(out)
         }
         "web_search" => match crate::websearch::web_search(&arg("query"), 8) {
@@ -1714,6 +1739,29 @@ fn run_shell(root: &Path, command: &str, timeout: Duration) -> String {
 
 /// Search the project's text files for `query` (case-insensitive substring),
 /// returning up to `max` `path:line: text` matches. Build/VCS dirs are skipped.
+/// Parse a `measure` tool argument into numeric assertions.
+fn metric_checks(value: Option<&serde_json::Value>) -> Vec<crate::browser::MetricCheck> {
+    value
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|m| {
+                    let label = m.get("label").and_then(|v| v.as_str())?.to_string();
+                    if label.trim().is_empty() {
+                        return None;
+                    }
+                    Some(crate::browser::MetricCheck {
+                        label,
+                        min: m.get("min").and_then(|v| v.as_f64()),
+                        max: m.get("max").and_then(|v| v.as_f64()),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Parse a `formats` tool argument into per-column cell formats.
 fn column_formats(value: Option<&serde_json::Value>) -> Vec<crate::docwrite::CellFormat> {
     value
