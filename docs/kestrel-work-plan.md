@@ -195,13 +195,36 @@ codebase cheaply.
   *Verified visually in Excel:* a two-tab workbook with a titled bar chart over
   four regions, correct axis scaling, and a cross-sheet total — no repair prompt.
 
-- **W2d — Further data work.** Cleaning, joins, pivots, conditional formatting.
-- **W3 — Research → report.** The wedge, end to end: research with citations →
-  data → finished document → export to PDF/DOCX, with acceptance checks.
-- **W4 — Email.** Outlook triage, summarize, draft; **send is always
-  permission-gated**.
-- **W5 — Desktop control.** App launch/focus, light UI automation. Heavily gated,
-  last because it's the most fragile and highest-blast-radius.
+- **W2d — Presentation formatting.** ✅ **shipped.** Per-column number formats
+  (`number`, `integer`, `percent`, `date`) and an **auto-filter** on the header
+  row, so a produced sheet is immediately sortable and filterable. Cleaning,
+  joins, and pivots are handled by the agent's own reasoning — it reads the data,
+  transforms it, and writes the result — rather than by dedicated tools.
+- **W3 — Research → report.** ✅ **shipped** (as the composition of W1–W2c plus
+  `check_doc`). The full wedge runs today: research with citations → data →
+  Word report + charted workbook → verified before it's called finished. See
+  [work-demos.md](work-demos.md) prompt 8 for the end-to-end demo.
+- **W4 — Email.** ✅ **shipped.** `list_mail` / `read_mail` / `draft_mail` /
+  `send_mail` through the user's own Outlook (MAPI over PowerShell). Drafts are
+  **saved to Drafts, never sent**; `send_mail` is confirmed **every time, even
+  when permission prompts are switched off** — an irreversible outward action
+  never happens silently. Outlook is never `Quit()` (COM returns the user's
+  running instance), with the same timeout + drained-pipe safety as the document
+  modules, and errors explain themselves ("Outlook isn't installed", "no mail
+  profile configured").
+- **W5 — Desktop.** 🟡 `open_file(path)` opens a finished document in its default
+  application, so the agent can show its work. Deeper UI automation
+  (window control, clicking) remains deliberately unbuilt: it is fragile and
+  high-blast-radius, and nothing so far has needed it.
+
+## Status
+
+**Kestrel Work is feature-complete for its wedge.** It researches, reads real
+documents, computes, produces polished Word and Excel artifacts, verifies them,
+handles mail, and shows you the result — in a folder you choose, with the
+planner, memory, sub-agents, permissions, and budgets inherited from Build.
+
+Twelve recording-ready demo prompts: [work-demos.md](work-demos.md).
 
 ## Trust & safety — mandatory here, and already built
 

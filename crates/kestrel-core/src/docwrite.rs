@@ -25,11 +25,62 @@ pub fn write_docx(path: &Path, markdown: &str) -> Result<(), String> {
     zip_parts(path, &parts)
 }
 
-/// One sheet of a workbook: a tab name and its CSV/TSV rows.
+/// How a column's numbers should be displayed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CellFormat {
+    General,
+    /// Thousands separator, two decimals — money and measurements.
+    Number,
+    /// Thousands separator, no decimals — counts.
+    Integer,
+    /// `0.0%` — note Excel shows 0.15 as 15%.
+    Percent,
+    /// `yyyy-mm-dd`.
+    Date,
+}
+
+impl CellFormat {
+    /// Parse a model-supplied column format.
+    pub fn parse(name: &str) -> Self {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "number" | "decimal" | "money" | "currency" => CellFormat::Number,
+            "integer" | "int" | "count" | "whole" => CellFormat::Integer,
+            "percent" | "percentage" | "pct" => CellFormat::Percent,
+            "date" => CellFormat::Date,
+            _ => CellFormat::General,
+        }
+    }
+    /// The index into `cellXfs` (0 general, 1 bold header, then the formats).
+    fn style_index(self) -> usize {
+        match self {
+            CellFormat::General => 0,
+            CellFormat::Number => 2,
+            CellFormat::Integer => 3,
+            CellFormat::Percent => 4,
+            CellFormat::Date => 5,
+        }
+    }
+}
+
+/// One sheet of a workbook: a tab name, its CSV/TSV rows, and optional
+/// per-column number formats.
 #[derive(Debug, Clone)]
 pub struct Sheet {
     pub name: String,
     pub data: String,
+    /// Format per column, left to right. Missing entries default to General.
+    pub formats: Vec<CellFormat>,
+}
+
+impl Sheet {
+    /// A sheet with default formatting.
+    pub fn new(name: impl Into<String>, data: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            data: data.into(),
+            formats: Vec::new(),
+        }
+    }
 }
 
 /// The shape of an embedded chart.
@@ -71,14 +122,7 @@ pub struct Chart {
 
 /// Write delimited `data` (CSV or TSV) to `path` as a single-sheet workbook.
 pub fn write_xlsx(path: &Path, data: &str, sheet_name: &str) -> Result<(), String> {
-    write_workbook(
-        path,
-        &[Sheet {
-            name: sheet_name.to_string(),
-            data: data.to_string(),
-        }],
-        None,
-    )
+    write_workbook(path, &[Sheet::new(sheet_name, data)], None)
 }
 
 /// Write a workbook of one or more sheets, optionally charting the first one.
@@ -86,7 +130,9 @@ pub fn write_workbook(path: &Path, sheets: &[Sheet], chart: Option<&Chart>) -> R
     if sheets.is_empty() {
         return Err("no sheets to write".to_string());
     }
-    let parsed: Vec<(String, Vec<Vec<String>>)> = sheets
+    /// A sheet ready to serialise: tab name, parsed rows, column formats.
+    type Prepared<'a> = (String, Vec<Vec<String>>, &'a [CellFormat]);
+    let parsed: Vec<Prepared<'_>> = sheets
         .iter()
         .enumerate()
         .map(|(i, s)| {
@@ -95,10 +141,10 @@ pub fn write_workbook(path: &Path, sheets: &[Sheet], chart: Option<&Chart>) -> R
             } else {
                 sanitize_sheet_name(&s.name)
             };
-            (name, parse_delimited(&s.data))
+            (name, parse_delimited(&s.data), s.formats.as_slice())
         })
         .collect();
-    if parsed.iter().all(|(_, rows)| rows.is_empty()) {
+    if parsed.iter().all(|(_, rows, _)| rows.is_empty()) {
         return Err("no rows to write".to_string());
     }
     // A chart needs at least a header plus one data row.
@@ -117,19 +163,19 @@ pub fn write_workbook(path: &Path, sheets: &[Sheet], chart: Option<&Chart>) -> R
         ("xl/styles.xml".into(), XLSX_STYLES.to_string()),
         (
             "xl/workbook.xml".into(),
-            workbook_xml(&parsed.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>()),
+            workbook_xml(&parsed.iter().map(|(n, _, _)| n.clone()).collect::<Vec<_>>()),
         ),
     ];
-    for (i, (_, rows)) in parsed.iter().enumerate() {
+    for (i, (_, rows, formats)) in parsed.iter().enumerate() {
         // Only the first sheet carries the drawing that hosts the chart.
         let has_chart = chart.is_some() && i == 0;
         parts.push((
             format!("xl/worksheets/sheet{}.xml", i + 1),
-            sheet_xml(rows, has_chart),
+            sheet_xml(rows, has_chart, formats),
         ));
     }
     if let Some(chart) = chart {
-        let (name, rows) = &parsed[0];
+        let (name, rows, _) = &parsed[0];
         parts.push((
             "xl/worksheets/_rels/sheet1.xml.rels".into(),
             SHEET_DRAWING_RELS.to_string(),
@@ -398,14 +444,27 @@ pub fn column_name(mut index: usize) -> String {
 
 /// Build `xl/worksheets/sheet1.xml`: a frozen bold header, columns sized to the
 /// content, numbers stored as numbers, and `=` cells written as live formulas.
-fn sheet_xml(rows: &[Vec<String>], has_chart: bool) -> String {
+fn sheet_xml(rows: &[Vec<String>], has_chart: bool, formats: &[CellFormat]) -> String {
     let mut body = String::new();
     for (r, row) in rows.iter().enumerate() {
         body.push_str(&format!("<row r=\"{}\">", r + 1));
         for (c, cell) in row.iter().enumerate() {
             let reference = format!("{}{}", column_name(c), r + 1);
-            // Row 1 uses the bold style so the header stands out.
-            let style = if r == 0 { " s=\"1\"" } else { "" };
+            // Row 1 uses the bold style; data rows use the column's format.
+            let style_index = if r == 0 {
+                1
+            } else {
+                formats
+                    .get(c)
+                    .copied()
+                    .unwrap_or(CellFormat::General)
+                    .style_index()
+            };
+            let style = if style_index == 0 {
+                String::new()
+            } else {
+                format!(" s=\"{style_index}\"")
+            };
             if let Some(formula) = cell.strip_prefix('=') {
                 // A live formula — Excel evaluates it on open.
                 body.push_str(&format!(
@@ -430,8 +489,17 @@ fn sheet_xml(rows: &[Vec<String>], has_chart: bool) -> String {
          <sheetViews><sheetView workbookViewId=\"0\">\
          <pane ySplit=\"1\" topLeftCell=\"A2\" activePane=\"bottomLeft\" state=\"frozen\"/>\
          </sheetView></sheetViews>\
-         {cols}<sheetData>{body}</sheetData>{drawing}</worksheet>",
+         {cols}<sheetData>{body}</sheetData>{filter}{drawing}</worksheet>",
         cols = cols_xml(rows),
+        // Header filter dropdowns. Must sit after sheetData, before the drawing.
+        filter = match (rows.first(), rows.len()) {
+            (Some(header), len) if len > 1 && !header.is_empty() => format!(
+                "<autoFilter ref=\"A1:{}{}\"/>",
+                column_name(header.len() - 1),
+                len
+            ),
+            _ => String::new(),
+        },
         // `drawing` must come after sheetData — Excel enforces element order.
         drawing = if has_chart {
             "<drawing xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" r:id=\"rId1\"/>"
@@ -813,6 +881,12 @@ xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">
 /// requires the first two fills to be `none` and `gray125`.
 const XLSX_STYLES: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
 <styleSheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">\
+<numFmts count=\"4\">\
+<numFmt numFmtId=\"164\" formatCode=\"#,##0.00\"/>\
+<numFmt numFmtId=\"165\" formatCode=\"#,##0\"/>\
+<numFmt numFmtId=\"166\" formatCode=\"0.0%\"/>\
+<numFmt numFmtId=\"167\" formatCode=\"yyyy\\-mm\\-dd\"/>\
+</numFmts>\
 <fonts count=\"2\">\
 <font><sz val=\"11\"/><name val=\"Calibri\"/></font>\
 <font><b/><sz val=\"11\"/><name val=\"Calibri\"/></font>\
@@ -823,9 +897,13 @@ const XLSX_STYLES: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\
 </fills>\
 <borders count=\"1\"><border><left/><right/><top/><bottom/><diagonal/></border></borders>\
 <cellStyleXfs count=\"1\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\"/></cellStyleXfs>\
-<cellXfs count=\"2\">\
+<cellXfs count=\"6\">\
 <xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\"/>\
 <xf numFmtId=\"0\" fontId=\"1\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyFont=\"1\"/>\
+<xf numFmtId=\"164\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyNumberFormat=\"1\"/>\
+<xf numFmtId=\"165\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyNumberFormat=\"1\"/>\
+<xf numFmtId=\"166\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyNumberFormat=\"1\"/>\
+<xf numFmtId=\"167\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyNumberFormat=\"1\"/>\
 </cellXfs></styleSheet>";
 
 const XLSX_ROOT_RELS: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
@@ -888,7 +966,7 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[1], vec!["Kampala", "1500"]);
 
-        let xml = sheet_xml(&rows, false);
+        let xml = sheet_xml(&rows, false, &[]);
         // Text is inline; numbers are stored as numbers so Excel can sum them.
         assert!(xml.contains("t=\"inlineStr\""));
         assert!(xml.contains("<c r=\"B2\"><v>1500</v></c>"));
@@ -898,7 +976,7 @@ mod tests {
     fn formulas_header_and_layout() {
         let rows =
             parse_delimited("Region,Revenue\nKampala,1500\nNairobi,900\nTotal,=SUM(B2:B3)\n");
-        let xml = sheet_xml(&rows, false);
+        let xml = sheet_xml(&rows, false, &[]);
         // `=` becomes a live formula Excel evaluates, not text.
         assert!(xml.contains("<f>SUM(B2:B3)</f>"), "formula missing: {xml}");
         assert!(!xml.contains("=SUM"), "formula must not be stored as text");
@@ -965,8 +1043,8 @@ mod tests {
         assert!(types.contains("/xl/charts/chart1.xml"));
         assert!(!xlsx_content_types(2, false).contains("chart1.xml"));
         // The drawing reference belongs after sheetData, and only when charted.
-        assert!(sheet_xml(&[vec!["a".into()]], true).contains("<drawing"));
-        assert!(!sheet_xml(&[vec!["a".into()]], false).contains("<drawing"));
+        assert!(sheet_xml(&[vec!["a".into()]], true, &[]).contains("<drawing"));
+        assert!(!sheet_xml(&[vec!["a".into()]], false, &[]).contains("<drawing"));
     }
 
     #[test]

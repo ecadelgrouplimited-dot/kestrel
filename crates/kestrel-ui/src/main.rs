@@ -3565,7 +3565,12 @@ impl KestrelApp {
                     // Permission gate. Auto-allow when the setting is off, once
                     // "Allow all" is chosen, or for anything but system-touching
                     // tools. Otherwise ask the user and block for their answer.
-                    if !ask_permission || allow_all || !tool_needs_permission(&call.name) {
+                    // Irreversible outward actions (sending mail) always ask.
+                    let always = tool_always_needs_permission(&call.name);
+                    if !always && (!ask_permission || allow_all) {
+                        return true;
+                    }
+                    if !tool_needs_permission(&call.name) {
                         return true;
                     }
                     let _ = approve_events.send(AgentUpdate::ApprovalRequest(
@@ -4127,7 +4132,14 @@ fn tool_needs_permission(name: &str) -> bool {
     matches!(
         name,
         "run_command" | "install_tool" | "git" | "start_app" | "stop_app"
-    )
+    ) || tool_always_needs_permission(name)
+}
+
+/// Actions that are irreversible and leave the machine — these are confirmed
+/// **every time**, even when the "ask permission" setting is off. Sending mail
+/// on someone's behalf can't be undone, so it never happens silently.
+fn tool_always_needs_permission(name: &str) -> bool {
+    matches!(name, "send_mail")
 }
 
 /// Build an editor draft from an existing workflow.

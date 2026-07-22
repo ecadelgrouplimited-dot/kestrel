@@ -208,6 +208,12 @@ pub fn tools_for(profile: Profile) -> Vec<ToolSpec> {
                 "edit_file",
                 "list_dir",
                 "search",
+                // Email
+                "list_mail",
+                "read_mail",
+                "draft_mail",
+                "send_mail",
+                "open_file",
                 // Research
                 "web_search",
                 "http_get",
@@ -259,6 +265,12 @@ pub fn work_system_prompt(root: &Path) -> String {
            things live, recurring formats) so future sessions start knowing them.\n\
          - spawn_subagent(task): delegate a big self-contained chunk (e.g. \"research and \
            summarise these 8 sources\") to keep your own context lean.\n\
+         - list_mail(count) / read_mail(index) / draft_mail(to, subject, body): triage the user's \
+           Outlook inbox, read a message, and write a reply. ALWAYS draft — draft_mail saves to \
+           Drafts so the user reviews it. Only use send_mail if they explicitly say to send, and \
+           they will still be asked to confirm.\n\
+         - open_file(path): open a finished document in Word/Excel/a PDF viewer so the user can \
+           see it. Do this at the end when you've produced something to look at.\n\
          - open_url(url) / screenshot(): show the user something, or capture the screen.\n\n\
          HOW TO WORK:\n\
          1. PLAN first for anything multi-step.\n\
@@ -553,6 +565,12 @@ pub fn builtin_tools() -> Vec<ToolSpec> {
                     "path": { "type": "string", "description": "Must end in .xlsx" },
                     "data": { "type": "string", "description": "CSV or TSV, one row per line." },
                     "sheet": { "type": "string", "description": "Sheet name for `data`." },
+                    "formats": {
+                        "type": "array",
+                        "description": "Per-column display format, left to right: number, \
+                                        integer, percent, date, or text.",
+                        "items": { "type": "string" },
+                    },
                     "sheets": {
                         "type": "array",
                         "description": "Several sheets, in tab order.",
@@ -578,6 +596,73 @@ pub fn builtin_tools() -> Vec<ToolSpec> {
                         "required": ["type"],
                     },
                 },
+                "required": ["path"],
+            }),
+        },
+        ToolSpec {
+            name: "list_mail".to_string(),
+            description: "List recent Inbox messages from the user's Outlook (newest first): \
+                          position, read/unread, date, sender, subject. Use the position with \
+                          read_mail."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "count": { "type": "integer", "description": "How many (default 15)." },
+                },
+            }),
+        },
+        ToolSpec {
+            name: "read_mail".to_string(),
+            description: "Read one Inbox message in full (headers and body) by its position from \
+                          list_mail, where 1 is the newest."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": { "index": { "type": "integer" } },
+                "required": ["index"],
+            }),
+        },
+        ToolSpec {
+            name: "draft_mail".to_string(),
+            description: "Save a reply or new message to the user's Outlook **Drafts** — it is \
+                          NOT sent. Always prefer this so the user reviews before anything leaves \
+                          their mailbox."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "to": { "type": "string", "description": "Recipient(s), semicolon-separated." },
+                    "subject": { "type": "string" },
+                    "body": { "type": "string" },
+                },
+                "required": ["to", "subject", "body"],
+            }),
+        },
+        ToolSpec {
+            name: "send_mail".to_string(),
+            description: "SEND an email immediately from the user's Outlook. Only use this when \
+                          the user has explicitly asked you to send; otherwise use draft_mail. \
+                          The user is always asked to confirm before it goes."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "to": { "type": "string" },
+                    "subject": { "type": "string" },
+                    "body": { "type": "string" },
+                },
+                "required": ["to", "subject", "body"],
+            }),
+        },
+        ToolSpec {
+            name: "open_file".to_string(),
+            description: "Open a file in its default application (Word, Excel, a PDF viewer, the \
+                          browser) so the user can see it. Use it to show a finished document."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": { "path": { "type": "string" } },
                 "required": ["path"],
             }),
         },
@@ -879,6 +964,11 @@ pub fn describe_call(call: &ToolCall) -> String {
         "write_doc" => format!("📝 Writing Word document {}", arg("path")),
         "write_sheet" => format!("📊 Writing spreadsheet {}", arg("path")),
         "check_doc" => format!("🧪 Checking document {}", arg("path")),
+        "list_mail" => "📬 Reading the inbox".to_string(),
+        "read_mail" => format!("✉ Opening message {}", arg("index")),
+        "draft_mail" => format!("📝 Drafting an email to {}", arg("to")),
+        "send_mail" => format!("📤 SENDING an email to {}", arg("to")),
+        "open_file" => format!("🖥 Opening {}", arg("path")),
         "list_dir" => format!("📁 Listing {}", arg("path")),
         "http_get" => format!("🌐 Fetching {}", arg("url")),
         "web_search" => format!("🔍 Searching the web: \"{}\"", arg("query")),
@@ -1241,6 +1331,60 @@ pub fn execute_tool(root: &Path, call: &ToolCall) -> String {
             Ok(full) => edit_file(&full, &arg("old"), &arg("new")),
             Err(err) => format!("error: {err}"),
         },
+        "list_mail" => {
+            let count = call
+                .input
+                .get("count")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(15) as usize;
+            match crate::mail::list_inbox(count) {
+                Ok(items) if items.is_empty() => "The inbox is empty.".to_string(),
+                Ok(items) => {
+                    let mut out = format!("{} message(s), newest first:\n", items.len());
+                    for m in items {
+                        out.push_str(&format!(
+                            "{}. [{}] {}  —  {}  —  {}\n",
+                            m.index,
+                            if m.unread { "UNREAD" } else { "read" },
+                            m.received,
+                            m.sender,
+                            m.subject
+                        ));
+                    }
+                    cap(out)
+                }
+                Err(err) => format!("error: {err}"),
+            }
+        }
+        "read_mail" => {
+            let index = call
+                .input
+                .get("index")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(1) as usize;
+            match crate::mail::read_message(index) {
+                Ok(text) => cap(text),
+                Err(err) => format!("error: {err}"),
+            }
+        }
+        "draft_mail" => {
+            match crate::mail::draft_message(&arg("to"), &arg("subject"), &arg("body")) {
+                Ok(msg) => msg,
+                Err(err) => format!("error: {err}"),
+            }
+        }
+        "send_mail" => match crate::mail::send_message(&arg("to"), &arg("subject"), &arg("body")) {
+            Ok(msg) => msg,
+            Err(err) => format!("error: {err}"),
+        },
+        "open_file" => {
+            let path = resolve_read_path(root, &arg("path"));
+            if !path.exists() {
+                format!("error: no such file: {}", path.display())
+            } else {
+                crate::syscap::open_path(&path.display().to_string())
+            }
+        }
         "check_doc" => {
             let path = resolve_read_path(root, &arg("path"));
             let expects: Vec<String> = call
@@ -1313,6 +1457,7 @@ pub fn execute_tool(root: &Path, call: &ToolCall) -> String {
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("")
                                     .to_string(),
+                                formats: column_formats(s.get("formats")),
                             })
                             .collect()
                     })
@@ -1320,6 +1465,7 @@ pub fn execute_tool(root: &Path, call: &ToolCall) -> String {
                         vec![crate::docwrite::Sheet {
                             name: arg("sheet"),
                             data: arg("data"),
+                            formats: column_formats(call.input.get("formats")),
                         }]
                     });
                 // An optional chart of the first sheet.
@@ -1568,6 +1714,19 @@ fn run_shell(root: &Path, command: &str, timeout: Duration) -> String {
 
 /// Search the project's text files for `query` (case-insensitive substring),
 /// returning up to `max` `path:line: text` matches. Build/VCS dirs are skipped.
+/// Parse a `formats` tool argument into per-column cell formats.
+fn column_formats(value: Option<&serde_json::Value>) -> Vec<crate::docwrite::CellFormat> {
+    value
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .map(|f| crate::docwrite::CellFormat::parse(f.as_str().unwrap_or("")))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// The folder name of a repo root, for display.
 fn repo_display_name(root: &Path) -> String {
     root.file_name()
