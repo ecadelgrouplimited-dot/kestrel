@@ -245,6 +245,12 @@ struct KestrelApp {
     agent_activity: String,
     /// The agent's live task plan (TODO ledger), if any.
     agent_plan: Option<kestrel_core::Plan>,
+    /// When the current run started, for the live clock.
+    agent_started: Option<std::time::Instant>,
+    /// Session cost when the run began, so we can price just this run.
+    run_start_cost: f64,
+    /// The closing card for the last finished run.
+    last_run: Option<RunSummary>,
     /// Set when a running agent should stop; the worker checks it each step.
     agent_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// The last run paused (step budget or Stop) and can be continued.
@@ -366,6 +372,9 @@ impl Default for KestrelApp {
             agent_messages: Vec::new(),
             agent_activity: String::new(),
             agent_plan: None,
+            agent_started: None,
+            run_start_cost: 0.0,
+            last_run: None,
             agent_cancel: None,
             agent_incomplete: false,
             pending_approval: None,
@@ -544,6 +553,26 @@ impl KestrelApp {
         self.pending_approval = None;
     }
 
+    /// Capture what this run produced, for the closing summary card.
+    fn finish_run_summary(&mut self, ok: bool) {
+        let duration = self
+            .agent_started
+            .map(|t| t.elapsed().as_secs_f32())
+            .unwrap_or(0.0);
+        self.last_run = Some(RunSummary {
+            files: self.agent_files.len(),
+            lines: self
+                .agent_files
+                .iter()
+                .map(|f| f.contents.lines().count())
+                .sum(),
+            duration,
+            cost: (self.session_cost - self.run_start_cost).max(0.0),
+            ok,
+        });
+        self.agent_started = None;
+    }
+
     /// Ask the running agent to stop; it pauses at the next step and returns its
     /// progress as a resumable Incomplete outcome.
     fn stop_agent(&mut self) {
@@ -645,6 +674,7 @@ impl KestrelApp {
                     }
                     self.agent_messages = history;
                     self.end_agent_run();
+                    self.finish_run_summary(true);
                     self.status = "Agent finished — review changes in the Diff tab.".to_string();
                     self.save_session();
                     self.diff_review = None;
@@ -658,6 +688,7 @@ impl KestrelApp {
                     }
                     self.agent_messages = history;
                     self.end_agent_run();
+                    self.finish_run_summary(false);
                     self.agent_incomplete = true;
                     self.status = "Agent paused — click Continue to keep going.".to_string();
                     self.save_session();
@@ -2427,31 +2458,65 @@ impl KestrelApp {
                 .weak(),
             );
         }
-        for message in &self.chat_history {
-            let (who, color) = if message.role == "user" {
-                ("🧑 You", egui::Color32::from_rgb(120, 170, 255))
-            } else {
-                ("🦅 Kestrel", ACCENT)
-            };
-            ui.add_space(6.0);
-            ui.label(egui::RichText::new(who).strong().color(color));
-            ui.add(
-                egui::Label::new(egui::RichText::new(&message.content).monospace())
-                    .selectable(true),
-            );
+        for (i, message) in self.chat_history.iter().enumerate() {
+            if message.role == "user" {
+                ui.add_space(10.0);
+                ui.label(
+                    egui::RichText::new("🧑 You")
+                        .strong()
+                        .color(egui::Color32::from_rgb(120, 170, 255)),
+                );
+                ui.add(
+                    egui::Label::new(egui::RichText::new(&message.content).monospace())
+                        .selectable(true),
+                );
+                continue;
+            }
+            entry_ui(ui, &message.content, i);
         }
         if self.chat_pending {
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                ui.spinner();
-                let activity = if self.agent_activity.is_empty() {
-                    "Kestrel is thinking…"
-                } else {
-                    self.agent_activity.as_str()
-                };
-                ui.label(egui::RichText::new(activity).strong());
-            });
+            self.live_activity_ui(ui);
         }
+        if let Some(summary) = &self.last_run {
+            run_summary_ui(ui, summary);
+        }
+    }
+
+    /// The "what it's doing right now" strip: a spinner, the live action, and a
+    /// running clock. Repaints continuously so the seconds actually tick.
+    fn live_activity_ui(&self, ui: &mut egui::Ui) {
+        ui.add_space(10.0);
+        let elapsed = self
+            .agent_started
+            .map(|t| t.elapsed().as_secs_f32())
+            .unwrap_or(0.0);
+        // A slow pulse so the strip breathes while work is happening.
+        let pulse = (ui.input(|i| i.time) as f32 * 2.2).sin() * 0.5 + 0.5;
+        let glow = ACCENT.linear_multiply(0.35 + 0.35 * pulse);
+        egui::Frame::none()
+            .fill(glow.gamma_multiply(0.18))
+            .stroke(egui::Stroke::new(1.0, glow))
+            .rounding(6.0)
+            .inner_margin(egui::Margin::symmetric(10.0, 7.0))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    let activity = if self.agent_activity.is_empty() {
+                        "Thinking…"
+                    } else {
+                        self.agent_activity.as_str()
+                    };
+                    ui.label(egui::RichText::new(activity).strong().color(ACCENT));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            egui::RichText::new(human_duration(elapsed))
+                                .monospace()
+                                .weak(),
+                        );
+                    });
+                });
+            });
+        ui.ctx().request_repaint();
     }
 
     /// The Usage dashboard: this conversation's tokens + cost, and all-time
@@ -3067,22 +3132,49 @@ impl KestrelApp {
             .show(ui, |ui| {
                 if !plan.goal.trim().is_empty() {
                     ui.label(egui::RichText::new(&plan.goal).weak().italics());
-                    ui.add_space(2.0);
+                    ui.add_space(4.0);
                 }
+                // A real progress bar makes the run's shape legible at a glance.
+                let fraction = if total == 0 {
+                    0.0
+                } else {
+                    done as f32 / total as f32
+                };
+                ui.add(
+                    egui::ProgressBar::new(fraction)
+                        .desired_height(6.0)
+                        .fill(ACCENT),
+                );
+                ui.add_space(6.0);
+                // The active step breathes, so the eye lands on what's happening.
+                let pulse = (ui.input(|i| i.time) as f32 * 2.6).sin() * 0.5 + 0.5;
+                let mut working = false;
                 for step in &plan.steps {
                     let (glyph, text) = match step.status {
-                        kestrel_core::StepStatus::Done => {
-                            ("☑", egui::RichText::new(&step.title).strikethrough().weak())
-                        }
+                        kestrel_core::StepStatus::Done => (
+                            egui::RichText::new("☑").color(DIFF_ADD),
+                            egui::RichText::new(&step.title).strikethrough().weak(),
+                        ),
                         kestrel_core::StepStatus::Active => {
-                            ("▶", egui::RichText::new(&step.title).strong().color(ACCENT))
+                            working = true;
+                            (
+                                egui::RichText::new("▶")
+                                    .color(ACCENT.linear_multiply(0.55 + 0.45 * pulse)),
+                                egui::RichText::new(&step.title).strong().color(ACCENT),
+                            )
                         }
-                        kestrel_core::StepStatus::Todo => ("☐", egui::RichText::new(&step.title)),
+                        kestrel_core::StepStatus::Todo => (
+                            egui::RichText::new("☐").weak(),
+                            egui::RichText::new(&step.title),
+                        ),
                     };
                     ui.horizontal(|ui| {
                         ui.label(glyph);
                         ui.label(text);
                     });
+                }
+                if working {
+                    ui.ctx().request_repaint();
                 }
             });
         ui.add_space(6.0);
@@ -3516,6 +3608,9 @@ impl KestrelApp {
         self.diff_review = None;
         self.agent_activity = "💭 Planning…".to_string();
         self.agent_incomplete = false;
+        self.agent_started = Some(std::time::Instant::now());
+        self.run_start_cost = self.session_cost;
+        self.last_run = None;
         // Carry the running conversation so a follow-up refines the same
         // project. The file history keeps accumulating across builds too.
         let history = self.agent_messages.clone();
@@ -4108,6 +4203,134 @@ fn human_tokens(n: usize) -> String {
     } else {
         n.to_string()
     }
+}
+
+/// What a finished run produced, shown as a closing card.
+struct RunSummary {
+    files: usize,
+    lines: usize,
+    duration: f32,
+    cost: f64,
+    ok: bool,
+}
+
+/// A compact duration: `4.2s`, `1m 12s`.
+fn human_duration(seconds: f32) -> String {
+    if seconds < 60.0 {
+        format!("{seconds:.1}s")
+    } else {
+        format!(
+            "{}m {:02}s",
+            (seconds / 60.0) as u32,
+            (seconds % 60.0) as u32
+        )
+    }
+}
+
+/// Render one assistant transcript entry, styled by what it actually *is* —
+/// an action the agent took, captured tool output, or its own prose. Without
+/// this everything reads as one undifferentiated wall of monospace.
+fn entry_ui(ui: &mut egui::Ui, content: &str, index: usize) {
+    // Captured tool output → a folded card with a status badge, so a 40-line
+    // test dump becomes "✅ 7 tests passed" you can expand.
+    if kestrel_core::is_tool_output(content) {
+        if let Some(summary) = kestrel_core::summarize_output(content) {
+            let (colour, glyph) = match summary.status {
+                kestrel_core::Status::Ok => (DIFF_ADD, "✅"),
+                kestrel_core::Status::Failed => (DIFF_DEL, "❌"),
+                kestrel_core::Status::Info => (ui.visuals().weak_text_color(), "•"),
+            };
+            ui.add_space(6.0);
+            let lines = content.lines().count();
+            egui::CollapsingHeader::new(
+                egui::RichText::new(format!("{glyph}  {}", summary.headline))
+                    .color(colour)
+                    .strong(),
+            )
+            .id_source(("tool-output", index))
+            // Short output stays open; long dumps fold away by default.
+            .default_open(lines <= 8)
+            .show(ui, |ui| {
+                ui.add(
+                    egui::Label::new(egui::RichText::new(content).monospace().small())
+                        .selectable(true),
+                );
+            });
+            return;
+        }
+    }
+
+    // A single-line action (we emit these with a leading icon) → a compact chip.
+    let is_action = content.lines().count() == 1
+        && content.len() < 240
+        && content
+            .chars()
+            .next()
+            .map(|c| !c.is_ascii())
+            .unwrap_or(false);
+    if is_action {
+        let colour = if content.starts_with('⛔') || content.starts_with('🚫') {
+            DIFF_DEL
+        } else if content.starts_with('⚠') {
+            egui::Color32::from_rgb(220, 150, 80)
+        } else if content.starts_with('✅') {
+            DIFF_ADD
+        } else {
+            ui.visuals().weak_text_color()
+        };
+        ui.add_space(3.0);
+        ui.horizontal(|ui| {
+            ui.add_space(2.0);
+            ui.label(
+                egui::RichText::new(content)
+                    .monospace()
+                    .small()
+                    .color(colour),
+            );
+        });
+        return;
+    }
+
+    // Otherwise it's the model talking — give it room and a readable face.
+    ui.add_space(10.0);
+    ui.label(egui::RichText::new("🦅 Kestrel").strong().color(ACCENT));
+    ui.add(egui::Label::new(egui::RichText::new(content)).selectable(true));
+}
+
+/// The closing card for a finished run: what came out of it, at a glance.
+fn run_summary_ui(ui: &mut egui::Ui, summary: &RunSummary) {
+    let (colour, title) = if summary.ok {
+        (DIFF_ADD, "✅  Run complete")
+    } else {
+        (
+            egui::Color32::from_rgb(220, 150, 80),
+            "⏸  Paused — Continue to resume",
+        )
+    };
+    ui.add_space(12.0);
+    egui::Frame::none()
+        .fill(colour.gamma_multiply(0.10))
+        .stroke(egui::Stroke::new(1.0, colour.linear_multiply(0.7)))
+        .rounding(6.0)
+        .inner_margin(egui::Margin::symmetric(12.0, 9.0))
+        .show(ui, |ui| {
+            ui.label(egui::RichText::new(title).strong().color(colour));
+            ui.add_space(3.0);
+            let mut parts = vec![
+                format!(
+                    "{} file{}",
+                    summary.files,
+                    if summary.files == 1 { "" } else { "s" }
+                ),
+                format!("{} lines", human_tokens(summary.lines)),
+                human_duration(summary.duration),
+            ];
+            if summary.cost > 0.0 {
+                parts.push(format!("${:.4}", summary.cost));
+            }
+            ui.label(egui::RichText::new(parts.join("   ·   ")).monospace());
+        });
+    ui.add_space(4.0);
 }
 
 /// A document-flavoured icon for a file in the Work workspace.

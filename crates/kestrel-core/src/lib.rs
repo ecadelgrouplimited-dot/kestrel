@@ -19,6 +19,7 @@ pub mod pricing;
 pub mod project;
 pub mod providers;
 pub mod repos;
+pub mod runlog;
 pub mod secrets;
 pub mod settings;
 pub mod symbols;
@@ -80,6 +81,7 @@ pub use providers::{
 pub use repos::{
     link_repo, load_workspace, resolve_repo, save_workspace, unlink_repo, Repo, Workspace,
 };
+pub use runlog::{is_tool_output, summarize_output, Status, Summary};
 pub use secrets::{scan_secrets, SecretFinding};
 pub use settings::{
     load_settings, model_suggestions, model_suggestions_for, provider_preset, save_settings,

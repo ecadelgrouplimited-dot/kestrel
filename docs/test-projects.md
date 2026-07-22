@@ -125,6 +125,123 @@ Kestrel must `http_get` the docs/registry before writing code rather than guessi
 
 ---
 
+## 2b. Full-stack & UI-heavy builds — the demo tier
+
+These are the ones to record. Each demands a *polished, visibly working
+interface*, so the payoff is on screen rather than in a terminal. Watch the 🗺
+Plan panel drive, files stream in live, and the run finish with `check_page`
+proving it works.
+
+### 2b.1 Real-time collaborative Kanban *(full-stack, WebSockets)*
+> Build a real-time Kanban board: Next.js + TypeScript + Tailwind on the front,
+> a Node/Express + WebSocket server on the back, SQLite for storage. Drag-and-drop
+> cards between columns, and changes must appear instantly in a second browser
+> tab. Include optimistic UI updates, a clean empty state, keyboard shortcuts, and
+> a dark theme. Seed it with sample cards, run it, and prove with `check_page`
+> that the board renders and a card can move.
+
+- **Tests:** full-stack scaffolding, WebSockets, drag-and-drop, state sync,
+  browser-driven acceptance.
+- **Success:** two tabs stay in sync live; `check_page` passes on the board.
+
+### 2b.2 Analytics dashboard with live charts
+> Build an analytics dashboard (React + Vite + Recharts or Chart.js) over a mock
+> API: KPI tiles with sparklines, a time-series chart with a range selector, a
+> sortable/filterable data table with pagination, and a segment filter that drives
+> every widget. Make it responsive and genuinely good-looking — proper spacing,
+> a real type scale, loading skeletons, and an empty state. Run it and screenshot
+> the dashboard.
+
+- **Tests:** data-viz libraries, cross-widget state, responsive layout, visual
+  polish, `screenshot`.
+- **Success:** filters drive all widgets; it looks like a designed product.
+
+### 2b.3 SaaS starter with auth *(the "does it really work" test)*
+> Build a SaaS starter: Next.js App Router, Postgres via Prisma (SQLite is fine
+> locally), email+password auth with sessions, protected dashboard routes, a
+> settings page, and a landing page. Include migrations, seed data, and tests for
+> the auth flow. Verify by running it and using `check_page` to confirm the
+> landing page renders, the dashboard redirects when logged out, and a seeded user
+> can reach the dashboard.
+
+- **Tests:** auth (the classic multi-file feature), DB migrations, route
+  protection, research (App Router APIs change), multi-state acceptance.
+- **Success:** the protected-route check genuinely redirects; seeded login works.
+
+### 2b.4 Drawing/canvas app *(interaction-heavy)*
+> Build a browser drawing app with an HTML canvas: pen, eraser, shapes, colour
+> picker, adjustable brush size, undo/redo, and export to PNG. Add a tool palette
+> with hover states and keyboard shortcuts. Persist the drawing to localStorage so
+> it survives a refresh. Run it and screenshot the interface.
+
+- **Tests:** canvas APIs, undo/redo state machines, event handling, persistence.
+- **Success:** undo/redo is correct across tools; export produces a real PNG.
+
+### 2b.5 Mobile app *(Flutter)*
+> Build a Flutter expense tracker: add/edit/delete expenses with categories, a
+> monthly summary with a pie chart by category, filters by date range, local
+> persistence, and light/dark themes. Follow Material 3. Run `flutter analyze`
+> clean and include widget tests.
+
+- **Tests:** a non-web UI stack, research (Material 3 + charting packages),
+  analyzer as the verification gate.
+- **Success:** `flutter analyze` clean; widget tests pass; the chart matches
+  the data.
+
+### 2b.6 Desktop app *(Electron or Tauri)*
+> Build a desktop markdown editor: split-pane live preview, file open/save,
+> a document outline sidebar, find-and-replace, and a dark theme. Use Tauri if
+> Rust tooling is available, otherwise Electron. Package a dev build and run it.
+
+- **Tests:** desktop toolchains, native file dialogs, a second window/process
+  model, `install_tool` if the toolchain is missing.
+- **Success:** it launches as a real window and round-trips a file.
+
+### 2b.7 3D / WebGL showcase
+> Build a Three.js product configurator: a 3D model you can orbit, swappable
+> materials and colours, lighting controls, and an animated intro. Add a control
+> panel and make it run smoothly at 60fps. Run it and screenshot the scene.
+
+- **Tests:** WebGL, animation loops, asset handling — the most visually
+  impressive category.
+- **Success:** the scene renders and interacts; the screenshot looks striking.
+
+### 2b.8 Full-stack e-commerce slice
+> Build a storefront slice: product grid with filters, product detail page, cart
+> with quantity updates and persistence, and a mock checkout with validation.
+> Next.js front, an API with a small product catalogue in SQLite. Include tests
+> for cart maths (subtotal, tax, discounts) — get those exactly right. Run it and
+> `check_page` the grid, a product page, and the cart.
+
+- **Tests:** multi-page state, money arithmetic (where bugs hide), multi-URL
+  acceptance.
+- **Success:** cart totals are exactly correct; all three page checks pass.
+
+### 2b.9 Migrate a UI framework *(the hardest realistic task)*
+> Take this existing React app and migrate it from Create React App to Vite, and
+> from plain CSS to Tailwind, without changing how anything looks or behaves.
+> Do it incrementally, keeping the build green at each step. Run the app before
+> and after and compare screenshots to prove nothing regressed.
+
+- **Tests:** `definition`/`references`/`rename_symbol`, incremental verified
+  migration, before/after visual proof.
+- **Success:** the app looks identical; the build and tests stay green.
+
+### 2b.10 Take a design and build it
+> Here's a screenshot of a UI *(attach or describe one)*. Build it as a working
+> React + Tailwind component with real interactivity — hover, focus, and active
+> states, responsive down to mobile, and accessible (labels, focus rings,
+> keyboard navigation). Match the spacing and type scale closely, then screenshot
+> your result next to the original.
+
+- **Tests:** visual fidelity, accessibility, responsive design, self-comparison.
+- **Success:** side-by-side is convincingly close and it's keyboard-usable.
+
+> **Recording tip.** 2b.1, 2b.2, and 2b.7 give the strongest footage: something
+> visibly beautiful appears, and the agent proves it works in a real browser.
+
+---
+
 ## 3. Multi-repository reasoning
 
 Link a second repo (Explorer → **🔗 Repo**) before running these.
