@@ -7,14 +7,26 @@ use std::env;
 use std::io;
 use std::path::{Path, PathBuf};
 
+mod render;
+mod repl;
+mod term;
+
 fn main() -> io::Result<()> {
     let mut args = env::args().skip(1);
+    // Bare `kestrel` opens an interactive session in the current directory —
+    // the common case shouldn't need a subcommand.
     let Some(command) = args.next() else {
-        print_usage();
-        return Ok(());
+        return repl::run(env::current_dir()?);
     };
 
     match command.as_str() {
+        "chat" | "repl" => {
+            let path = args
+                .next()
+                .map(PathBuf::from)
+                .unwrap_or(env::current_dir()?);
+            return repl::run(path);
+        }
         "inspect" => {
             let path = args
                 .next()
@@ -102,6 +114,9 @@ fn print_usage() {
     println!("Kestrel CLI");
     println!();
     println!("Usage:");
+    println!("  kestrel                   Start an interactive agent session here");
+    println!("  kestrel chat [path]       Start one in another folder");
+    println!();
     println!("  kestrel inspect [path]    Summarize a repository");
     println!("  kestrel symbols [path]    List structural symbols per file");
     println!("  kestrel graph [path]      Show the file dependency graph");

@@ -5,6 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+ctrlc = "3.5.2"
 kestrel-core = { path = "../kestrel-core" }
+rustyline = "18.0.1"
 serde_json = "1"
 similar = "2"
