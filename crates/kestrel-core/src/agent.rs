@@ -540,18 +540,45 @@ pub fn builtin_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "write_sheet".to_string(),
-            description: "Write a real Excel workbook (.xlsx) from CSV or TSV rows. The first row \
-                          is the header; values that look numeric are stored as numbers so Excel \
-                          can sum and chart them."
+            description: "Write a real Excel workbook (.xlsx). The first row of each sheet is a \
+                          bold, frozen header; numeric values are stored as numbers; a cell \
+                          starting with `=` becomes a LIVE formula (e.g. \"=SUM(B2:B9)\" or \
+                          \"=SUM('Data'!B2:B9)\" across sheets). Pass `data` for one sheet, or \
+                          `sheets` for several. Add `chart` to draw a real bar/line/pie chart of \
+                          the first sheet (labels from column A)."
                 .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "Must end in .xlsx" },
                     "data": { "type": "string", "description": "CSV or TSV, one row per line." },
-                    "sheet": { "type": "string", "description": "Sheet name (optional)." },
+                    "sheet": { "type": "string", "description": "Sheet name for `data`." },
+                    "sheets": {
+                        "type": "array",
+                        "description": "Several sheets, in tab order.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": { "type": "string" },
+                                "data": { "type": "string" },
+                            },
+                            "required": ["name", "data"],
+                        },
+                    },
+                    "chart": {
+                        "type": "object",
+                        "properties": {
+                            "type": { "type": "string", "enum": ["bar", "line", "pie"] },
+                            "title": { "type": "string" },
+                            "value_column": {
+                                "type": "integer",
+                                "description": "1-based column of the values (default 2 = B).",
+                            },
+                        },
+                        "required": ["type"],
+                    },
                 },
-                "required": ["path", "data"],
+                "required": ["path"],
             }),
         },
         ToolSpec {
@@ -1267,12 +1294,61 @@ pub fn execute_tool(root: &Path, call: &ToolCall) -> String {
         },
         "write_sheet" => match safe_join(root, &arg("path")) {
             Ok(full) => {
-                let sheet = arg("sheet");
-                match crate::docwrite::write_xlsx(&full, &arg("data"), &sheet) {
+                // Either a list of sheets, or the single-sheet `data` form.
+                let sheets: Vec<crate::docwrite::Sheet> = call
+                    .input
+                    .get("sheets")
+                    .and_then(|v| v.as_array())
+                    .map(|items| {
+                        items
+                            .iter()
+                            .map(|s| crate::docwrite::Sheet {
+                                name: s
+                                    .get("name")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                                data: s
+                                    .get("data")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_else(|| {
+                        vec![crate::docwrite::Sheet {
+                            name: arg("sheet"),
+                            data: arg("data"),
+                        }]
+                    });
+                // An optional chart of the first sheet.
+                let chart = call.input.get("chart").and_then(|c| {
+                    let kind = crate::docwrite::ChartKind::parse(
+                        c.get("type").and_then(|v| v.as_str()).unwrap_or("bar"),
+                    )?;
+                    Some(crate::docwrite::Chart {
+                        kind,
+                        title: c
+                            .get("title")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        // The model counts columns from 1; we index from 0.
+                        value_column: c
+                            .get("value_column")
+                            .and_then(|v| v.as_u64())
+                            .map(|n| n.saturating_sub(1) as usize)
+                            .unwrap_or(1),
+                    })
+                });
+                match crate::docwrite::write_workbook(&full, &sheets, chart.as_ref()) {
                     Ok(()) => format!(
-                        "wrote {} ({} bytes) — a real Excel workbook",
+                        "wrote {} ({} bytes) — a real Excel workbook with {} sheet(s){}",
                         full.display(),
-                        std::fs::metadata(&full).map(|m| m.len()).unwrap_or(0)
+                        std::fs::metadata(&full).map(|m| m.len()).unwrap_or(0),
+                        sheets.len(),
+                        if chart.is_some() { " and a chart" } else { "" }
                     ),
                     Err(err) => format!("error: {err}"),
                 }

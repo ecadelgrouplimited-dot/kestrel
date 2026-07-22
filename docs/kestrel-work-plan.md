@@ -185,7 +185,17 @@ codebase cheaply.
   *Verified visually in Excel:* `=SUM(B2:B4)` computed to **3600**, header bold,
   columns auto-sized, sheet named, no repair prompt.
 
-- **W2c — Further data work.** Charts, cleaning, joins, multi-sheet workbooks.
+- **W2c — Multi-sheet workbooks & real charts.** ✅ **shipped.** `write_sheet` now
+  takes a `sheets` array (tabs in order, names sanitised to Excel's rules) and an
+  optional `chart` — a genuine **bar / line / pie chart** embedded on the first
+  sheet, its series pointing at real ranges so it redraws when the numbers
+  change. **Cross-sheet formulas** work (`=SUM('Data'!B2:B9)`), so a Summary tab
+  can total a Data tab.
+
+  *Verified visually in Excel:* a two-tab workbook with a titled bar chart over
+  four regions, correct axis scaling, and a cross-sheet total — no repair prompt.
+
+- **W2d — Further data work.** Cleaning, joins, pivots, conditional formatting.
 - **W3 — Research → report.** The wedge, end to end: research with citations →
   data → finished document → export to PDF/DOCX, with acceptance checks.
 - **W4 — Email.** Outlook triage, summarize, draft; **send is always

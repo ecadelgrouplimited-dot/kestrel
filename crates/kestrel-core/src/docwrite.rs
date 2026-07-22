@@ -25,26 +25,134 @@ pub fn write_docx(path: &Path, markdown: &str) -> Result<(), String> {
     zip_parts(path, &parts)
 }
 
-/// Write delimited `data` (CSV or TSV) to `path` as a real Excel workbook.
+/// One sheet of a workbook: a tab name and its CSV/TSV rows.
+#[derive(Debug, Clone)]
+pub struct Sheet {
+    pub name: String,
+    pub data: String,
+}
+
+/// The shape of an embedded chart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChartKind {
+    Bar,
+    Line,
+    Pie,
+}
+
+impl ChartKind {
+    /// Parse a user/model-supplied chart type.
+    pub fn parse(kind: &str) -> Option<Self> {
+        match kind.trim().to_ascii_lowercase().as_str() {
+            "bar" | "column" | "bars" => Some(ChartKind::Bar),
+            "line" | "lines" | "trend" => Some(ChartKind::Line),
+            "pie" | "donut" | "doughnut" => Some(ChartKind::Pie),
+            _ => None,
+        }
+    }
+    fn element(self) -> &'static str {
+        match self {
+            ChartKind::Bar => "barChart",
+            ChartKind::Line => "lineChart",
+            ChartKind::Pie => "pieChart",
+        }
+    }
+}
+
+/// A chart drawn on the first sheet: labels from column A, values from a chosen
+/// column, over the data rows.
+#[derive(Debug, Clone)]
+pub struct Chart {
+    pub kind: ChartKind,
+    pub title: String,
+    /// Zero-based column holding the values (defaults to 1, i.e. column B).
+    pub value_column: usize,
+}
+
+/// Write delimited `data` (CSV or TSV) to `path` as a single-sheet workbook.
 pub fn write_xlsx(path: &Path, data: &str, sheet_name: &str) -> Result<(), String> {
-    let rows = parse_delimited(data);
-    if rows.is_empty() {
+    write_workbook(
+        path,
+        &[Sheet {
+            name: sheet_name.to_string(),
+            data: data.to_string(),
+        }],
+        None,
+    )
+}
+
+/// Write a workbook of one or more sheets, optionally charting the first one.
+pub fn write_workbook(path: &Path, sheets: &[Sheet], chart: Option<&Chart>) -> Result<(), String> {
+    if sheets.is_empty() {
+        return Err("no sheets to write".to_string());
+    }
+    let parsed: Vec<(String, Vec<Vec<String>>)> = sheets
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let name = if s.name.trim().is_empty() {
+                format!("Sheet{}", i + 1)
+            } else {
+                sanitize_sheet_name(&s.name)
+            };
+            (name, parse_delimited(&s.data))
+        })
+        .collect();
+    if parsed.iter().all(|(_, rows)| rows.is_empty()) {
         return Err("no rows to write".to_string());
     }
-    let name = if sheet_name.trim().is_empty() {
-        "Sheet1"
-    } else {
-        sheet_name.trim()
-    };
-    let parts = vec![
-        ("[Content_Types].xml", XLSX_CONTENT_TYPES.to_string()),
-        ("_rels/.rels", XLSX_ROOT_RELS.to_string()),
-        ("xl/_rels/workbook.xml.rels", XLSX_WB_RELS.to_string()),
-        ("xl/styles.xml", XLSX_STYLES.to_string()),
-        ("xl/workbook.xml", workbook_xml(name)),
-        ("xl/worksheets/sheet1.xml", sheet_xml(&rows)),
+    // A chart needs at least a header plus one data row.
+    let chart = chart.filter(|_| parsed[0].1.len() > 1);
+
+    let mut parts: Vec<(String, String)> = vec![
+        (
+            "[Content_Types].xml".into(),
+            xlsx_content_types(parsed.len(), chart.is_some()),
+        ),
+        ("_rels/.rels".into(), XLSX_ROOT_RELS.to_string()),
+        (
+            "xl/_rels/workbook.xml.rels".into(),
+            xlsx_workbook_rels(parsed.len()),
+        ),
+        ("xl/styles.xml".into(), XLSX_STYLES.to_string()),
+        (
+            "xl/workbook.xml".into(),
+            workbook_xml(&parsed.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>()),
+        ),
     ];
-    zip_parts(path, &parts)
+    for (i, (_, rows)) in parsed.iter().enumerate() {
+        // Only the first sheet carries the drawing that hosts the chart.
+        let has_chart = chart.is_some() && i == 0;
+        parts.push((
+            format!("xl/worksheets/sheet{}.xml", i + 1),
+            sheet_xml(rows, has_chart),
+        ));
+    }
+    if let Some(chart) = chart {
+        let (name, rows) = &parsed[0];
+        parts.push((
+            "xl/worksheets/_rels/sheet1.xml.rels".into(),
+            SHEET_DRAWING_RELS.to_string(),
+        ));
+        parts.push(("xl/drawings/drawing1.xml".into(), DRAWING.to_string()));
+        parts.push((
+            "xl/drawings/_rels/drawing1.xml.rels".into(),
+            DRAWING_RELS.to_string(),
+        ));
+        parts.push(("xl/charts/chart1.xml".into(), chart_xml(chart, name, rows)));
+    }
+    let refs: Vec<(&str, String)> = parts.iter().map(|(n, c)| (n.as_str(), c.clone())).collect();
+    zip_parts(path, &refs)
+}
+
+/// Excel forbids `[]:*?/\` in sheet names and caps them at 31 characters.
+fn sanitize_sheet_name(name: &str) -> String {
+    let cleaned: String = name
+        .trim()
+        .chars()
+        .filter(|c| !['[', ']', ':', '*', '?', '/', '\\'].contains(c))
+        .collect();
+    cleaned.chars().take(31).collect()
 }
 
 /// Split CSV/TSV text into rows of cells. Tabs win when present on a line;
@@ -290,7 +398,7 @@ pub fn column_name(mut index: usize) -> String {
 
 /// Build `xl/worksheets/sheet1.xml`: a frozen bold header, columns sized to the
 /// content, numbers stored as numbers, and `=` cells written as live formulas.
-fn sheet_xml(rows: &[Vec<String>]) -> String {
+fn sheet_xml(rows: &[Vec<String>], has_chart: bool) -> String {
     let mut body = String::new();
     for (r, row) in rows.iter().enumerate() {
         body.push_str(&format!("<row r=\"{}\">", r + 1));
@@ -322,8 +430,14 @@ fn sheet_xml(rows: &[Vec<String>]) -> String {
          <sheetViews><sheetView workbookViewId=\"0\">\
          <pane ySplit=\"1\" topLeftCell=\"A2\" activePane=\"bottomLeft\" state=\"frozen\"/>\
          </sheetView></sheetViews>\
-         {cols}<sheetData>{body}</sheetData></worksheet>",
-        cols = cols_xml(rows)
+         {cols}<sheetData>{body}</sheetData>{drawing}</worksheet>",
+        cols = cols_xml(rows),
+        // `drawing` must come after sheetData — Excel enforces element order.
+        drawing = if has_chart {
+            "<drawing xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" r:id=\"rId1\"/>"
+        } else {
+            ""
+        }
     )
 }
 
@@ -351,13 +465,124 @@ fn cols_xml(rows: &[Vec<String>]) -> String {
     out
 }
 
-fn workbook_xml(sheet_name: &str) -> String {
+fn workbook_xml(sheet_names: &[String]) -> String {
+    let sheets: String = sheet_names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            format!(
+                "<sheet name=\"{}\" sheetId=\"{n}\" r:id=\"rId{n}\"/>",
+                xml_escape(name),
+                n = i + 1
+            )
+        })
+        .collect();
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
          <workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" \
          xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">\
-         <sheets><sheet name=\"{}\" sheetId=\"1\" r:id=\"rId1\"/></sheets></workbook>",
-        xml_escape(sheet_name)
+         <sheets>{sheets}</sheets></workbook>"
+    )
+}
+
+/// Content types: one override per worksheet, plus the chart/drawing when used.
+fn xlsx_content_types(sheets: usize, chart: bool) -> String {
+    let mut out = String::from(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+         <Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">\
+         <Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>\
+         <Default Extension=\"xml\" ContentType=\"application/xml\"/>\
+         <Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/>\
+         <Override PartName=\"/xl/styles.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml\"/>",
+    );
+    for i in 1..=sheets {
+        out.push_str(&format!(
+            "<Override PartName=\"/xl/worksheets/sheet{i}.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/>"
+        ));
+    }
+    if chart {
+        out.push_str(
+            "<Override PartName=\"/xl/drawings/drawing1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.drawing+xml\"/>\
+             <Override PartName=\"/xl/charts/chart1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.drawingml.chart+xml\"/>",
+        );
+    }
+    out.push_str("</Types>");
+    out
+}
+
+/// Workbook relationships: rId1..N are the sheets, then styles.
+fn xlsx_workbook_rels(sheets: usize) -> String {
+    let mut out = String::from(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+         <Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">",
+    );
+    for i in 1..=sheets {
+        out.push_str(&format!(
+            "<Relationship Id=\"rId{i}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet{i}.xml\"/>"
+        ));
+    }
+    out.push_str(&format!(
+        "<Relationship Id=\"rId{}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles\" Target=\"styles.xml\"/></Relationships>",
+        sheets + 1
+    ));
+    out
+}
+
+/// Build the chart part, pointing its category and value series at real ranges
+/// on the first sheet so the chart updates when the numbers do.
+fn chart_xml(chart: &Chart, sheet: &str, rows: &[Vec<String>]) -> String {
+    let last = rows.len(); // header is row 1, so data ends at row `rows.len()`
+    let value_col = column_name(chart.value_column);
+    let label_col = column_name(0);
+    // Sheet names are single-quoted in formulas; embedded quotes are doubled.
+    let quoted = sheet.replace('\'', "''");
+    let cats = format!("'{quoted}'!${label_col}$2:${label_col}${last}");
+    let vals = format!("'{quoted}'!${value_col}$2:${value_col}${last}");
+    let series_name = format!("'{quoted}'!${value_col}$1");
+
+    // Pie charts have no axes; bar and line share a category/value axis pair.
+    let (axes_ids, axes) = if chart.kind == ChartKind::Pie {
+        (String::new(), String::new())
+    } else {
+        (
+            "<c:axId val=\"111111111\"/><c:axId val=\"222222222\"/>".to_string(),
+            "<c:catAx><c:axId val=\"111111111\"/><c:scaling><c:orientation val=\"minMax\"/>\
+             </c:scaling><c:delete val=\"0\"/><c:axPos val=\"b\"/>\
+             <c:crossAx val=\"222222222\"/></c:catAx>\
+             <c:valAx><c:axId val=\"222222222\"/><c:scaling><c:orientation val=\"minMax\"/>\
+             </c:scaling><c:delete val=\"0\"/><c:axPos val=\"l\"/>\
+             <c:crossAx val=\"111111111\"/></c:valAx>"
+                .to_string(),
+        )
+    };
+    let kind_attrs = match chart.kind {
+        ChartKind::Bar => "<c:barDir val=\"col\"/><c:grouping val=\"clustered\"/>",
+        ChartKind::Line => "<c:grouping val=\"standard\"/>",
+        ChartKind::Pie => "",
+    };
+    let element = chart.kind.element();
+    let title = if chart.title.trim().is_empty() {
+        String::new()
+    } else {
+        format!(
+            "<c:title><c:tx><c:rich><a:bodyPr/><a:p><a:r><a:t>{}</a:t></a:r></a:p></c:rich>\
+             </c:tx><c:overlay val=\"0\"/></c:title><c:autoTitleDeleted val=\"0\"/>",
+            xml_escape(chart.title.trim())
+        )
+    };
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+         <c:chartSpace xmlns:c=\"http://schemas.openxmlformats.org/drawingml/2006/chart\" \
+         xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" \
+         xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">\
+         <c:chart>{title}<c:plotArea><c:layout/>\
+         <c:{element}>{kind_attrs}\
+         <c:ser><c:idx val=\"0\"/><c:order val=\"0\"/>\
+         <c:tx><c:strRef><c:f>{series_name}</c:f></c:strRef></c:tx>\
+         <c:cat><c:strRef><c:f>{cats}</c:f></c:strRef></c:cat>\
+         <c:val><c:numRef><c:f>{vals}</c:f></c:numRef></c:val>\
+         </c:ser>{axes_ids}</c:{element}>{axes}</c:plotArea>\
+         <c:plotVisOnly val=\"1\"/><c:dispBlanksAs val=\"gap\"/></c:chart></c:chartSpace>"
     )
 }
 
@@ -556,14 +781,33 @@ const STYLES: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\
 <w:pPr><w:ind w:left=\"420\"/></w:pPr><w:rPr><w:i/><w:color w:val=\"555555\"/></w:rPr></w:style>\
 </w:styles>";
 
-const XLSX_CONTENT_TYPES: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
-<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">\
-<Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>\
-<Default Extension=\"xml\" ContentType=\"application/xml\"/>\
-<Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/>\
-<Override PartName=\"/xl/worksheets/sheet1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/>\
-<Override PartName=\"/xl/styles.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml\"/>\
-</Types>";
+/// Sheet 1 → the drawing that hosts the chart.
+const SHEET_DRAWING_RELS: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
+<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing\" Target=\"../drawings/drawing1.xml\"/>\
+</Relationships>";
+
+/// The drawing → the chart part.
+const DRAWING_RELS: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
+<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart\" Target=\"../charts/chart1.xml\"/>\
+</Relationships>";
+
+/// Anchors the chart to the right of the data (columns E–M, rows 2–18).
+const DRAWING: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+<xdr:wsDr xmlns:xdr=\"http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing\" \
+xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" \
+xmlns:c=\"http://schemas.openxmlformats.org/drawingml/2006/chart\" \
+xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">\
+<xdr:twoCellAnchor>\
+<xdr:from><xdr:col>4</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>\
+<xdr:to><xdr:col>12</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>18</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>\
+<xdr:graphicFrame macro=\"\">\
+<xdr:nvGraphicFramePr><xdr:cNvPr id=\"2\" name=\"Chart 1\"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr>\
+<xdr:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"0\" cy=\"0\"/></xdr:xfrm>\
+<a:graphic><a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/chart\">\
+<c:chart r:id=\"rId1\"/></a:graphicData></a:graphic>\
+</xdr:graphicFrame><xdr:clientData/></xdr:twoCellAnchor></xdr:wsDr>";
 
 /// Two cell formats: 0 = normal, 1 = bold (used for the header row). Excel
 /// requires the first two fills to be `none` and `gray125`.
@@ -587,12 +831,6 @@ const XLSX_STYLES: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\
 const XLSX_ROOT_RELS: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
 <Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
 <Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"xl/workbook.xml\"/>\
-</Relationships>";
-
-const XLSX_WB_RELS: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
-<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
-<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet1.xml\"/>\
-<Relationship Id=\"rId2\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles\" Target=\"styles.xml\"/>\
 </Relationships>";
 
 #[cfg(test)]
@@ -650,7 +888,7 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[1], vec!["Kampala", "1500"]);
 
-        let xml = sheet_xml(&rows);
+        let xml = sheet_xml(&rows, false);
         // Text is inline; numbers are stored as numbers so Excel can sum them.
         assert!(xml.contains("t=\"inlineStr\""));
         assert!(xml.contains("<c r=\"B2\"><v>1500</v></c>"));
@@ -660,7 +898,7 @@ mod tests {
     fn formulas_header_and_layout() {
         let rows =
             parse_delimited("Region,Revenue\nKampala,1500\nNairobi,900\nTotal,=SUM(B2:B3)\n");
-        let xml = sheet_xml(&rows);
+        let xml = sheet_xml(&rows, false);
         // `=` becomes a live formula Excel evaluates, not text.
         assert!(xml.contains("<f>SUM(B2:B3)</f>"), "formula missing: {xml}");
         assert!(!xml.contains("=SUM"), "formula must not be stored as text");
@@ -672,6 +910,63 @@ mod tests {
         );
         assert!(xml.contains("state=\"frozen\""), "header not frozen");
         assert!(xml.contains("<cols>"), "column widths missing");
+    }
+
+    #[test]
+    fn chart_series_point_at_real_sheet_ranges() {
+        let rows = parse_delimited("Region,Revenue\nKampala,1500\nNairobi,900\nLagos,1200\n");
+        let chart = Chart {
+            kind: ChartKind::Bar,
+            title: "Revenue by region".to_string(),
+            value_column: 1,
+        };
+        let xml = chart_xml(&chart, "Q3 Revenue", &rows);
+        // Categories from column A, values from column B, over the data rows.
+        assert!(xml.contains("<c:f>'Q3 Revenue'!$A$2:$A$4</c:f>"), "{xml}");
+        assert!(xml.contains("<c:f>'Q3 Revenue'!$B$2:$B$4</c:f>"), "{xml}");
+        assert!(xml.contains("<c:f>'Q3 Revenue'!$B$1</c:f>"), "series name");
+        assert!(xml.contains("barChart") && xml.contains("Revenue by region"));
+        // Bar/line charts need an axis pair; pie charts must not have one.
+        assert!(xml.contains("c:catAx"));
+        let pie = Chart {
+            kind: ChartKind::Pie,
+            title: String::new(),
+            value_column: 1,
+        };
+        let pie_xml = chart_xml(&pie, "S", &rows);
+        assert!(pie_xml.contains("pieChart"));
+        assert!(!pie_xml.contains("c:catAx"), "pie charts have no axes");
+    }
+
+    #[test]
+    fn chart_kinds_and_sheet_names_are_normalised() {
+        assert_eq!(ChartKind::parse("Column"), Some(ChartKind::Bar));
+        assert_eq!(ChartKind::parse("trend"), Some(ChartKind::Line));
+        assert_eq!(ChartKind::parse("donut"), Some(ChartKind::Pie));
+        assert_eq!(ChartKind::parse("radar"), None);
+        // Excel rejects these characters and names over 31 chars.
+        assert_eq!(sanitize_sheet_name("Q3/Q4: [data]?"), "Q3Q4 data");
+        assert_eq!(sanitize_sheet_name(&"x".repeat(40)).len(), 31);
+    }
+
+    #[test]
+    fn multi_sheet_workbook_wires_every_part() {
+        let names = vec!["Data".to_string(), "Summary".to_string()];
+        let wb = workbook_xml(&names);
+        assert!(wb.contains("name=\"Data\" sheetId=\"1\" r:id=\"rId1\""));
+        assert!(wb.contains("name=\"Summary\" sheetId=\"2\" r:id=\"rId2\""));
+        // Sheets take rId1..N; styles follow.
+        let rels = xlsx_workbook_rels(2);
+        assert!(rels.contains("Id=\"rId2\"") && rels.contains("worksheets/sheet2.xml"));
+        assert!(rels.contains("Id=\"rId3\"") && rels.contains("styles.xml"));
+        // Content types list every sheet, and chart parts only when charted.
+        let types = xlsx_content_types(2, true);
+        assert!(types.contains("/xl/worksheets/sheet2.xml"));
+        assert!(types.contains("/xl/charts/chart1.xml"));
+        assert!(!xlsx_content_types(2, false).contains("chart1.xml"));
+        // The drawing reference belongs after sheetData, and only when charted.
+        assert!(sheet_xml(&[vec!["a".into()]], true).contains("<drawing"));
+        assert!(!sheet_xml(&[vec!["a".into()]], false).contains("<drawing"));
     }
 
     #[test]
