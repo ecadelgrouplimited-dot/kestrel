@@ -200,6 +200,7 @@ pub fn tools_for(profile: Profile) -> Vec<ToolSpec> {
                 "spawn_subagent",
                 // Files & content
                 "read_file",
+                "read_doc",
                 "write_file",
                 "edit_file",
                 "list_dir",
@@ -242,8 +243,11 @@ pub fn work_system_prompt(root: &Path) -> String {
          - web_search(query) / http_get(url) / check_page(url, expect): research. Search for \
            sources, read them, and confirm facts. NEVER assert a fact you have not checked — \
            cite where each claim came from.\n\
+         - read_doc(path): read a REAL document — Word (.docx/.doc/.rtf), PDF, or Excel \
+           (.xlsx, as TSV per sheet). Always use this for those formats; read_file only handles \
+           plain text and will return garbage for them.\n\
          - read_file(path) / write_file(path, contents) / edit_file(path, old, new) / \
-           list_dir(path) / search(query): read and produce real documents and data files in the \
+           list_dir(path) / search(query): read and produce text documents and data files in the \
            user's workspace. edit_file makes targeted revisions without rewriting a whole \
            document.\n\
          - run_command(command): run a command (PowerShell is available) to convert, inspect, or \
@@ -470,6 +474,19 @@ pub fn builtin_tools() -> Vec<ToolSpec> {
             name: "read_file".to_string(),
             description: "Read a UTF-8 text file from the user's computer. Accepts an absolute \
                           path or a path relative to the project root."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": { "path": { "type": "string" } },
+                "required": ["path"],
+            }),
+        },
+        ToolSpec {
+            name: "read_doc".to_string(),
+            description: "Read a real document's text: Word (.docx/.doc/.rtf/.odt), PDF, or Excel \
+                          (.xlsx/.xls, returned as TSV per sheet). Use this instead of read_file \
+                          for anything that isn't plain text — read_file only handles UTF-8 and \
+                          will produce garbage for these formats."
                 .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
@@ -771,6 +788,7 @@ pub fn describe_call(call: &ToolCall) -> String {
         "remember" => "🧠 Remembering a project fact".to_string(),
         "spawn_subagent" => format!("🤝 Delegating: {}", arg("task")),
         "read_file" => format!("📖 Reading {}", arg("path")),
+        "read_doc" => format!("📄 Reading document {}", arg("path")),
         "list_dir" => format!("📁 Listing {}", arg("path")),
         "http_get" => format!("🌐 Fetching {}", arg("url")),
         "web_search" => format!("🔍 Searching the web: \"{}\"", arg("query")),
@@ -819,6 +837,29 @@ pub fn execute_tool(root: &Path, call: &ToolCall) -> String {
             let path = resolve_read_path(root, &arg("path"));
             match std::fs::read_to_string(&path) {
                 Ok(text) => cap(text),
+                Err(err) => format!("error: {err}"),
+            }
+        }
+        "read_doc" => {
+            let path = resolve_read_path(root, &arg("path"));
+            match crate::office::read_document(&path) {
+                Ok((text, kind)) => {
+                    let via = match kind {
+                        crate::office::DocKind::Text => "plain text",
+                        crate::office::DocKind::Word => "Word document",
+                        crate::office::DocKind::Excel => "spreadsheet",
+                        crate::office::DocKind::Pdf => "PDF",
+                        crate::office::DocKind::Rtf => "RTF",
+                    };
+                    if text.trim().is_empty() {
+                        format!(
+                            "({} read via {via}, but it contains no text)",
+                            path.display()
+                        )
+                    } else {
+                        cap(format!("[read via {via}]\n{text}"))
+                    }
+                }
                 Err(err) => format!("error: {err}"),
             }
         }
@@ -1489,6 +1530,15 @@ pub fn git_review(root: &Path) -> GitReview {
 /// show a file as it's written. Returns the decoded string so far, or `None` if
 /// the field/opening quote hasn't streamed in yet.
 pub fn partial_json_string_field(buf: &str, field: &str) -> Option<String> {
+    json_string_field_state(buf, field).map(|(value, _)| value)
+}
+
+/// Like [`partial_json_string_field`], but also reports whether the value is
+/// **final** — its closing quote has arrived. Callers that key off a value (a
+/// filename, say) must wait for `true`, or a half-streamed value will be treated
+/// as a real one. Models order JSON keys freely, so a field can still be
+/// mid-flight after a later field has appeared.
+pub fn json_string_field_state(buf: &str, field: &str) -> Option<(String, bool)> {
     let key = format!("\"{field}\"");
     let bytes = buf.as_bytes();
     let mut idx = buf.find(&key)? + key.len();
@@ -1514,7 +1564,7 @@ pub fn partial_json_string_field(buf: &str, field: &str) -> Option<String> {
     while i < chars.len() {
         let c = chars[i];
         if c == '"' {
-            return Some(out); // reached the closing quote — value complete
+            return Some((out, true)); // closing quote reached — value is final
         }
         if c == '\\' {
             let Some(&e) = chars.get(i + 1) else {
@@ -1550,7 +1600,7 @@ pub fn partial_json_string_field(buf: &str, field: &str) -> Option<String> {
         out.push(c);
         i += 1;
     }
-    Some(out) // partial value: the stream ended before the closing quote
+    Some((out, false)) // still streaming: no closing quote yet
 }
 
 /// The added/removed line counts of a unified diff, ignoring the `+++`/`---`
@@ -2037,17 +2087,17 @@ fn streamed_turn(
             "edit_file" => "new",
             _ => return,
         };
-        // Only preview once the body field has started streaming. Because
-        // the body key (`contents`/`new`) comes after `path` in the emitted
-        // JSON, its presence means `path`'s value has fully closed — so the
-        // path we read is complete, never a half-streamed phantom filename.
+        // Only preview once the body field has started streaming…
         let Some(contents) = partial_json_string_field(args, field) else {
             return;
         };
-        let Some(path) = partial_json_string_field(args, "path") else {
+        // …and only once `path` is FINAL. Models order keys freely — several
+        // stream `contents` before `path` — so a still-streaming filename would
+        // otherwise register as its own phantom file ("EC", "ECAD", "ECADEL"…).
+        let Some((path, path_final)) = json_string_field_state(args, "path") else {
             return;
         };
-        if path.is_empty() {
+        if !path_final || path.is_empty() {
             return;
         }
         let entry = last_len.entry(path.clone()).or_insert(0);
@@ -2806,6 +2856,22 @@ mod tests {
         );
         // Field not present yet.
         assert_eq!(partial_json_string_field(r#"{"path":"#, "contents"), None);
+    }
+
+    #[test]
+    fn a_half_streamed_path_is_reported_as_not_final() {
+        // Regression: some models stream `contents` BEFORE `path`. A partial
+        // filename must never be treated as a real file, or the UI fills with
+        // phantoms ("EC", "ECAD", "ECADEL"…).
+        let mid = r##"{"contents":"# Report\n\nbody","path":"ECADEL"##;
+        let (value, is_final) = json_string_field_state(mid, "path").unwrap();
+        assert_eq!(value, "ECADEL");
+        assert!(!is_final, "a path still streaming must not be final");
+
+        let done = r##"{"contents":"# Report","path":"ECADEL_Profile.md"}"##;
+        let (value, is_final) = json_string_field_state(done, "path").unwrap();
+        assert_eq!(value, "ECADEL_Profile.md");
+        assert!(is_final, "a closed path must be final");
     }
 
     #[test]

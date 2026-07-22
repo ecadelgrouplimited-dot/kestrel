@@ -10,6 +10,7 @@ pub mod format;
 pub mod graph;
 pub mod inspect;
 pub mod memory;
+pub mod office;
 pub mod plan;
 pub mod policy;
 pub mod pricing;
@@ -58,6 +59,7 @@ pub use inspect::{
     LanguageSummary, ProjectInspection, ProjectMarker, SymbolSummary,
 };
 pub use memory::{load_memory, remember, render_memory, save_memory, MemoryNote};
+pub use office::{kind_for, read_document, DocKind};
 pub use plan::{
     clear_plan, load_plan, plan_from_tool_input, save_plan, Plan, PlanStep, StepStatus,
 };
