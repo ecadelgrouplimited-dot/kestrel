@@ -5,6 +5,7 @@ pub mod codenav;
 pub mod config;
 pub mod context;
 pub mod diagnostics;
+pub mod docwrite;
 pub mod environment;
 pub mod format;
 pub mod graph;
@@ -49,6 +50,7 @@ pub use context::{
     ContextEntry, ContextPack,
 };
 pub use diagnostics::{checker_name, run_diagnostics, Diagnostic, Severity};
+pub use docwrite::{column_name, markdown_to_document_xml, write_docx, write_xlsx};
 pub use environment::{discover_environment, EnvironmentReport, ToolInfo, WslInfo};
 pub use format::{can_format, format_source, formatter_for, Formatter};
 pub use graph::{

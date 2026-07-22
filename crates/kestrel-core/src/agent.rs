@@ -202,6 +202,8 @@ pub fn tools_for(profile: Profile) -> Vec<ToolSpec> {
                 "read_file",
                 "read_doc",
                 "write_file",
+                "write_doc",
+                "write_sheet",
                 "edit_file",
                 "list_dir",
                 "search",
@@ -260,10 +262,12 @@ pub fn work_system_prompt(root: &Path) -> String {
          HOW TO WORK:\n\
          1. PLAN first for anything multi-step.\n\
          2. RESEARCH before you assert. Prefer primary sources; note the URL for each key claim.\n\
-         3. PRODUCE REAL FILES. Deliver the actual document (Markdown by default unless the user \
-            asks for another format) written into the workspace with write_file — do not just \
-            paste a draft into chat. Structure it properly: a clear title, sections, and a short \
-            summary up front.\n\
+         3. PRODUCE REAL FILES in the format the user actually wants — do not just paste a draft \
+            into chat. Use write_doc(path.docx, markdown) for a Word document and \
+            write_sheet(path.xlsx, csv) for a spreadsheet; both are written directly, so never \
+            tell the user to convert anything themselves. Use write_file for .md/.txt/.csv. \
+            Structure the document properly: a clear title, sections, and a short summary up \
+            front.\n\
          4. CHECK YOUR WORK before you finish, the way a careful colleague would: does the \
             document contain every section the request asked for? Do the numbers add up and \
             agree between the text and the data? Is every claim sourced? Re-read the file you \
@@ -492,6 +496,38 @@ pub fn builtin_tools() -> Vec<ToolSpec> {
                 "type": "object",
                 "properties": { "path": { "type": "string" } },
                 "required": ["path"],
+            }),
+        },
+        ToolSpec {
+            name: "write_doc".to_string(),
+            description: "Write a real Word document (.docx) from Markdown. Supports headings \
+                          (#/##/###), paragraphs, **bold**, *italic*, `code`, bullet and numbered \
+                          lists, > quotes, and | tables |. Use this when the user wants a Word \
+                          document — no conversion step needed."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Must end in .docx" },
+                    "markdown": { "type": "string" },
+                },
+                "required": ["path", "markdown"],
+            }),
+        },
+        ToolSpec {
+            name: "write_sheet".to_string(),
+            description: "Write a real Excel workbook (.xlsx) from CSV or TSV rows. The first row \
+                          is the header; values that look numeric are stored as numbers so Excel \
+                          can sum and chart them."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Must end in .xlsx" },
+                    "data": { "type": "string", "description": "CSV or TSV, one row per line." },
+                    "sheet": { "type": "string", "description": "Sheet name (optional)." },
+                },
+                "required": ["path", "data"],
             }),
         },
         ToolSpec {
@@ -789,6 +825,8 @@ pub fn describe_call(call: &ToolCall) -> String {
         "spawn_subagent" => format!("🤝 Delegating: {}", arg("task")),
         "read_file" => format!("📖 Reading {}", arg("path")),
         "read_doc" => format!("📄 Reading document {}", arg("path")),
+        "write_doc" => format!("📝 Writing Word document {}", arg("path")),
+        "write_sheet" => format!("📊 Writing spreadsheet {}", arg("path")),
         "list_dir" => format!("📁 Listing {}", arg("path")),
         "http_get" => format!("🌐 Fetching {}", arg("url")),
         "web_search" => format!("🔍 Searching the web: \"{}\"", arg("query")),
@@ -1149,6 +1187,31 @@ pub fn execute_tool(root: &Path, call: &ToolCall) -> String {
         },
         "edit_file" => match safe_join(root, &arg("path")) {
             Ok(full) => edit_file(&full, &arg("old"), &arg("new")),
+            Err(err) => format!("error: {err}"),
+        },
+        "write_doc" => match safe_join(root, &arg("path")) {
+            Ok(full) => match crate::docwrite::write_docx(&full, &arg("markdown")) {
+                Ok(()) => format!(
+                    "wrote {} ({} bytes) — a real Word document",
+                    full.display(),
+                    std::fs::metadata(&full).map(|m| m.len()).unwrap_or(0)
+                ),
+                Err(err) => format!("error: {err}"),
+            },
+            Err(err) => format!("error: {err}"),
+        },
+        "write_sheet" => match safe_join(root, &arg("path")) {
+            Ok(full) => {
+                let sheet = arg("sheet");
+                match crate::docwrite::write_xlsx(&full, &arg("data"), &sheet) {
+                    Ok(()) => format!(
+                        "wrote {} ({} bytes) — a real Excel workbook",
+                        full.display(),
+                        std::fs::metadata(&full).map(|m| m.len()).unwrap_or(0)
+                    ),
+                    Err(err) => format!("error: {err}"),
+                }
+            }
             Err(err) => format!("error: {err}"),
         },
         other => format!("error: unknown tool {other}"),

@@ -1141,6 +1141,21 @@ impl KestrelApp {
         self.load_session_for_current_root();
     }
 
+    /// Point Kestrel Work at `dir`: park the current conversation, remember the
+    /// folder in the recents list, and pick up that folder's own session.
+    fn set_work_folder(&mut self, dir: String) {
+        if dir.trim().is_empty() || dir == self.work_folder {
+            return;
+        }
+        self.save_session();
+        self.work_folder = dir.clone();
+        self.settings.work_folder = Some(dir.clone());
+        kestrel_core::push_recent(&mut self.settings.work_recents, std::path::Path::new(&dir));
+        let _ = kestrel_core::save_settings(&self.settings);
+        self.load_session_for_current_root();
+        self.status = format!("Work folder: {dir}");
+    }
+
     /// Leave Kestrel Work, restoring the Build project's conversation.
     fn exit_work_mode(&mut self) {
         self.save_session();
@@ -2928,10 +2943,11 @@ impl KestrelApp {
         ui.add_space(6.0);
 
         let root = PathBuf::from(self.work_folder.trim());
+        let mut switch_to: Option<String> = None;
         ui.horizontal(|ui| {
             if ui
                 .button("📂 Folder…")
-                .on_hover_text("Choose the folder Kestrel Work may read and write")
+                .on_hover_text("Choose any folder for Kestrel Work to read and write")
                 .clicked()
             {
                 if let Some(dir) = rfd::FileDialog::new()
@@ -2939,15 +2955,32 @@ impl KestrelApp {
                     .set_directory(&root)
                     .pick_folder()
                 {
-                    self.save_session();
-                    self.work_folder = dir.display().to_string();
-                    self.settings.work_folder = Some(self.work_folder.clone());
-                    let _ = kestrel_core::save_settings(&self.settings);
-                    self.load_session_for_current_root();
+                    switch_to = Some(dir.display().to_string());
                 }
             }
             if ui.button("↗").on_hover_text("Open in Explorer").clicked() {
                 let _ = kestrel_core::open_path(&root.display().to_string());
+            }
+            // Quick-switch between folders used before.
+            if !self.settings.work_recents.is_empty() {
+                egui::ComboBox::from_id_source("work-recents")
+                    .selected_text("Recent")
+                    .width(90.0)
+                    .show_ui(ui, |ui| {
+                        for recent in self.settings.work_recents.clone() {
+                            let label = PathBuf::from(&recent)
+                                .file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_else(|| recent.clone());
+                            if ui
+                                .selectable_label(recent == self.work_folder, label)
+                                .on_hover_text(&recent)
+                                .clicked()
+                            {
+                                switch_to = Some(recent.clone());
+                            }
+                        }
+                    });
             }
         });
         ui.label(
@@ -2956,6 +2989,9 @@ impl KestrelApp {
                 .small()
                 .weak(),
         );
+        if let Some(dir) = switch_to {
+            self.set_work_folder(dir);
+        }
         ui.separator();
 
         if !root.is_dir() {

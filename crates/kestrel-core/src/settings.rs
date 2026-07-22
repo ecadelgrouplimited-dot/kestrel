@@ -36,6 +36,9 @@ pub struct Settings {
     /// reads and writes here, keeping it away from code projects.
     #[serde(default)]
     pub work_folder: Option<String>,
+    /// Recently used Work folders, most recent first, for quick switching.
+    #[serde(default)]
+    pub work_recents: Vec<String>,
 }
 
 /// Spend caps in USD. `None`/`0` means no limit.
@@ -269,6 +272,7 @@ mod tests {
             policy: crate::policy::Policy::default(),
             ask_permission: true,
             work_folder: None,
+            work_recents: Vec::new(),
         };
         let mut provider = provider_preset("deepseek").unwrap();
         provider.api_key = "sk-secret".to_string();

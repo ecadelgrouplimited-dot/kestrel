@@ -153,10 +153,28 @@ codebase cheaply.
   right. Build and Work keep **separate conversations**, each saved to its own
   root. Work already researches the web and writes real documents into the
   workspace. *Nothing user-visible changed in Build.*
-- **W1 — Documents.** Read/write/edit md, txt, csv, docx (COM + fallback);
-  document preview; document diff + accept/reject; checkpoints for documents.
-- **W2 — Spreadsheets & data.** Excel ranges, formulas, charts; CSV cleaning,
-  joins, summaries; number-reconciliation checks.
+- **W1 — Documents.** ✅ **shipped.** `read_doc` reads what a Work folder actually
+  holds: `.docx`/`.odt` (unzip + de-XML), `.xlsx` (shared strings → TSV per
+  sheet), `.pdf` (pdftotext), `.rtf`. Reads a file that is **open in Word** right
+  now (`FileShare::ReadWrite`).
+- **W2 — Documents out & spreadsheets.** ✅ **shipped.** `write_doc` produces a
+  **real `.docx`** from Markdown (headings, bold/italic/code, bullet + numbered
+  lists, quotes, bordered tables) and `write_sheet` a **real `.xlsx`** from
+  CSV/TSV (numbers stored as numbers). Both verified opening natively in Word and
+  Excel, no Compatibility Mode. Work folders are now **any folder**, with a
+  recents list for quick switching.
+
+  > **Design note.** Both reading and writing deliberately avoid **Office COM**.
+  > Testing showed COM attaches to the user's *running* Word — hiding their
+  > window and mutating their session — and hangs forever on modal dialogs. Open
+  > XML files are ZIP+XML, so Kestrel builds and parses the parts directly and
+  > zips them via PowerShell's built-in compression: no Office required, open
+  > documents untouched, and nothing can hang. (Entry names must use forward
+  > slashes — .NET's `CreateFromDirectory` emits backslashes and Word rejects the
+  > result as corrupt.)
+
+- **W2b — Spreadsheet intelligence.** Formulas, charts, cleaning, joins, and
+  number-reconciliation checks.
 - **W3 — Research → report.** The wedge, end to end: research with citations →
   data → finished document → export to PDF/DOCX, with acceptance checks.
 - **W4 — Email.** Outlook triage, summarize, draft; **send is always
