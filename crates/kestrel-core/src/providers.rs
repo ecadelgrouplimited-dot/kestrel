@@ -787,6 +787,11 @@ pub fn run_turn(
 pub enum TurnEvent<'a> {
     /// A chunk of the model's narration text.
     Text(&'a str),
+    /// A chunk of the model's *reasoning* — the chain-of-thought that reasoning
+    /// models emit before they answer. It arrives on a separate field
+    /// (`reasoning_content` for OpenAI-compatible models, `thinking_delta` for
+    /// Anthropic) and is shown live but never fed back into the conversation.
+    Reasoning(&'a str),
     /// A tool call's arguments *so far* (the accumulated JSON string). Emitted on
     /// every delta, so a consumer can show a file being written as it streams.
     ToolProgress { name: &'a str, args: &'a str },
@@ -860,6 +865,15 @@ impl StreamState {
                             on_event(TurnEvent::Text(t));
                         }
                     }
+                    // Extended thinking — shown live, never added to `text`.
+                    Some("thinking_delta") => {
+                        if let Some(t) = delta
+                            .and_then(|d| d.get("thinking"))
+                            .and_then(|t| t.as_str())
+                        {
+                            on_event(TurnEvent::Reasoning(t));
+                        }
+                    }
                     Some("input_json_delta") => {
                         if let Some(pj) = delta
                             .and_then(|d| d.get("partial_json"))
@@ -889,6 +903,18 @@ impl StreamState {
     }
 
     fn handle_openai(&mut self, value: &serde_json::Value, on_event: &mut dyn FnMut(TurnEvent)) {
+        // Reasoning models (Kimi K3, deepseek-reasoner, GLM thinking) stream
+        // their chain-of-thought here, often for minutes before any `content`
+        // appears. Surface it live — but never append it to `text`, which
+        // becomes the assistant message sent back next turn.
+        if let Some(t) = value
+            .pointer("/choices/0/delta/reasoning_content")
+            .and_then(|c| c.as_str())
+        {
+            if !t.is_empty() {
+                on_event(TurnEvent::Reasoning(t));
+            }
+        }
         if let Some(t) = value
             .pointer("/choices/0/delta/content")
             .and_then(|c| c.as_str())

@@ -38,9 +38,9 @@ pub use agent::{
     audit_log_path, builtin_tools, describe_call, diff_line_stats, diff_stats_by_file,
     execute_tool, git_checkpoint, git_commit_all, git_init, git_log, git_restore, git_revert_all,
     git_review, history_tokens, load_agent_session, parse_file_edits, partial_json_string_field,
-    porcelain_path, run_agent, run_shell_command, save_agent_session, system_prompt_for, tools_for,
-    work_system_prompt, AgentEvent, AgentOutcome, AgentSession, AppliedEdit, Checkpoint, FileEdit,
-    GitReview, Profile,
+    porcelain_path, run_agent, run_shell_command, save_agent_session, system_prompt_for,
+    thinking_tail, tools_for, work_system_prompt, AgentEvent, AgentOutcome, AgentSession,
+    AppliedEdit, Checkpoint, FileEdit, GitReview, Profile,
 };
 pub use browser::{
     failed_metrics, find_browser, find_metric, missing_content, render_dom, MetricCheck,

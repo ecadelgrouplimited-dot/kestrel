@@ -173,6 +173,9 @@ pub enum AgentEvent {
     Usage(Usage),
     /// The agent's task plan changed — the live TODO ledger for the UI.
     Plan(crate::plan::Plan),
+    /// What the model is saying or reasoning *right now*, so a long turn shows
+    /// its working instead of a frozen "Planning…". Display only.
+    Thinking(String),
 }
 
 /// Which product surface the agent is running as. The autonomy engine is the
@@ -1785,6 +1788,26 @@ fn run_shell(root: &Path, command: &str, timeout: Duration) -> String {
 
 /// Search the project's text files for `query` (case-insensitive substring),
 /// returning up to `max` `path:line: text` matches. Build/VCS dirs are skipped.
+/// The most recent fragment of what the model is saying, cleaned up for a
+/// one-line status: the tail (what it's thinking about *now*), collapsed onto a
+/// single line and cut at a word boundary.
+pub fn thinking_tail(text: &str) -> String {
+    const MAX: usize = 140;
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= MAX {
+        return flat;
+    }
+    // Keep the end, then drop a partial leading word so it reads cleanly.
+    let tail: String = flat
+        .chars()
+        .skip(flat.chars().count().saturating_sub(MAX))
+        .collect();
+    match tail.find(' ') {
+        Some(i) => format!("…{}", &tail[i + 1..]),
+        None => format!("…{tail}"),
+    }
+}
+
 /// Parse a `measure` tool argument into numeric assertions.
 fn metric_checks(value: Option<&serde_json::Value>) -> Vec<crate::browser::MetricCheck> {
     value
@@ -2535,9 +2558,23 @@ fn streamed_turn(
     // Throttle live previews: only re-emit once a file's streamed contents have
     // grown by a chunk, so we don't flood the channel with tiny deltas.
     let mut last_len: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    // A rolling buffer of what the model is saying/reasoning right now, so a
+    // long first turn shows its working instead of a frozen "Planning…".
+    let mut thought = String::new();
+    let mut thought_emitted = 0usize;
     let stream = run_turn_streaming(config, model, 8192, Some(system), history, tools, |ev| {
-        let TurnEvent::ToolProgress { name, args } = ev else {
-            return;
+        let (name, args) = match ev {
+            // Narration and chain-of-thought both feed the live status line.
+            TurnEvent::Text(t) | TurnEvent::Reasoning(t) => {
+                thought.push_str(t);
+                // Throttle: emitting per token would flood the channel.
+                if thought.len() >= thought_emitted + 48 {
+                    thought_emitted = thought.len();
+                    on_event(AgentEvent::Thinking(thinking_tail(&thought)));
+                }
+                return;
+            }
+            TurnEvent::ToolProgress { name, args } => (name, args),
         };
         let field = match name {
             "write_file" => "contents",
@@ -3232,6 +3269,23 @@ mod tests {
         );
         assert!(err.starts_with("error:"), "unknown repo: {err}");
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn thinking_tail_shows_the_most_recent_words() {
+        // Short thoughts pass through, flattened onto one line.
+        assert_eq!(
+            thinking_tail("The user\n  wants a  configurator"),
+            "The user wants a configurator"
+        );
+        // A long chain-of-thought keeps the END — what it's thinking about now.
+        let long = format!("{} and finally the important bit", "filler ".repeat(60));
+        let tail = thinking_tail(&long);
+        assert!(tail.ends_with("and finally the important bit"), "{tail}");
+        assert!(tail.starts_with('…'));
+        assert!(tail.chars().count() <= 142);
+        // It never cuts mid-word.
+        assert!(!tail.trim_start_matches('…').starts_with("ler"));
     }
 
     #[test]

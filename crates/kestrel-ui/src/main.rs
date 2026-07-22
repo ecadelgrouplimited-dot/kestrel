@@ -68,6 +68,8 @@ enum AgentUpdate {
     Usage(kestrel_core::Usage),
     /// The agent's task plan changed — the live TODO ledger.
     Plan(kestrel_core::Plan),
+    /// What the model is saying/reasoning right now (display only).
+    Thinking(String),
     /// The agent finished; carries the final summary and the full conversation
     /// so a follow-up prompt can refine the same project.
     Done {
@@ -245,6 +247,8 @@ struct KestrelApp {
     agent_activity: String,
     /// The agent's live task plan (TODO ledger), if any.
     agent_plan: Option<kestrel_core::Plan>,
+    /// What the model is saying/reasoning right now, shown while it works.
+    agent_thought: String,
     /// When the current run started, for the live clock.
     agent_started: Option<std::time::Instant>,
     /// Session cost when the run began, so we can price just this run.
@@ -372,6 +376,7 @@ impl Default for KestrelApp {
             agent_messages: Vec::new(),
             agent_activity: String::new(),
             agent_plan: None,
+            agent_thought: String::new(),
             agent_started: None,
             run_start_cost: 0.0,
             last_run: None,
@@ -547,6 +552,7 @@ impl KestrelApp {
         }
         self.chat_pending = false;
         self.agent_activity.clear();
+        self.agent_thought.clear();
         self.agent_job = None;
         self.agent_cancel = None;
         self.agent_decision = None;
@@ -612,6 +618,8 @@ impl KestrelApp {
                     ctx.request_repaint();
                 }
                 Ok(AgentUpdate::Activity(line)) => {
+                    // A concrete action supersedes whatever it was mulling over.
+                    self.agent_thought.clear();
                     self.agent_activity = line.clone();
                     self.chat_history
                         .push(kestrel_core::ChatMessage::assistant(line));
@@ -630,6 +638,10 @@ impl KestrelApp {
                         self.save_session();
                         break;
                     }
+                    ctx.request_repaint();
+                }
+                Ok(AgentUpdate::Thinking(thought)) => {
+                    self.agent_thought = thought;
                     ctx.request_repaint();
                 }
                 Ok(AgentUpdate::Plan(plan)) => {
@@ -2501,12 +2513,14 @@ impl KestrelApp {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.spinner();
-                    let activity = if self.agent_activity.is_empty() {
-                        "Thinking…"
+                    // Prefer a concrete action; otherwise a phrase that changes
+                    // as time passes, so a long turn never looks frozen.
+                    let headline = if self.agent_activity.is_empty() {
+                        working_phrase(elapsed, !self.agent_thought.is_empty())
                     } else {
-                        self.agent_activity.as_str()
+                        self.agent_activity.clone()
                     };
-                    ui.label(egui::RichText::new(activity).strong().color(ACCENT));
+                    ui.label(egui::RichText::new(headline).strong().color(ACCENT));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(
                             egui::RichText::new(human_duration(elapsed))
@@ -2515,6 +2529,20 @@ impl KestrelApp {
                         );
                     });
                 });
+                // The model's own words as it reasons — this is what turns a
+                // frozen "Planning…" into something you can actually follow.
+                if !self.agent_thought.is_empty() {
+                    ui.add_space(3.0);
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(&self.agent_thought)
+                                .small()
+                                .italics()
+                                .weak(),
+                        )
+                        .wrap(),
+                    );
+                }
             });
         ui.ctx().request_repaint();
     }
@@ -3653,6 +3681,7 @@ impl KestrelApp {
                         }
                         kestrel_core::AgentEvent::Usage(usage) => AgentUpdate::Usage(usage),
                         kestrel_core::AgentEvent::Plan(plan) => AgentUpdate::Plan(plan),
+                        kestrel_core::AgentEvent::Thinking(t) => AgentUpdate::Thinking(t),
                     };
                     let _ = events.send(update);
                 },
@@ -4479,6 +4508,44 @@ struct RunSummary {
     duration: f32,
     cost: f64,
     ok: bool,
+}
+
+/// A status phrase for a turn that hasn't produced a concrete action yet.
+///
+/// Fixed text ("Planning…") reads as *frozen* when a reasoning model spends
+/// minutes before its first tool call. The phrase rotates every few seconds and
+/// gets more candid the longer it runs, so the wait always looks alive and
+/// honest.
+fn working_phrase(elapsed: f32, has_thought: bool) -> String {
+    const EARLY: &[&str] = &[
+        "Getting oriented…",
+        "Reading the request…",
+        "Sketching an approach…",
+        "Working out where to start…",
+    ];
+    const THINKING: &[&str] = &[
+        "Thinking it through…",
+        "Weighing the options…",
+        "Reasoning about the design…",
+        "Following the thread…",
+        "Chewing on this…",
+    ];
+    const LONG: &[&str] = &[
+        "Still reasoning — this one's meaty…",
+        "Taking its time on purpose…",
+        "Deep in it…",
+        "Long think in progress…",
+    ];
+    // Reasoning models can go quiet for minutes; after a while, say so.
+    let pool = if elapsed > 90.0 {
+        LONG
+    } else if elapsed > 12.0 || has_thought {
+        THINKING
+    } else {
+        EARLY
+    };
+    // Change every ~5 seconds.
+    pool[((elapsed / 5.0) as usize) % pool.len()].to_string()
 }
 
 /// A compact duration: `4.2s`, `1m 12s`.
