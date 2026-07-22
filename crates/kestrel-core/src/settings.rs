@@ -32,6 +32,10 @@ pub struct Settings {
     /// Prompt for permission before the agent runs commands/installs/git.
     #[serde(default)]
     pub ask_permission: bool,
+    /// The folder Kestrel **Work** operates in (its scoped workspace). Work only
+    /// reads and writes here, keeping it away from code projects.
+    #[serde(default)]
+    pub work_folder: Option<String>,
 }
 
 /// Spend caps in USD. `None`/`0` means no limit.
@@ -264,6 +268,7 @@ mod tests {
             budget: Budget::default(),
             policy: crate::policy::Policy::default(),
             ask_permission: true,
+            work_folder: None,
         };
         let mut provider = provider_preset("deepseek").unwrap();
         provider.api_key = "sk-secret".to_string();

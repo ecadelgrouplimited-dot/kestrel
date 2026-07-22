@@ -121,6 +121,9 @@ enum AppView {
     Chat,
     Usage,
     Workflows,
+    /// Kestrel Work — the everyday knowledge-work surface (research, documents,
+    /// data) in its own scoped folder, separate from the coding project.
+    Work,
 }
 
 /// Which pane the central area shows in the Main view.
@@ -252,6 +255,8 @@ struct KestrelApp {
     agent_decision: Option<Sender<ApprovalDecision>>,
     /// Whether to prompt before the agent runs commands/installs/git.
     ask_permission: bool,
+    /// Kestrel Work's scoped workspace folder (documents live here, not code).
+    work_folder: String,
     /// Actual token usage this conversation, for the live meter.
     session_usage: kestrel_core::Usage,
     session_cost: f64,
@@ -290,6 +295,12 @@ impl Default for KestrelApp {
             .unwrap_or_default();
         let policy_patterns = settings.policy.denied_patterns.join("\n");
         let ask_permission = settings.ask_permission;
+        // Work defaults to the user's Documents folder — a sane, non-code place.
+        let work_folder = settings.work_folder.clone().unwrap_or_else(|| {
+            std::env::var("USERPROFILE")
+                .map(|home| format!("{home}\\Documents"))
+                .unwrap_or_else(|_| path.clone())
+        });
         let workspace_repos = kestrel_core::load_workspace(std::path::Path::new(&path)).repos;
         Self {
             view: AppView::Main,
@@ -360,6 +371,7 @@ impl Default for KestrelApp {
             pending_approval: None,
             agent_decision: None,
             ask_permission,
+            work_folder,
             session_usage: kestrel_core::Usage::default(),
             session_cost: 0.0,
             last_usage: kestrel_core::Usage::default(),
@@ -622,7 +634,7 @@ impl KestrelApp {
                         });
                         self.agent_preview = Some(self.agent_files.len() - 1);
                     }
-                    last_written = Some(self.project_path().join(&path));
+                    last_written = Some(self.agent_root().join(&path));
                     refresh = true;
                     ctx.request_repaint();
                 }
@@ -766,7 +778,20 @@ impl eframe::App for KestrelApp {
                         if ui.button("💬 Chat").clicked() {
                             self.view = AppView::Chat;
                         }
+                        if ui
+                            .button("💼 Work")
+                            .on_hover_text(
+                                "Kestrel Work — research, documents and data in your own \
+                                 workspace folder",
+                            )
+                            .clicked()
+                        {
+                            self.enter_work_mode();
+                        }
                     } else if ui.button("← Back").clicked() {
+                        if self.view == AppView::Work {
+                            self.exit_work_mode();
+                        }
                         self.view = AppView::Main;
                     }
                 });
@@ -887,6 +912,37 @@ impl eframe::App for KestrelApp {
             return;
         }
 
+        if self.view == AppView::Work {
+            egui::TopBottomPanel::bottom("work-compose").show(ctx, |ui| {
+                self.chat_compose_ui(ui);
+            });
+            // The workspace: which folder Work is scoped to, and what's in it.
+            egui::SidePanel::left("work-files")
+                .resizable(true)
+                .default_width(260.0)
+                .show(ctx, |ui| {
+                    ui.add_space(4.0);
+                    self.work_panel_ui(ui);
+                });
+            // The artifact pane: the plan ledger plus the documents produced.
+            egui::SidePanel::right("work-artifacts")
+                .resizable(true)
+                .default_width(440.0)
+                .show(ctx, |ui| {
+                    ui.add_space(4.0);
+                    self.build_preview_ui(ui);
+                });
+            egui::CentralPanel::default().show(ctx, |ui| {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .stick_to_bottom(true)
+                    .show(ui, |ui| {
+                        self.chat_history_ui(ui);
+                    });
+            });
+            return;
+        }
+
         if self.view == AppView::Chat {
             egui::TopBottomPanel::bottom("chat-compose").show(ctx, |ui| {
                 self.chat_compose_ui(ui);
@@ -970,6 +1026,25 @@ impl KestrelApp {
         PathBuf::from(self.path.trim())
     }
 
+    /// Which product surface is active: Kestrel **Work** in the Work view, else
+    /// Kestrel **Build**. This picks the agent's tool pack and system prompt.
+    fn profile(&self) -> kestrel_core::Profile {
+        if self.view == AppView::Work {
+            kestrel_core::Profile::Work
+        } else {
+            kestrel_core::Profile::Build
+        }
+    }
+
+    /// The folder the agent is scoped to: Work's own workspace, or the project.
+    fn agent_root(&self) -> PathBuf {
+        if self.view == AppView::Work {
+            PathBuf::from(self.work_folder.trim())
+        } else {
+            self.project_path()
+        }
+    }
+
     /// Make `path` the active project: record it, remember it in the recent
     /// list (persisted), restore its saved agent session, return to the main
     /// view, and load its file tree.
@@ -1006,15 +1081,71 @@ impl KestrelApp {
         self.reload_tree();
     }
 
-    /// Persist the current project's agent conversation, transcript, and the
-    /// list of files it created so reopening it resumes where this left off.
+    /// Persist the current surface's agent conversation, transcript, and the
+    /// list of files it created so returning to it resumes where this left off.
+    /// Scoped to `agent_root`, so Build and Work keep separate sessions.
     fn save_session(&self) {
         let session = kestrel_core::AgentSession {
             messages: self.agent_messages.clone(),
             transcript: self.chat_history.clone(),
             created_files: self.agent_files.iter().map(|f| f.path.clone()).collect(),
         };
-        let _ = kestrel_core::save_agent_session(&self.project_path(), &session);
+        let _ = kestrel_core::save_agent_session(&self.agent_root(), &session);
+    }
+
+    /// Load the conversation, files, and plan belonging to the *current* surface
+    /// (Build project or Work folder). Used when switching between them.
+    fn load_session_for_current_root(&mut self) {
+        let root = self.agent_root();
+        let session = kestrel_core::load_agent_session(&root);
+        self.agent_messages = session.messages;
+        self.chat_history = session.transcript;
+        self.agent_files = session
+            .created_files
+            .iter()
+            .filter_map(|rel| {
+                std::fs::read_to_string(root.join(rel))
+                    .ok()
+                    .map(|contents| AgentFile {
+                        path: rel.clone(),
+                        contents,
+                    })
+            })
+            .collect();
+        self.agent_preview = self.agent_files.len().checked_sub(1);
+        let plan = kestrel_core::load_plan(&root);
+        self.agent_plan = (!plan.steps.is_empty()).then_some(plan);
+        self.chat_error.clear();
+        self.session_usage = kestrel_core::Usage::default();
+        self.session_cost = 0.0;
+        self.agent_incomplete = false;
+    }
+
+    /// Switch into Kestrel Work: park the Build conversation and pick up the
+    /// Work folder's own.
+    fn enter_work_mode(&mut self) {
+        if self.view == AppView::Work {
+            return;
+        }
+        self.save_session();
+        self.view = AppView::Work;
+        // Work is agentic by nature — it acts on files, it doesn't just chat.
+        self.chat_agent_mode = true;
+        let root = self.agent_root();
+        if !root.is_dir() {
+            self.status = format!(
+                "Work folder {} doesn't exist yet — choose one.",
+                root.display()
+            );
+        }
+        self.load_session_for_current_root();
+    }
+
+    /// Leave Kestrel Work, restoring the Build project's conversation.
+    fn exit_work_mode(&mut self) {
+        self.save_session();
+        self.view = AppView::Main;
+        self.load_session_for_current_root();
     }
 
     /// (Re)load the current project's directory tree on a worker thread.
@@ -2781,6 +2912,109 @@ impl KestrelApp {
 
     /// The build-preview panel: a live, clickable history of the files the
     /// agent is creating, with a preview of the selected one.
+    /// Kestrel Work's left panel: which folder it's scoped to, and what's in it.
+    /// Files open in their default app (Word, Excel, a PDF viewer, …).
+    fn work_panel_ui(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.strong("💼 Kestrel Work");
+        });
+        ui.label(
+            egui::RichText::new(
+                "Research, write, and work with your documents and data — in this folder.",
+            )
+            .weak()
+            .small(),
+        );
+        ui.add_space(6.0);
+
+        let root = PathBuf::from(self.work_folder.trim());
+        ui.horizontal(|ui| {
+            if ui
+                .button("📂 Folder…")
+                .on_hover_text("Choose the folder Kestrel Work may read and write")
+                .clicked()
+            {
+                if let Some(dir) = rfd::FileDialog::new()
+                    .set_title("Choose your Work folder")
+                    .set_directory(&root)
+                    .pick_folder()
+                {
+                    self.save_session();
+                    self.work_folder = dir.display().to_string();
+                    self.settings.work_folder = Some(self.work_folder.clone());
+                    let _ = kestrel_core::save_settings(&self.settings);
+                    self.load_session_for_current_root();
+                }
+            }
+            if ui.button("↗").on_hover_text("Open in Explorer").clicked() {
+                let _ = kestrel_core::open_path(&root.display().to_string());
+            }
+        });
+        ui.label(
+            egui::RichText::new(self.work_folder.clone())
+                .monospace()
+                .small()
+                .weak(),
+        );
+        ui.separator();
+
+        if !root.is_dir() {
+            ui.label(
+                egui::RichText::new("That folder doesn't exist — choose another.")
+                    .color(egui::Color32::from_rgb(220, 150, 80)),
+            );
+            return;
+        }
+
+        // A flat listing of the workspace: folders first, then files.
+        let mut dirs: Vec<String> = Vec::new();
+        let mut files: Vec<String> = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&root) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with('.') {
+                    continue;
+                }
+                if entry.path().is_dir() {
+                    dirs.push(name);
+                } else {
+                    files.push(name);
+                }
+            }
+        }
+        dirs.sort_by_key(|d| d.to_lowercase());
+        files.sort_by_key(|f| f.to_lowercase());
+
+        let mut open: Option<PathBuf> = None;
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                if dirs.is_empty() && files.is_empty() {
+                    ui.label(
+                        egui::RichText::new("This folder is empty. Ask for something below.")
+                            .weak(),
+                    );
+                }
+                for d in &dirs {
+                    if ui.selectable_label(false, format!("📁 {d}")).clicked() {
+                        open = Some(root.join(d));
+                    }
+                }
+                for f in &files {
+                    if ui
+                        .selectable_label(false, format!("{} {f}", doc_icon(f)))
+                        .on_hover_text("Open in its default app")
+                        .clicked()
+                    {
+                        open = Some(root.join(f));
+                    }
+                }
+            });
+        if let Some(path) = open {
+            let _ = kestrel_core::open_path(&path.display().to_string());
+        }
+    }
+
     /// The live task plan (TODO ledger): the agent's checklist with progress,
     /// shown above the created-files list so the user can watch it self-direct.
     fn plan_ui(&self, ui: &mut egui::Ui) {
@@ -3118,7 +3352,7 @@ impl KestrelApp {
                 egui::Color32::from_rgb(150, 200, 150),
                 format!(
                     "Agent mode: files will be written into {}{continuing}",
-                    self.project_path().display()
+                    self.agent_root().display()
                 ),
             );
         }
@@ -3227,7 +3461,9 @@ impl KestrelApp {
     fn start_agent(&mut self, prompt: String, provider: kestrel_core::ProviderSettings) {
         let config = provider.to_config();
         let model = provider.model.clone();
-        let root = self.project_path();
+        // Work runs in its own scoped folder; Build runs in the project.
+        let root = self.agent_root();
+        let profile = self.profile();
         // Merge the user's policy with any guardrails the project committed to
         // its kestrel.toml (union — most restrictive wins).
         let policy = kestrel_core::effective_policy(&root, &self.settings.policy);
@@ -3272,6 +3508,7 @@ impl KestrelApp {
                 true,
                 &policy,
                 &cancel,
+                profile,
                 history,
                 |event| {
                     let update = match event {
@@ -3829,6 +4066,21 @@ fn human_tokens(n: usize) -> String {
         format!("{:.1}k", n as f64 / 1_000.0)
     } else {
         n.to_string()
+    }
+}
+
+/// A document-flavoured icon for a file in the Work workspace.
+fn doc_icon(name: &str) -> &'static str {
+    let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    match ext.as_str() {
+        "doc" | "docx" | "odt" | "rtf" => "📄",
+        "xls" | "xlsx" | "csv" | "ods" => "📊",
+        "ppt" | "pptx" | "odp" => "📽",
+        "pdf" => "📕",
+        "md" | "markdown" | "txt" => "📝",
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" => "🖼",
+        "zip" | "7z" | "rar" => "🗜",
+        _ => "📃",
     }
 }
 

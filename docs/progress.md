@@ -108,6 +108,22 @@ configurable and the agent has a full engineering toolset.
   (template files) materialized into the project on run; a built-in **Set up CI**
   skill ships a GitHub Actions starter the agent adapts to the real build/test.
   **All four autonomy phases (A–D) shipped.**
+
+## Kestrel Work 🟡 (started) — see [kestrel-work-plan.md](kestrel-work-plan.md)
+
+Kestrel becomes **two products on one engine**: **Build** (the coding agent
+above) and **Work** (autonomous everyday knowledge work).
+
+- ✅ **W0 — Foundation.** The autonomy engine is now profile-driven:
+  `Profile::{Build, Work}` selects the **tool pack** (`tools_for`) and the
+  **system prompt** (`system_prompt_for`) — Work gets autonomy + files +
+  research, not git/verify/toolchains/symbols. A new **💼 Work** mode has its own
+  **scoped folder** (defaults to Documents, persisted), a workspace panel that
+  lists it and opens files in their default app, and the artifact pane (🗺 Plan +
+  documents produced). Build and Work keep separate conversations. Build is
+  untouched.
+- ⬜ W1 documents (docx via Office COM) · W2 spreadsheets & data · W3 the wedge
+  (research → data → report) · W4 email · W5 desktop control
 - ✅ **Diagnostics** (LSP-style, dependency-free) — run the project's checker
   (`cargo check` / `tsc` / `ruff`), parse errors/warnings into a **⚠ Problems**
   tab (click to open the file) and an inline strip in the editor

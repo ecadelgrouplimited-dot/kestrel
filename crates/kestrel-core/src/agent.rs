@@ -175,6 +175,106 @@ pub enum AgentEvent {
     Plan(crate::plan::Plan),
 }
 
+/// Which product surface the agent is running as. The autonomy engine is the
+/// same for both — only the tool pack and the system prompt differ.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Profile {
+    /// Kestrel Build — the coding agent.
+    #[default]
+    Build,
+    /// Kestrel Work — everyday knowledge work (research, documents, data).
+    Work,
+}
+
+/// The tools a profile may use. Work gets the autonomy, file, and research
+/// tools; the code-specific ones (git, verify, toolchains, servers, symbol
+/// navigation) stay with Build.
+pub fn tools_for(profile: Profile) -> Vec<ToolSpec> {
+    match profile {
+        Profile::Build => builtin_tools(),
+        Profile::Work => {
+            const WORK_TOOLS: &[&str] = &[
+                // Autonomy
+                "update_plan",
+                "remember",
+                "spawn_subagent",
+                // Files & content
+                "read_file",
+                "write_file",
+                "edit_file",
+                "list_dir",
+                "search",
+                // Research
+                "web_search",
+                "http_get",
+                "check_page",
+                // System
+                "run_command",
+                "open_url",
+                "screenshot",
+            ];
+            builtin_tools()
+                .into_iter()
+                .filter(|t| WORK_TOOLS.contains(&t.name.as_str()))
+                .collect()
+        }
+    }
+}
+
+/// The system prompt for a profile.
+pub fn system_prompt_for(profile: Profile, root: &Path) -> String {
+    match profile {
+        Profile::Build => agent_loop_system_prompt(root),
+        Profile::Work => work_system_prompt(root),
+    }
+}
+
+/// The system prompt for Kestrel Work — everyday knowledge work rather than code.
+pub fn work_system_prompt(root: &Path) -> String {
+    format!(
+        "You are Kestrel Work, an autonomous work assistant running natively on the user's \
+         Windows machine. You do real knowledge work — research, writing and editing documents, \
+         working with data, and organising files — directly in their files, not just in chat.\n\n\
+         Your tools:\n\
+         - update_plan(goal, steps): your task checklist. For ANY non-trivial request, call this \
+           FIRST to break the work into concrete steps, then keep it current as you go (mark a \
+           step done, set the next active). Do NOT report finished while steps remain.\n\
+         - web_search(query) / http_get(url) / check_page(url, expect): research. Search for \
+           sources, read them, and confirm facts. NEVER assert a fact you have not checked — \
+           cite where each claim came from.\n\
+         - read_file(path) / write_file(path, contents) / edit_file(path, old, new) / \
+           list_dir(path) / search(query): read and produce real documents and data files in the \
+           user's workspace. edit_file makes targeted revisions without rewriting a whole \
+           document.\n\
+         - run_command(command): run a command (PowerShell is available) to convert, inspect, or \
+           process files when needed.\n\
+         - remember(note, category): save durable facts about this workspace (house style, where \
+           things live, recurring formats) so future sessions start knowing them.\n\
+         - spawn_subagent(task): delegate a big self-contained chunk (e.g. \"research and \
+           summarise these 8 sources\") to keep your own context lean.\n\
+         - open_url(url) / screenshot(): show the user something, or capture the screen.\n\n\
+         HOW TO WORK:\n\
+         1. PLAN first for anything multi-step.\n\
+         2. RESEARCH before you assert. Prefer primary sources; note the URL for each key claim.\n\
+         3. PRODUCE REAL FILES. Deliver the actual document (Markdown by default unless the user \
+            asks for another format) written into the workspace with write_file — do not just \
+            paste a draft into chat. Structure it properly: a clear title, sections, and a short \
+            summary up front.\n\
+         4. CHECK YOUR WORK before you finish, the way a careful colleague would: does the \
+            document contain every section the request asked for? Do the numbers add up and \
+            agree between the text and the data? Is every claim sourced? Re-read the file you \
+            wrote (read_file) and fix what's wrong.\n\
+         5. Be accurate over impressive. If something can't be verified, say so plainly rather \
+            than inventing it. Never fabricate data, quotes, figures, or citations.\n\n\
+         Write files only inside the workspace folder below. When you are done, stop calling \
+         tools and reply with a short summary of what you produced, where it is saved, and \
+         anything the user should check.\n\n\
+         {}The workspace folder is: {}",
+        memory_prompt(root),
+        root.display()
+    )
+}
+
 /// The system prompt for the tool-using agent loop.
 pub fn agent_loop_system_prompt(root: &Path) -> String {
     format!(
@@ -1983,6 +2083,7 @@ pub fn run_agent(
     review: bool,
     policy: &crate::policy::Policy,
     cancel: &std::sync::atomic::AtomicBool,
+    profile: Profile,
     history: Vec<AgentMessage>,
     mut on_event: impl FnMut(AgentEvent),
     mut approve: impl FnMut(&ToolCall) -> bool,
@@ -1997,6 +2098,7 @@ pub fn run_agent(
         review,
         policy,
         cancel,
+        profile,
         history,
         &mut on_event,
         &mut approve,
@@ -2017,13 +2119,14 @@ fn run_agent_inner(
     review: bool,
     policy: &crate::policy::Policy,
     cancel: &std::sync::atomic::AtomicBool,
+    profile: Profile,
     mut history: Vec<AgentMessage>,
     on_event: &mut dyn FnMut(AgentEvent),
     approve: &mut dyn FnMut(&ToolCall) -> bool,
 ) -> AgentOutcome {
     use std::sync::atomic::Ordering;
-    let system = agent_loop_system_prompt(root);
-    let tools = builtin_tools();
+    let system = system_prompt_for(profile, root);
+    let tools = tools_for(profile);
     history.push(AgentMessage::User(user_prompt.to_string()));
     let mut reviewed = !review;
     let mut total_usage = Usage::default();
@@ -2217,6 +2320,7 @@ fn run_agent_inner(
                         false,
                         policy,
                         cancel,
+                        profile,
                         Vec::new(),
                         &mut |ev| match ev {
                             AgentEvent::Assistant(t) => {
@@ -2621,6 +2725,61 @@ mod tests {
         );
         assert!(err.starts_with("error:"), "unknown repo: {err}");
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn work_profile_gets_its_own_tool_pack() {
+        let build: Vec<String> = tools_for(Profile::Build)
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        let work: Vec<String> = tools_for(Profile::Work)
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        // Build keeps everything, including the code-specific tools.
+        assert!(build.contains(&"git".to_string()));
+        assert!(build.contains(&"rename_symbol".to_string()));
+        assert!(build.len() > work.len());
+        // Work keeps autonomy, files, and research…
+        for expected in [
+            "update_plan",
+            "remember",
+            "write_file",
+            "web_search",
+            "check_page",
+        ] {
+            assert!(
+                work.contains(&expected.to_string()),
+                "work missing {expected}"
+            );
+        }
+        // …but not the coding toolchain.
+        for absent in [
+            "git",
+            "verify",
+            "install_tool",
+            "start_app",
+            "rename_symbol",
+        ] {
+            assert!(
+                !work.contains(&absent.to_string()),
+                "work should not have {absent}"
+            );
+        }
+    }
+
+    #[test]
+    fn work_prompt_is_work_shaped_not_code_shaped() {
+        let dir = std::env::temp_dir();
+        let work = work_system_prompt(&dir);
+        assert!(work.contains("Kestrel Work"));
+        assert!(work.contains("update_plan"));
+        // It must insist on real files and sourced claims.
+        assert!(work.to_lowercase().contains("write_file"));
+        assert!(work.to_lowercase().contains("cite") || work.to_lowercase().contains("sourced"));
+        // And it is not the coding prompt.
+        assert!(!work.contains("cargo test"));
     }
 
     #[test]

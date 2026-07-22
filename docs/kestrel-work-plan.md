@@ -144,9 +144,15 @@ codebase cheaply.
 
 ## Phasing
 
-- **W0 — Foundation.** Tool-pack split in core; new Work mode (chat + artifact
-  pane); reuse plan/memory/policy/budgets/permissions. *Nothing user-visible
-  changes in Build.*
+- **W0 — Foundation.** ✅ **shipped.** Tool-pack split in core
+  (`Profile::{Build,Work}`, `tools_for`, `system_prompt_for` + a work-shaped
+  prompt); `run_agent` takes a profile. New **💼 Work** mode: its own scoped
+  folder (defaults to Documents, persisted in settings), a workspace panel that
+  lists the folder and opens files in their default app, the chat + compose bar
+  reused, and the artifact pane (🗺 Plan ledger + documents produced) on the
+  right. Build and Work keep **separate conversations**, each saved to its own
+  root. Work already researches the web and writes real documents into the
+  workspace. *Nothing user-visible changed in Build.*
 - **W1 — Documents.** Read/write/edit md, txt, csv, docx (COM + fallback);
   document preview; document diff + accept/reject; checkpoints for documents.
 - **W2 — Spreadsheets & data.** Excel ranges, formulas, charts; CSV cleaning,
