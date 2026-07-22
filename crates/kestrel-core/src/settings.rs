@@ -131,7 +131,20 @@ pub fn model_suggestions(name: &str) -> &'static [&'static str] {
             "deepseek-v4-preview",
             "deepseek-reasoner",
         ],
-        "kimi" => &["kimi-k2", "kimi-k2-turbo", "moonshot-v1-128k"],
+        // Moonshot's current line-up (platform.kimi.ai/docs/models). K3 is the
+        // flagship; the k2.7-code variants are tuned for coding, and the
+        // `thinking` ones are the reasoning models.
+        "kimi" => &[
+            "kimi-k3",
+            "kimi-k2.7-code",
+            "kimi-k2.7-code-highspeed",
+            "kimi-k2.6",
+            "kimi-k2.5",
+            "kimi-k2-thinking",
+            "kimi-k2-thinking-turbo",
+            "kimi-k2-turbo-preview",
+            "moonshot-v1-128k",
+        ],
         "zai" => &[
             "glm-5.2",
             "glm-5.1",
@@ -256,6 +269,21 @@ mod tests {
         assert_eq!(model_suggestions_for(&ds), model_suggestions("deepseek"));
         let oa = provider_preset("openai").unwrap();
         assert_eq!(model_suggestions_for(&oa), model_suggestions("openai"));
+    }
+
+    #[test]
+    fn kimi_preset_targets_moonshot_and_defaults_to_k3() {
+        let kimi = provider_preset("kimi").unwrap();
+        // Moonshot speaks the OpenAI shape; the endpoint is still api.moonshot.ai.
+        assert_eq!(kimi.kind, ProviderKind::Openai);
+        assert_eq!(kimi.base_url, "https://api.moonshot.ai/v1");
+        assert_eq!(kimi.model, "kimi-k3");
+        // The coding-tuned and reasoning variants are offered too.
+        let models = model_suggestions("kimi");
+        assert!(models.contains(&"kimi-k2.7-code"));
+        assert!(models.contains(&"kimi-k2-thinking"));
+        // A configured provider is recognised from its base URL.
+        assert_eq!(model_suggestions_for(&kimi), models);
     }
 
     #[test]

@@ -61,6 +61,16 @@ pub fn model_context_window(model: &str) -> u64 {
         1_000_000
     } else if m.starts_with("gpt-5") || m.starts_with("gpt-4.1") {
         400_000
+    } else if m.starts_with("kimi-k") {
+        // Moonshot's K2/K3 generation is 256k; only the legacy moonshot-v1 line
+        // is smaller, and it carries its size in the name (handled below).
+        256_000
+    } else if let Some(rest) = m.strip_prefix("moonshot-v1-") {
+        match rest.split('-').next().unwrap_or("") {
+            "8k" => 8_000,
+            "32k" => 32_000,
+            _ => 128_000,
+        }
     } else {
         // DeepSeek / GLM / Kimi and unknowns: a safe common floor.
         128_000
@@ -70,6 +80,22 @@ pub fn model_context_window(model: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kimi_context_windows_match_moonshots_published_sizes() {
+        // K2/K3 are 256k — defaulting them to 128k halved the context gauge.
+        assert_eq!(model_context_window("kimi-k3"), 256_000);
+        assert_eq!(model_context_window("kimi-k2.7-code"), 256_000);
+        assert_eq!(model_context_window("kimi-k2-thinking"), 256_000);
+        // The legacy line carries its size in the name.
+        assert_eq!(model_context_window("moonshot-v1-8k"), 8_000);
+        assert_eq!(model_context_window("moonshot-v1-32k"), 32_000);
+        assert_eq!(model_context_window("moonshot-v1-128k"), 128_000);
+        assert_eq!(
+            model_context_window("moonshot-v1-32k-vision-preview"),
+            32_000
+        );
+    }
 
     #[test]
     fn prices_known_families_and_skips_unknown() {
