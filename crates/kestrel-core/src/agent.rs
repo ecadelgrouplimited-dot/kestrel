@@ -220,6 +220,8 @@ pub fn tools_for(profile: Profile) -> Vec<ToolSpec> {
                 "check_page",
                 // System
                 "run_command",
+                "run_background",
+                "task_status",
                 "open_url",
                 "screenshot",
             ];
@@ -342,6 +344,9 @@ pub fn agent_loop_system_prompt(root: &Path) -> String {
            (e.g. composer/php for Laravel, node, python).\n\
          - start_app(command) / app_logs(pid) / list_apps() / stop_app(pid): run a dev server \
            or app in the background, read its output/logs, see what's running, and stop it.\n\
+         - run_background(command) / task_status(pid): run any SLOW command without waiting — \
+           dependency installs, big builds, long test suites — then poll it. NEVER sit blocked on \
+           a command that could take minutes: start it, do other useful work, and check back.\n\
          - open_url(url): open a preview in the user's browser.\n\
          - screenshot(): capture the screen for visual review.\n\n\
          When a project needs tools that may not be installed, check with install_tool before \
@@ -906,6 +911,32 @@ pub fn builtin_tools() -> Vec<ToolSpec> {
             }),
         },
         ToolSpec {
+            name: "run_background".to_string(),
+            description: "Run a SLOW command in the background and carry on working — dependency \
+                          installs, big builds, long test suites, data jobs. Returns a pid \
+                          immediately instead of blocking. Poll it with task_status(pid), which \
+                          reports whether it's still running, or its exit code once finished. Use \
+                          this whenever a command might take more than a few seconds."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": { "command": { "type": "string" } },
+                "required": ["command"],
+            }),
+        },
+        ToolSpec {
+            name: "task_status".to_string(),
+            description: "Check a background task (from run_background or start_app) by pid: \
+                          whether it is still running, finished successfully, or failed with an \
+                          exit code — plus its output so far. Poll this instead of waiting."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": { "pid": { "type": "integer" } },
+                "required": ["pid"],
+            }),
+        },
+        ToolSpec {
             name: "app_logs".to_string(),
             description: "Read the recent stdout/stderr of a background app started by start_app, \
                           by its pid. Use it to debug a server (errors, crashes, requests)."
@@ -1017,6 +1048,8 @@ pub fn describe_call(call: &ToolCall) -> String {
         "open_url" => format!("🖥 Opening {}", arg("url")),
         "http_check" => format!("🩺 Checking {}", arg("url")),
         "start_app" => format!("🚀 Starting: {}", arg("command")),
+        "run_background" => format!("⏱ Running in background: {}", arg("command")),
+        "task_status" => format!("📈 Checking task {}", arg("pid")),
         "app_logs" => format!("📋 Reading logs (pid {})", arg("pid")),
         "list_apps" => "📋 Listing running apps".to_string(),
         "stop_app" => format!("🛑 Stopping app {}", arg("pid")),
@@ -1299,7 +1332,8 @@ pub fn execute_tool(root: &Path, call: &ToolCall) -> String {
             } else if crate::syscap::is_long_running(&command) {
                 format!(
                     "This looks like a long-running server/watcher (\"{command}\"). Not running \
-                     it with run_command — that would block. Use start_app(\"{command}\") to run \
+                     it with run_command — that would block forever. Use start_app(\"{command}\") \
+                     to run \
                      it in the background, then app_logs(pid) to read its output and http_get / \
                      open_url to check it."
                 )
@@ -1319,6 +1353,18 @@ pub fn execute_tool(root: &Path, call: &ToolCall) -> String {
         "open_url" => crate::syscap::open_url(&arg("url")),
         "http_check" => crate::syscap::http_check(&arg("url"), 30),
         "start_app" => crate::syscap::start_app(root, &arg("command")),
+        "run_background" => {
+            let command = arg("command");
+            if command.trim().is_empty() {
+                "error: empty command".to_string()
+            } else {
+                crate::syscap::start_app_detached(root, &command)
+            }
+        }
+        "task_status" => match call.input.get("pid").and_then(|v| v.as_u64()) {
+            Some(pid) => crate::syscap::task_status(root, pid as u32),
+            None => "error: pid must be an integer".to_string(),
+        },
         "app_logs" => match call.input.get("pid").and_then(|v| v.as_u64()) {
             Some(pid) => crate::syscap::app_logs(root, pid as u32),
             None => "error: pid must be an integer".to_string(),

@@ -95,8 +95,9 @@ pub use symbols::{
 };
 pub use syntax::{highlight, language_from_extension, Language, Span, TokenKind};
 pub use syscap::{
-    app_logs, detect_url, http_check, list_screenshots, open_path, open_url, running_apps,
-    start_app_detached, stop_app, take_screenshot, RunningApp,
+    app_logs, detect_url, http_check, is_long_running, list_screenshots, open_path, open_url,
+    running_apps, start_app_detached, stop_app, take_screenshot, task_state_from, task_status,
+    RunningApp, TaskState,
 };
 pub use tests_select::{is_test_path, select_tests, TestSelection};
 pub use usage_log::{

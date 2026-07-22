@@ -42,11 +42,131 @@ const LONG_RUNNING_SIGNALS: &[&str] = &[
     "serve -",
 ];
 
+/// Written to a background task's log by the wrapper script when the command
+/// finishes, carrying its exit code.
+const EXIT_MARKER: &str = "##KESTREL_EXIT:";
+
+/// How a background task is getting on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TaskState {
+    Running,
+    /// Finished on its own, with this exit code.
+    Finished(i32),
+    /// The process is gone but left no exit marker — killed, or crashed hard.
+    Stopped,
+}
+
+/// Read a task's state out of its log, given whether the process is still alive.
+pub fn task_state_from(log: &str, alive: bool) -> TaskState {
+    if let Some(rest) = log.rsplit(EXIT_MARKER).next() {
+        // Only a real marker split yields something different from the input.
+        if rest.len() != log.len() {
+            let code: i32 = rest
+                .lines()
+                .next()
+                .unwrap_or("")
+                .trim()
+                .parse()
+                .unwrap_or(-1);
+            return TaskState::Finished(code);
+        }
+    }
+    if alive {
+        TaskState::Running
+    } else {
+        TaskState::Stopped
+    }
+}
+
+/// A background task's state plus a tail of its output, for the agent to poll.
+pub fn task_status(root: &Path, pid: u32) -> String {
+    let Some(task) = load_registry(root).into_iter().find(|p| p.pid == pid) else {
+        return format!("error: no background task with pid {pid}");
+    };
+    let log = read_tail(Path::new(&task.log), 6000);
+    let state = task_state_from(&log, is_alive(pid));
+    // The marker is bookkeeping, not output — don't show it to the model.
+    let shown = log
+        .lines()
+        .filter(|l| !l.contains(EXIT_MARKER))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let headline = match state {
+        TaskState::Running => format!("⏳ still running (pid {pid}): {}", task.command),
+        TaskState::Finished(0) => format!("✅ finished successfully (pid {pid}): {}", task.command),
+        TaskState::Finished(code) => {
+            format!(
+                "❌ failed with exit code {code} (pid {pid}): {}",
+                task.command
+            )
+        }
+        TaskState::Stopped => format!("⏹ stopped (pid {pid}): {}", task.command),
+    };
+    if shown.trim().is_empty() {
+        format!("{headline}\n(no output yet)")
+    } else {
+        format!("{headline}\n--- output ---\n{shown}")
+    }
+}
+
 /// Whether a command looks like a long-running server/watcher (so it should be
 /// started in the background, not run to completion where it would block).
+///
+/// Compound commands are split first: `cd server && npx tsx src/index.ts` is a
+/// server, even though no single listed phrase matches the whole string. Missing
+/// that is how a run blocks for half an hour on a process that never exits.
 pub fn is_long_running(command: &str) -> bool {
-    let c = command.to_lowercase();
-    LONG_RUNNING_SIGNALS.iter().any(|s| c.contains(s))
+    command
+        .split(['\n', ';'])
+        .flat_map(|part| part.split("&&"))
+        .flat_map(|part| part.split("||"))
+        .flat_map(|part| part.split('|'))
+        .any(segment_is_long_running)
+}
+
+/// Whether one segment of a command never returns on its own.
+fn segment_is_long_running(segment: &str) -> bool {
+    let c = segment.trim().to_lowercase();
+    if c.is_empty() {
+        return false;
+    }
+    if LONG_RUNNING_SIGNALS.iter().any(|s| c.contains(s)) {
+        return true;
+    }
+    // Watchers of every flavour.
+    if c.contains("--watch") || c.contains(" -w ") || c.ends_with(" -w") || c.contains("watchexec")
+    {
+        return true;
+    }
+    // Foreground container/tunnel/log commands.
+    if (c.contains("docker compose up") || c.contains("docker-compose up"))
+        && !c.contains("-d")
+        && !c.contains("--detach")
+    {
+        return true;
+    }
+    if c.starts_with("ngrok") || c.contains("port-forward") || c.contains("tail -f") {
+        return true;
+    }
+    // A runtime pointed at an entry-point file is almost always a server:
+    // `npx tsx src/index.ts`, `node dist/server.js`, `bun run main.ts`.
+    let runtimes = [
+        "node ",
+        "npx tsx",
+        "tsx ",
+        "ts-node",
+        "bun ",
+        "deno run",
+        "python -m",
+        "python3 -m",
+    ];
+    if runtimes.iter().any(|r| c.contains(r)) {
+        let entrypoints = ["index.", "server.", "main.", "app.", "start."];
+        if entrypoints.iter().any(|e| c.contains(e)) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Open a URL (or local file) in the default browser.
@@ -395,9 +515,27 @@ fn start_app_inner(root: &Path, command: &str, wait: bool) -> String {
         Err(err) => return format!("error: {err}"),
     };
 
+    // Run through a tiny wrapper script that echoes the exit code when the
+    // command finishes. Servers never reach it; a finite task (an install, a
+    // build) leaves a marker so we can report success or failure later. A
+    // script file avoids cmd's `%ERRORLEVEL%` expansion-time trap entirely.
+    let script_path = logs_dir.join(format!(
+        "task-{}.{}",
+        epoch_millis(),
+        if cfg!(windows) { "bat" } else { "sh" }
+    ));
+    let script = if cfg!(windows) {
+        format!("@echo off\r\n{command}\r\necho {EXIT_MARKER}%ERRORLEVEL%\r\n")
+    } else {
+        format!("{command}\necho \"{EXIT_MARKER}$?\"\n")
+    };
+    if let Err(err) = std::fs::write(&script_path, script) {
+        return format!("error: {err}");
+    }
     let spawned = if cfg!(windows) {
         Command::new("cmd")
-            .args(["/C", command])
+            .arg("/C")
+            .arg(&script_path)
             .current_dir(root)
             .stdin(Stdio::null())
             .stdout(out_file)
@@ -405,7 +543,7 @@ fn start_app_inner(root: &Path, command: &str, wait: bool) -> String {
             .spawn()
     } else {
         Command::new("sh")
-            .args(["-c", command])
+            .arg(&script_path)
             .current_dir(root)
             .stdin(Stdio::null())
             .stdout(out_file)
@@ -514,6 +652,54 @@ fn epoch_millis() -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compound_commands_hiding_a_server_are_caught() {
+        // The exact command that blocked a run for 23 minutes: no listed phrase
+        // matches the whole string, but the last segment never returns.
+        assert!(is_long_running(
+            r"cd E:\Projects\RealtimeKanban\server && npx tsx src/seed.ts && npx tsx src/index.ts"
+        ));
+        assert!(is_long_running("cd server; node dist/server.js"));
+        assert!(is_long_running("npm run build && npm run dev"));
+        assert!(is_long_running("cargo build --release && ./target/app.js"));
+    }
+
+    #[test]
+    fn watchers_containers_and_tunnels_are_long_running() {
+        assert!(is_long_running("tsc --watch"));
+        assert!(is_long_running("docker compose up"));
+        assert!(is_long_running("ngrok http 3000"));
+        assert!(is_long_running("kubectl port-forward svc/api 8080:80"));
+        assert!(is_long_running("tail -f server.log"));
+        // Detached compose returns immediately, so it's fine to run inline.
+        assert!(!is_long_running("docker compose up -d"));
+    }
+
+    #[test]
+    fn finite_commands_are_not_blocked() {
+        // These end on their own — refusing them would be wrong.
+        assert!(!is_long_running("npm install"));
+        assert!(!is_long_running("cargo test --workspace"));
+        assert!(!is_long_running("npx tsc --noEmit"));
+        assert!(!is_long_running("git status"));
+        assert!(!is_long_running("python scripts/migrate.py"));
+    }
+
+    #[test]
+    fn task_state_reads_the_exit_marker() {
+        let done = format!("installing…\ndone\n{EXIT_MARKER}0\n");
+        assert_eq!(task_state_from(&done, false), TaskState::Finished(0));
+        let failed = format!("boom\n{EXIT_MARKER}1\n");
+        assert_eq!(task_state_from(&failed, false), TaskState::Finished(1));
+        // A server has no marker and is still alive.
+        assert_eq!(
+            task_state_from("listening on :3000", true),
+            TaskState::Running
+        );
+        // Gone without a marker means it was killed.
+        assert_eq!(task_state_from("partial output", false), TaskState::Stopped);
+    }
 
     #[test]
     fn open_url_rejects_bad_schemes() {
