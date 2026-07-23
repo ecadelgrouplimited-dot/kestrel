@@ -4,6 +4,12 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 
+# The package stays `kestrel-cli` (so `cargo run -p kestrel-cli` keeps working),
+# but the binary users actually type is `kestrel`.
+[[bin]]
+name = "kestrel"
+path = "src/main.rs"
+
 [dependencies]
 ctrlc = "3.5.2"
 kestrel-core = { path = "../kestrel-core" }

@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod brand;
 pub mod browser;
 pub mod cache;
 pub mod codenav;
@@ -43,6 +44,7 @@ pub use agent::{
     thinking_tail, tools_for, work_system_prompt, AgentEvent, AgentOutcome, AgentSession,
     AppliedEdit, Checkpoint, FileEdit, GitReview, Profile,
 };
+pub use brand::{ansi_fg as brand_ansi_fg, mix as brand_mix, TAGLINE};
 pub use browser::{
     failed_metrics, find_browser, find_metric, missing_content, render_dom, MetricCheck,
 };

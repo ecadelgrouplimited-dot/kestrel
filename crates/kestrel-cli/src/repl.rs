@@ -64,7 +64,7 @@ pub fn run(root: PathBuf) -> std::io::Result<()> {
         };
         match editor.readline(prompt) {
             Ok(line) => {
-                let line = line.trim().to_string();
+                let line = clean_input(&line);
                 if line.is_empty() {
                     continue;
                 }
@@ -90,6 +90,16 @@ pub fn run(root: PathBuf) -> std::io::Result<()> {
     save(&session);
     println!("bye.");
     Ok(())
+}
+
+/// Trim a line of input, including a leading byte-order mark.
+///
+/// When the session is driven from a pipe rather than a keyboard — a script, a
+/// recorded demo — some shells (PowerShell among them) prefix the stream with a
+/// BOM. U+FEFF isn't whitespace, so `trim` leaves it, and `/help` silently stops
+/// being a command and becomes a prompt to the model.
+fn clean_input(line: &str) -> String {
+    line.trim_start_matches('\u{FEFF}').trim().to_string()
 }
 
 /// Whether the loop should keep going.
@@ -370,9 +380,10 @@ fn banner(term: &mut Term, session: &Session) {
     term.line("");
     term.line(&format!(
         "  {}  {}",
-        s.accent("🦅 Kestrel"),
-        s.dim(&session.root.display().to_string())
+        s.accent(&s.bold("🦅 KESTREL")),
+        s.dim(kestrel_core::TAGLINE)
     ));
+    term.line(&format!("  {}", s.dim(&session.root.display().to_string())));
     term.line(&format!(
         "  {}  {}",
         s.dim(&format!("model {model}")),
@@ -405,4 +416,19 @@ fn history_path() -> PathBuf {
         })
         .unwrap_or_else(|| PathBuf::from("."));
     base.join("kestrel").join("cli-history.txt")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_bom_does_not_hide_a_slash_command() {
+        // What a piped `/help` actually looks like when a shell adds a BOM.
+        assert_eq!(clean_input("\u{FEFF}/help"), "/help");
+        assert!(clean_input("\u{FEFF}/help").starts_with('/'));
+        // Ordinary lines are unaffected.
+        assert_eq!(clean_input("  build me a parser \r\n"), "build me a parser");
+        assert_eq!(clean_input("\u{FEFF}   \n"), "");
+    }
 }

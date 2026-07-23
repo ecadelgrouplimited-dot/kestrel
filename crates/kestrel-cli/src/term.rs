@@ -14,6 +14,9 @@ use std::io::Write;
 #[derive(Clone, Copy)]
 pub struct Style {
     pub enabled: bool,
+    /// Whether the terminal can do 24-bit colour. When it can't, the accent
+    /// falls back to the nearest xterm-256 index instead of vanishing.
+    pub truecolor: bool,
 }
 
 impl Style {
@@ -24,7 +27,15 @@ impl Style {
         let disabled = std::env::var_os("NO_COLOR").is_some()
             || std::env::var("TERM").map(|t| t == "dumb").unwrap_or(false)
             || !std::io::stdout().is_terminal();
-        Self { enabled: !disabled }
+        // …unless something downstream can handle ANSI anyway: a recorder, a CI
+        // log viewer, or a test capturing the escape sequences. NO_COLOR wins.
+        let forced = std::env::var_os("NO_COLOR").is_none()
+            && (std::env::var_os("FORCE_COLOR").is_some()
+                || std::env::var_os("CLICOLOR_FORCE").is_some());
+        Self {
+            enabled: forced || !disabled,
+            truecolor: supports_truecolor(),
+        }
     }
     fn wrap(&self, code: &str, text: &str) -> String {
         if self.enabled {
@@ -33,8 +44,17 @@ impl Style {
             text.to_string()
         }
     }
+    /// The falcon's gold, exactly as sampled from the logo where the terminal
+    /// can render it.
     pub fn accent(&self, text: &str) -> String {
-        self.wrap("38;5;215", text)
+        if self.truecolor {
+            self.wrap(
+                &kestrel_core::brand_ansi_fg(kestrel_core::brand::GOLD),
+                text,
+            )
+        } else {
+            self.wrap(&format!("38;5;{}", kestrel_core::brand::GOLD_256), text)
+        }
     }
     pub fn dim(&self, text: &str) -> String {
         self.wrap("2", text)
@@ -42,14 +62,23 @@ impl Style {
     pub fn bold(&self, text: &str) -> String {
         self.wrap("1", text)
     }
+    /// Success, failure and warning, warmed to sit beside the gold. The plain
+    /// SGR codes remain the fallback so a 16-colour terminal still reads.
     pub fn green(&self, text: &str) -> String {
-        self.wrap("32", text)
+        self.brand_or(kestrel_core::brand::GREEN, "32", text)
     }
     pub fn red(&self, text: &str) -> String {
-        self.wrap("31", text)
+        self.brand_or(kestrel_core::brand::RED, "31", text)
     }
     pub fn yellow(&self, text: &str) -> String {
-        self.wrap("33", text)
+        self.brand_or(kestrel_core::brand::AMBER, "33", text)
+    }
+    fn brand_or(&self, colour: kestrel_core::brand::Rgb, fallback: &str, text: &str) -> String {
+        if self.truecolor {
+            self.wrap(&kestrel_core::brand_ansi_fg(colour), text)
+        } else {
+            self.wrap(fallback, text)
+        }
     }
     pub fn cyan(&self, text: &str) -> String {
         self.wrap("36", text)
@@ -115,6 +144,23 @@ impl Default for Term {
     }
 }
 
+/// Whether the terminal advertises 24-bit colour.
+///
+/// Windows Terminal, VS Code and modern conhost all handle truecolour but none
+/// of them set `COLORTERM`, so on Windows the default is yes and the env vars
+/// only confirm it. Elsewhere `COLORTERM` is the usual signal.
+pub fn supports_truecolor() -> bool {
+    if let Ok(v) = std::env::var("COLORTERM") {
+        if v.contains("truecolor") || v.contains("24bit") {
+            return true;
+        }
+    }
+    if std::env::var_os("WT_SESSION").is_some() {
+        return true;
+    }
+    cfg!(windows)
+}
+
 /// Best-effort terminal width; 100 columns when it can't be determined.
 pub fn terminal_width() -> usize {
     std::env::var("COLUMNS")
@@ -169,12 +215,36 @@ mod tests {
 
     #[test]
     fn styles_are_inert_when_colour_is_off() {
-        let plain = Style { enabled: false };
+        let plain = Style {
+            enabled: false,
+            truecolor: true,
+        };
         assert_eq!(plain.green("ok"), "ok");
         assert_eq!(plain.bold("hi"), "hi");
-        let colour = Style { enabled: true };
+        assert_eq!(plain.accent("k"), "k");
+        let colour = Style {
+            enabled: true,
+            truecolor: false,
+        };
         assert!(colour.green("ok").contains("\x1b[32m"));
         assert!(colour.green("ok").ends_with("\x1b[0m"));
+    }
+
+    #[test]
+    fn the_accent_is_the_logo_gold() {
+        let full = Style {
+            enabled: true,
+            truecolor: true,
+        };
+        // Truecolour reproduces the sampled gold exactly.
+        assert!(full.accent("k").starts_with("\x1b[38;2;220;141;31m"));
+        // A 256-colour terminal gets the nearest index rather than no colour.
+        let indexed = Style {
+            enabled: true,
+            truecolor: false,
+        };
+        assert!(indexed.accent("k").starts_with("\x1b[38;5;172m"));
+        assert!(indexed.accent("k").ends_with("\x1b[0m"));
     }
 
     #[test]

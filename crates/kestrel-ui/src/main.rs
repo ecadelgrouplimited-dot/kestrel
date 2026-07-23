@@ -16,12 +16,34 @@ use kestrel_core::Symbol;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 
+/// The falcon mark as raw RGBA, pre-scaled to 64×64 so no image decoder — and
+/// no new dependency — is needed to put it on the window and taskbar.
+const ICON_RGBA: &[u8] = include_bytes!("../../../assets/icon-64.rgba");
+const ICON_SIDE: u32 = 64;
+
+/// The window icon, or `None` if the embedded bytes aren't a whole RGBA square
+/// (which would only happen if the asset were regenerated wrongly).
+fn window_icon() -> Option<egui::IconData> {
+    if ICON_RGBA.len() != (ICON_SIDE * ICON_SIDE * 4) as usize {
+        return None;
+    }
+    Some(egui::IconData {
+        rgba: ICON_RGBA.to_vec(),
+        width: ICON_SIDE,
+        height: ICON_SIDE,
+    })
+}
+
 fn main() -> eframe::Result<()> {
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([1180.0, 800.0])
+        .with_min_inner_size([760.0, 460.0])
+        .with_title("Kestrel");
+    if let Some(icon) = window_icon() {
+        viewport = viewport.with_icon(icon);
+    }
     let native_options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1180.0, 800.0])
-            .with_min_inner_size([760.0, 460.0])
-            .with_title("Kestrel"),
+        viewport,
         ..Default::default()
     };
     eframe::run_native(
@@ -895,7 +917,7 @@ impl eframe::App for KestrelApp {
         egui::TopBottomPanel::top("controls").show(ctx, |ui| {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                ui.heading(egui::RichText::new("🦅 Kestrel").color(ACCENT));
+                wordmark(ui, 22.0);
                 ui.separator();
                 ui.label("Project:");
                 ui.add(
@@ -969,7 +991,9 @@ impl eframe::App for KestrelApp {
                             self.new_project_open = true;
                         }
                         let mut chosen: Option<String> = None;
-                        ui.menu_button("Recent ▾", |ui| {
+                        // No caret glyph: egui's bundled fonts have ▶ but not
+                        // ▾/▼, so anything pointing down renders as a box.
+                        ui.menu_button("Recent", |ui| {
                             if self.settings.recent_projects.is_empty() {
                                 ui.label(egui::RichText::new("(none yet)").weak());
                             }
@@ -1537,7 +1561,7 @@ impl KestrelApp {
                 }
                 if !self.entry_status.is_empty() {
                     ui.add_space(4.0);
-                    ui.colored_label(egui::Color32::from_rgb(220, 90, 90), &self.entry_status);
+                    ui.colored_label(ERROR, &self.entry_status);
                 }
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
@@ -1611,10 +1635,7 @@ impl KestrelApp {
                 ui.add_space(2.0);
                 ui.strong(target.display().to_string());
                 if target.is_dir() {
-                    ui.colored_label(
-                        egui::Color32::from_rgb(220, 150, 80),
-                        "The folder and everything inside it will be removed.",
-                    );
+                    ui.colored_label(WARN, "The folder and everything inside it will be removed.");
                 }
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
@@ -1746,7 +1767,7 @@ impl KestrelApp {
         ui.horizontal(|ui| {
             ui.strong(path.display().to_string());
             if dirty {
-                ui.colored_label(egui::Color32::from_rgb(220, 150, 80), "● unsaved");
+                ui.colored_label(WARN, "● unsaved");
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let can_fmt = kestrel_core::can_format(&path.to_string_lossy());
@@ -1804,10 +1825,8 @@ impl KestrelApp {
                 .show(ui, |ui| {
                     for d in &here {
                         let color = match d.severity {
-                            kestrel_core::Severity::Error => egui::Color32::from_rgb(220, 100, 100),
-                            kestrel_core::Severity::Warning => {
-                                egui::Color32::from_rgb(220, 170, 90)
-                            }
+                            kestrel_core::Severity::Error => ERROR,
+                            kestrel_core::Severity::Warning => WARN,
                         };
                         ui.label(
                             egui::RichText::new(format!(
@@ -1936,7 +1955,7 @@ impl KestrelApp {
                 if !review.secrets.is_empty() {
                     ui.add_space(2.0);
                     ui.colored_label(
-                        egui::Color32::from_rgb(220, 90, 90),
+                        ERROR,
                         format!(
                             "⚠ {} possible secret(s) in these changes — review before committing:",
                             review.secrets.len()
@@ -1949,7 +1968,7 @@ impl KestrelApp {
                                 finding.path, finding.line, finding.kind
                             ))
                             .monospace()
-                            .color(egui::Color32::from_rgb(220, 120, 120)),
+                            .color(ERROR),
                         );
                     }
                 }
@@ -2119,7 +2138,7 @@ impl KestrelApp {
             .show(ctx, |ui| {
                 ui.label("Discard every uncommitted change and remove new files?");
                 ui.colored_label(
-                    egui::Color32::from_rgb(220, 150, 80),
+                    WARN,
                     "This resets the project to the last commit and cannot be undone.",
                 );
                 ui.add_space(6.0);
@@ -2254,10 +2273,8 @@ impl KestrelApp {
                 .show(ui, |ui| {
                     for d in &self.diagnostics {
                         let color = match d.severity {
-                            kestrel_core::Severity::Error => egui::Color32::from_rgb(220, 100, 100),
-                            kestrel_core::Severity::Warning => {
-                                egui::Color32::from_rgb(220, 170, 90)
-                            }
+                            kestrel_core::Severity::Error => ERROR,
+                            kestrel_core::Severity::Warning => WARN,
                         };
                         let label = format!(
                             "{} {}:{}:{}  {}",
@@ -2450,7 +2467,7 @@ impl KestrelApp {
             .show(ctx, |ui| {
                 ui.label(format!("Roll the project back to checkpoint {target}?"));
                 ui.colored_label(
-                    egui::Color32::from_rgb(220, 150, 80),
+                    WARN,
                     "Every change after that point is discarded and new files are removed.",
                 );
                 ui.add_space(6.0);
@@ -2524,10 +2541,7 @@ impl KestrelApp {
                     });
                 ui.add_space(6.0);
                 if !self.new_project_status.is_empty() {
-                    ui.colored_label(
-                        egui::Color32::from_rgb(220, 90, 90),
-                        &self.new_project_status,
-                    );
+                    ui.colored_label(ERROR, &self.new_project_status);
                     ui.add_space(4.0);
                 }
                 ui.horizontal(|ui| {
@@ -2718,7 +2732,7 @@ impl KestrelApp {
             ui.label(format!("Cost: ${:.4}", self.session_cost));
             if saved_session > 0.0 {
                 ui.colored_label(
-                    egui::Color32::from_rgb(120, 190, 120),
+                    OK,
                     format!(
                         "Prompt caching saved ~${saved_session:.4} ({} tokens read from cache)",
                         human_tokens(s.cache_read as usize)
@@ -2743,7 +2757,7 @@ impl KestrelApp {
             ui.label(format!("Cost: ${:.4}", t.cost));
             if summary.saved_cost > 0.0 {
                 ui.colored_label(
-                    egui::Color32::from_rgb(120, 190, 120),
+                    OK,
                     format!(
                         "Prompt caching saved ~${:.4} ({} tokens) — that's off your bill.",
                         summary.saved_cost,
@@ -3067,7 +3081,7 @@ impl KestrelApp {
                     .desired_width(f32::INFINITY),
             );
             if !draft.status.is_empty() {
-                ui.colored_label(egui::Color32::from_rgb(0xd9, 0x53, 0x4f), &draft.status);
+                ui.colored_label(ERROR, &draft.status);
             }
             ui.add_space(6.0);
             ui.horizontal(|ui| {
@@ -3199,8 +3213,7 @@ impl KestrelApp {
 
         if !root.is_dir() {
             ui.label(
-                egui::RichText::new("That folder doesn't exist — choose another.")
-                    .color(egui::Color32::from_rgb(220, 150, 80)),
+                egui::RichText::new("That folder doesn't exist — choose another.").color(WARN),
             );
             return;
         }
@@ -3406,10 +3419,7 @@ impl KestrelApp {
         let mut new_model: Option<String> = None;
         ui.horizontal(|ui| {
             if self.settings.providers.is_empty() {
-                ui.colored_label(
-                    egui::Color32::from_rgb(220, 150, 80),
-                    "No provider — add one in Settings.",
-                );
+                ui.colored_label(WARN, "No provider — add one in Settings.");
             } else {
                 // Quick provider switch.
                 let active = self.settings.active_provider.clone().unwrap_or_default();
@@ -3528,9 +3538,9 @@ impl KestrelApp {
             };
             let pct = ctx.saturating_mul(100).checked_div(window).unwrap_or(0);
             let gauge_color = if pct >= 85 {
-                egui::Color32::from_rgb(220, 90, 90)
+                ERROR
             } else if pct >= 60 {
-                egui::Color32::from_rgb(220, 150, 80)
+                WARN
             } else {
                 ui.visuals().weak_text_color()
             };
@@ -3571,10 +3581,7 @@ impl KestrelApp {
                 );
                 if saved > 0.0 {
                     ui.separator();
-                    ui.colored_label(
-                        egui::Color32::from_rgb(120, 190, 120),
-                        format!("cache saved ~${saved:.4}"),
-                    );
+                    ui.colored_label(OK, format!("cache saved ~${saved:.4}"));
                 }
                 if last.total_input() > 0 || last.output_tokens > 0 {
                     ui.separator();
@@ -3601,7 +3608,7 @@ impl KestrelApp {
                 parts.push(format!("today ${:.2} / ${:.2}", self.today_cost, limit));
             }
             let color = if self.budget_blocked().is_some() {
-                egui::Color32::from_rgb(220, 90, 90)
+                ERROR
             } else {
                 ui.visuals().weak_text_color()
             };
@@ -3615,7 +3622,7 @@ impl KestrelApp {
                 "  ·  continuing this project (New chat to start fresh)".to_string()
             };
             ui.colored_label(
-                egui::Color32::from_rgb(150, 200, 150),
+                OK,
                 format!(
                     "Agent mode: files will be written into {}{continuing}",
                     self.agent_root().display()
@@ -3623,7 +3630,7 @@ impl KestrelApp {
             );
         }
         if !self.chat_error.is_empty() {
-            ui.colored_label(egui::Color32::from_rgb(220, 90, 90), &self.chat_error);
+            ui.colored_label(ERROR, &self.chat_error);
         }
 
         self.attachments_ui(ui);
@@ -4310,11 +4317,50 @@ fn chat_system_prompt(include: bool, project: &Path, query: &str) -> String {
     prompt
 }
 
-/// Kestrel's amber accent colour (a kestrel is a russet falcon).
-const ACCENT: egui::Color32 = egui::Color32::from_rgb(0xE8, 0x8A, 0x2E);
+/// The falcon mark followed by the wordmark, at `height` points.
+///
+/// Draws the real logo rather than the 🦅 emoji, which egui's bundled fonts
+/// don't cover — it rendered as a missing-glyph box.
+fn wordmark(ui: &mut egui::Ui, height: f32) {
+    if let Some(texture) = mark_texture(ui.ctx()) {
+        ui.add(
+            egui::Image::new(&texture)
+                .fit_to_exact_size(egui::vec2(height, height))
+                .maintain_aspect_ratio(true),
+        );
+    }
+    let text = egui::RichText::new("Kestrel").color(ACCENT).size(height);
+    ui.label(text.strong());
+}
+
+/// The mark as a texture, uploaded once and cached by name.
+fn mark_texture(ctx: &egui::Context) -> Option<egui::TextureHandle> {
+    let side = ICON_SIDE as usize;
+    if ICON_RGBA.len() != side * side * 4 {
+        return None;
+    }
+    // `from_rgba_unmultiplied` matches how the asset was exported.
+    let image = egui::ColorImage::from_rgba_unmultiplied([side, side], ICON_RGBA);
+    Some(ctx.load_texture("kestrel-mark", image, egui::TextureOptions::LINEAR))
+}
+
+/// A brand colour as an egui colour. `const fn`, so the constants below and the
+/// runtime mixes in `configure_style` can share one conversion.
+const fn brand_rgb(c: kestrel_core::brand::Rgb) -> egui::Color32 {
+    egui::Color32::from_rgb(c.0, c.1, c.2)
+}
+/// The falcon's gold — sampled from the logo, see `kestrel_core::brand`.
+const ACCENT: egui::Color32 = brand_rgb(kestrel_core::brand::GOLD);
+/// The lit edge of its gradient, for hover and emphasis.
+const ACCENT_BRIGHT: egui::Color32 = brand_rgb(kestrel_core::brand::GOLD_BRIGHT);
 /// Green for added lines / counts, red for removed — shared across the Diff view.
-const DIFF_ADD: egui::Color32 = egui::Color32::from_rgb(90, 190, 110);
-const DIFF_DEL: egui::Color32 = egui::Color32::from_rgb(220, 100, 100);
+const DIFF_ADD: egui::Color32 = brand_rgb(kestrel_core::brand::GREEN);
+const DIFF_DEL: egui::Color32 = brand_rgb(kestrel_core::brand::RED);
+/// Status colours. Named rather than written out at each call site, so the
+/// thirty-odd badges across the app can't drift away from the palette.
+const OK: egui::Color32 = brand_rgb(kestrel_core::brand::GREEN);
+const WARN: egui::Color32 = brand_rgb(kestrel_core::brand::AMBER);
+const ERROR: egui::Color32 = brand_rgb(kestrel_core::brand::RED);
 
 /// Apply Kestrel's visual style over the base light/dark theme: comfortable
 /// spacing, rounded widgets, and an amber accent for selection and links.
@@ -4341,8 +4387,24 @@ fn configure_style(ctx: &egui::Context, dark: bool) {
     style.visuals.selection.bg_fill = ACCENT.linear_multiply(if dark { 0.42 } else { 0.30 });
     style.visuals.selection.stroke = egui::Stroke::new(1.0, ACCENT);
     style.visuals.hyperlink_color = ACCENT;
-    // A touch of accent on the active widget outline.
-    style.visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, ACCENT.linear_multiply(0.6));
+    // The gold brightens on hover, the way the logo's gradient catches light.
+    style.visuals.widgets.hovered.bg_stroke =
+        egui::Stroke::new(1.0, ACCENT_BRIGHT.linear_multiply(0.7));
+    style.visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, ACCENT);
+
+    // Dark mode sits on the brand's near-black rather than egui's blue-grey, so
+    // the app and the logo share a ground.
+    if dark {
+        use kestrel_core::brand;
+        style.visuals.panel_fill = brand_rgb(brand::INK);
+        style.visuals.window_fill = brand_rgb(brand::INK_RAISED);
+        style.visuals.extreme_bg_color = brand_rgb(brand::mix(brand::INK, (0, 0, 0), 0.5));
+        let widgets = &mut style.visuals.widgets;
+        widgets.noninteractive.bg_fill = brand_rgb(brand::INK_RAISED);
+        widgets.inactive.bg_fill = brand_rgb(brand::mix(brand::INK_RAISED, brand::GOLD, 0.05));
+        widgets.hovered.bg_fill = brand_rgb(brand::mix(brand::INK_RAISED, brand::GOLD, 0.14));
+        widgets.active.bg_fill = brand_rgb(brand::mix(brand::INK_RAISED, brand::GOLD, 0.22));
+    }
     ctx.set_style(style);
 }
 
@@ -4748,7 +4810,7 @@ fn entry_ui(ui: &mut egui::Ui, content: &str, index: usize) {
         let colour = if content.starts_with('⛔') || content.starts_with('🚫') {
             DIFF_DEL
         } else if content.starts_with('⚠') {
-            egui::Color32::from_rgb(220, 150, 80)
+            WARN
         } else if content.starts_with('✅') {
             DIFF_ADD
         } else {
@@ -4769,7 +4831,7 @@ fn entry_ui(ui: &mut egui::Ui, content: &str, index: usize) {
 
     // Otherwise it's the model talking — render its markdown properly.
     ui.add_space(10.0);
-    ui.label(egui::RichText::new("🦅 Kestrel").strong().color(ACCENT));
+    wordmark(ui, 14.0);
     markdown_ui(ui, content, index);
 }
 
@@ -4778,10 +4840,7 @@ fn run_summary_ui(ui: &mut egui::Ui, summary: &RunSummary) {
     let (colour, title) = if summary.ok {
         (DIFF_ADD, "✅  Run complete")
     } else {
-        (
-            egui::Color32::from_rgb(220, 150, 80),
-            "⏸  Paused — Continue to resume",
-        )
+        (WARN, "⏸  Paused — Continue to resume")
     };
     ui.add_space(12.0);
     egui::Frame::none()

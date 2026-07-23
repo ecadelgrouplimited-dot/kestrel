@@ -9,9 +9,41 @@ This repository currently starts with the Phase 0 foundation from the product ro
 ## Workspace
 
 - `crates/kestrel-core`: local indexing and project analysis primitives, including the structural symbol-extraction layer (the seed of the Ghost Context Engine).
-- `crates/kestrel-cli`: command-line entry point for all workflows.
+- `crates/kestrel-cli`: command-line entry point for all workflows. The binary it produces is `kestrel`.
 - `crates/kestrel-ui`: a native desktop shell (egui/eframe) over `kestrel-core`.
+- `assets`: the brand assets both binaries embed.
+- `build-support`: shared build-script code (`include!`d, not a crate).
 - `docs`: product, architecture, requirements, roadmap, and planning documents.
+
+## Brand
+
+The palette is *measured* from the logo in `docs/kestrel_brand_identity/`, not
+picked by eye, and lives in one place — [`crates/kestrel-core/src/brand.rs`](crates/kestrel-core/src/brand.rs)
+— so the desktop app and the terminal can't drift apart.
+
+| Role | Hex | Where it shows |
+| --- | --- | --- |
+| `GOLD` | `#DC8D1F` | the accent everywhere: wordmark, active tab, links, spinner |
+| `GOLD_BRIGHT` | `#F2B04A` | hover and emphasis (the lit edge of the mark's gradient) |
+| `BRONZE` | `#793904` | pressed states and rules (its shaded side) |
+| `INK` / `INK_RAISED` | `#0A0A0B` / `#151517` | the near-black ground the falcon sits on |
+| `GREEN` / `RED` / `AMBER` | `#5ABE6E` / `#DC6464` / `#DC9650` | added lines, removed lines, warnings |
+
+Assets in `assets/`:
+
+- `kestrel.ico` — six sizes (16–256). PNG-compressed at 256, uncompressed DIB
+  below it, because GDI+ refuses to decode PNG entries at smaller sizes. Both
+  executables embed it via `build-support/embed_icon.rs`, which compiles a
+  Windows resource with the SDK's `rc.exe`. If `rc.exe` isn't installed the
+  build still succeeds — it just warns and ships the default icon.
+- `icon-64.rgba` — raw 64×64 RGBA. `include_bytes!`d for the eframe window icon
+  and for the mark drawn beside the wordmark in the app header, so neither needs
+  an image-decoding dependency.
+
+In the terminal the accent is emitted as truecolour (`38;2;220;141;31`) and
+falls back to xterm-256 index 172 elsewhere. `NO_COLOR` disables colour;
+`FORCE_COLOR` / `CLICOLOR_FORCE` re-enable it through a pipe (for demos and
+recordings).
 
 ## Native desktop app
 
