@@ -380,8 +380,9 @@ reason a developer should switch. If the copy could describe any IDE, it fails.
 > - **Guardrails for autonomy.** A policy engine that blocks tools/commands and a
 >   shared team policy committed to the repo. *Why:* safe to let it run.
 >
-> **Design:** developer-grade and confident — dark theme by default with a warm
-> amber accent (Kestrel's color, ~#E88A2E), clean typography, a light/dark toggle,
+> **Design:** developer-grade and confident — dark theme by default on the
+> brand's near-black (#0A0A0B) with the falcon's gold accent (#DC8D1F, the exact
+> value sampled from the logo), clean typography, a light/dark toggle,
 > responsive, and genuinely fast (no external CDNs; inline or local assets only).
 > Include a short "How it works" three-step (Open a project → Ask in plain English
 > → Review the diff and ship), a comparison line vs. using native Codex/Claude
@@ -407,6 +408,110 @@ reason a developer should switch. If the copy could describe any IDE, it fails.
     screenshot looks shippable.
   - A skeptical developer reading it can answer: *"What is Kestrel, and why would
     I switch?"*
+
+### 7.1 Follow-up — the second pass, on a site that already exists
+
+The site above was built when Kestrel was one product: a coding agent. It has
+since become **two products on one engine**, grown an autonomy core, and picked
+up a real brand. This prompt is the follow-up, and it is deliberately *not* a
+rebuild — pointing Kestrel at its own existing site and asking it to extend the
+narrative without breaking what works is a harder and more realistic test than
+starting from an empty folder.
+
+Run this **in the same project folder as the site from 7**, with the Kestrel
+repository linked as a second repo in the workspace (Repo → link) so the agent
+can read the README and source rather than trusting the prompt.
+
+> This project already contains Kestrel's product website. Do **not** start over
+> — read what's there first, keep the structure, voice, and anything that still
+> holds, and extend it. Kestrel has changed substantially since the site was
+> written, and the site now undersells it in three specific ways.
+>
+> **First, verify before you write.** The Kestrel repository is linked in this
+> workspace. Read its `README.md`, `docs/kestrel-work-plan.md`,
+> `docs/autonomy-plan.md`, and `crates/kestrel-core/src/brand.rs`. Every claim you
+> put on the page must be traceable to something you actually found there. If a
+> feature I describe below turns out not to exist, or exists differently, say so
+> and write what's true instead — an accurate page beats a flattering one.
+>
+> **Change 1 — Kestrel is now two products, not one.** The site's whole frame
+> ("an AI coding agent") is now too narrow. Rework the hero and add a section
+> that presents the pair honestly:
+> - **Kestrel Build** — the coding agent the current site already describes.
+> - **Kestrel Work** — the same engine pointed at everyday knowledge work:
+>   research a topic on the web, read real `.docx`/`.pdf`/`.xlsx`/`.csv` files,
+>   compute over the data, and produce a finished Word report or Excel workbook
+>   *with charts* — saved to a folder the user picks, not buried in Documents. It
+>   triages and drafts Outlook mail behind a mandatory permission prompt.
+>   *Why it matters:* a browser assistant can describe your spreadsheet; Kestrel
+>   Work opens it, fixes it, and saves it. Make the point that this is the
+>   Windows-native moat paying off a second time — and note that documents are
+>   written directly as Open XML, so **Office isn't required** to produce them.
+> - The two share one engine, one permission model, one budget, one plan view.
+>   That shared spine is the argument for why this isn't two half-products.
+>
+> **Change 2 — autonomy is the story now, and the site doesn't tell it.** Add a
+> section on what lets Kestrel finish long jobs instead of stalling halfway:
+> a **live task plan** it writes and ticks off as it goes; **stall detection**
+> that notices it's going in circles and changes approach; **persistent project
+> memory** across sessions; **sub-agents** for isolated parallel work;
+> **first-class web research**; and — when it does hit a limit — it **pauses and
+> tells you**, resumable with Continue, rather than dying silently at a step cap.
+> *Why it matters:* the difference between a demo and a tool is what happens on
+> minute forty.
+>
+> **Change 3 — the day-to-day craft that makes it pleasant.** A shorter section,
+> or a feature grid:
+> - **Watch it write.** Code streams into the preview token by token with syntax
+>   highlighting and live red/green line counts — not a frozen spinner followed
+>   by a finished file.
+> - **See it think.** Reasoning streams live, with a status line that says what
+>   it's actually doing right now instead of a fixed "Planning…".
+> - **Background tasks.** Dev servers, installs, and long builds run in the
+>   background with monitored output, so a `npm run dev` never hangs the session.
+> - **Attachments.** Drop a screenshot or a PDF straight into the chat — start
+>   from a design or a company profile, not a description of one.
+> - **A real CLI.** `kestrel` with no arguments opens an interactive session with
+>   history, slash commands, inline permission prompts, and Ctrl-C to cancel a
+>   run without killing the process. Same engine as the desktop app.
+> - **Bring your own model.** Anthropic, OpenAI, DeepSeek, Moonshot (Kimi), and
+>   z.ai GLM — including the open-weight models, where the cost argument is
+>   strongest. Check the repo for the current list before you write it down.
+>
+> **Change 4 — the brand is real now.** The site was built against a guessed
+> amber. The actual palette is sampled from the logo and lives in
+> `crates/kestrel-core/src/brand.rs`: gold `#DC8D1F`, its lit edge `#F2B04A`,
+> bronze `#793904`, and the near-black ground `#0A0A0B` / `#151517`. Update the
+> CSS custom properties to these exact values and make sure the light theme still
+> passes contrast. The logo is at `docs/kestrel_brand_identity/` in the linked
+> repo — use the real mark in the header and as the favicon instead of any emoji
+> or placeholder.
+>
+> **Keep the constraints from the original build:** self-contained, no external
+> CDNs or fonts, fast, responsive, light/dark toggle, and it must build and
+> preview locally.
+>
+> When you're done: build it, run it, open a browser preview, screenshot both the
+> new hero and the Kestrel Work section, and give me a short list of *what you
+> changed and what you deliberately left alone*.
+
+- **Tests:** the thing none of the earlier prompts test — **editing a substantial
+  existing codebase you didn't just write**, guided by a second repository read
+  as ground truth. Also exercises multi-repo linking, research-from-source rather
+  than from the prompt, and long-run autonomy (this is a many-step job).
+- **Success criteria:**
+  - It **read the repo first** and its claims match what's actually in the README
+    and source — bonus if it corrects something I got wrong in the prompt above.
+  - The existing site is *edited*, not regenerated: git diff shows targeted
+    changes, and sections that were already good survive intact.
+  - Build and Work are presented as one engine with two faces, not two products
+    bolted together.
+  - The autonomy section explains *pausing and resuming*, not just "it's smart".
+  - The palette exactly matches `brand.rs` — check the hex values, don't eyeball
+    the screenshot.
+  - The real logo appears; no emoji stand-ins.
+  - The final summary distinguishes what it changed from what it left alone. An
+    agent that can't tell you what it *didn't* touch isn't safe on a real repo.
 
 ---
 
