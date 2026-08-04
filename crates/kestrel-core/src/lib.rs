@@ -14,6 +14,7 @@ pub mod inspect;
 pub mod mail;
 pub mod media;
 pub mod memory;
+pub mod motion;
 pub mod office;
 pub mod plan;
 pub mod policy;
@@ -75,6 +76,13 @@ pub use media::{
     base64_encode, classify, document_context, load_image, AttachmentKind, ImageAttachment,
 };
 pub use memory::{load_memory, remember, render_memory, save_memory, MemoryNote};
+pub use motion::{
+    create_project as create_motion_project, load_project as load_motion_project,
+    save_project as save_motion_project, verify_on_disk as verify_motion_on_disk, verify_project,
+    Animation, Background, Element, Format as MotionFormat, MotionIssue, MotionProject,
+    ProjectMeta, ProjectType, Scene, Severity as MotionSeverity,
+    VerificationReport as MotionReport,
+};
 pub use office::{kind_for, read_document, DocKind};
 pub use plan::{
     clear_plan, load_plan, plan_from_tool_input, save_plan, Plan, PlanStep, StepStatus,
