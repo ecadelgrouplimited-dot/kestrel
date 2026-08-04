@@ -148,6 +148,9 @@ enum AppView {
     /// Kestrel Work — the everyday knowledge-work surface (research, documents,
     /// data) in its own scoped folder, separate from the coding project.
     Work,
+    /// Kestrel Motion — the code-native video workspace: the scene project, its
+    /// verification, and a one-click preview, driven by the Motion agent.
+    Motion,
 }
 
 /// Which pane the central area shows in the Main view.
@@ -963,6 +966,16 @@ impl eframe::App for KestrelApp {
                         {
                             self.enter_work_mode();
                         }
+                        if ui
+                            .button("▶ Motion")
+                            .on_hover_text(
+                                "Kestrel Motion — code-native video: describe a video and the \
+                                 agent authors, verifies and previews it in this project folder",
+                            )
+                            .clicked()
+                        {
+                            self.enter_motion_mode();
+                        }
                     } else if ui.button("← Back").clicked() {
                         if self.view == AppView::Work {
                             self.exit_work_mode();
@@ -1120,6 +1133,37 @@ impl eframe::App for KestrelApp {
             return;
         }
 
+        if self.view == AppView::Motion {
+            egui::TopBottomPanel::bottom("motion-compose").show(ctx, |ui| {
+                self.chat_compose_ui(ui);
+            });
+            // Left: the video project — its scenes, verification, and controls.
+            egui::SidePanel::left("motion-project")
+                .resizable(true)
+                .default_width(300.0)
+                .show(ctx, |ui| {
+                    ui.add_space(4.0);
+                    self.motion_panel_ui(ui);
+                });
+            // Right: the plan ledger and the artifacts the agent produced.
+            egui::SidePanel::right("motion-artifacts")
+                .resizable(true)
+                .default_width(420.0)
+                .show(ctx, |ui| {
+                    ui.add_space(4.0);
+                    self.build_preview_ui(ui);
+                });
+            egui::CentralPanel::default().show(ctx, |ui| {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .stick_to_bottom(true)
+                    .show(ui, |ui| {
+                        self.chat_history_ui(ui);
+                    });
+            });
+            return;
+        }
+
         if self.view == AppView::Chat {
             egui::TopBottomPanel::bottom("chat-compose").show(ctx, |ui| {
                 self.chat_compose_ui(ui);
@@ -1206,10 +1250,10 @@ impl KestrelApp {
     /// Which product surface is active: Kestrel **Work** in the Work view, else
     /// Kestrel **Build**. This picks the agent's tool pack and system prompt.
     fn profile(&self) -> kestrel_core::Profile {
-        if self.view == AppView::Work {
-            kestrel_core::Profile::Work
-        } else {
-            kestrel_core::Profile::Build
+        match self.view {
+            AppView::Work => kestrel_core::Profile::Work,
+            AppView::Motion => kestrel_core::Profile::Motion,
+            _ => kestrel_core::Profile::Build,
         }
     }
 
@@ -1338,6 +1382,22 @@ impl KestrelApp {
         self.save_session();
         self.view = AppView::Main;
         self.load_session_for_current_root();
+    }
+
+    /// Enter Kestrel Motion, working on a video project in the current project
+    /// folder. Motion shares the project root (a video is a project), so unlike
+    /// Work it keeps the same session rather than scoping to a separate folder.
+    fn enter_motion_mode(&mut self) {
+        if self.view == AppView::Motion {
+            return;
+        }
+        self.view = AppView::Motion;
+        // Motion acts on files — it authors a scene project, it doesn't just chat.
+        self.chat_agent_mode = true;
+        if !self.project_path().is_dir() {
+            self.status =
+                "Open or create a project folder first — Motion builds the video there.".into();
+        }
     }
 
     /// (Re)load the current project's directory tree on a worker thread.
@@ -3146,6 +3206,198 @@ impl KestrelApp {
     /// agent is creating, with a preview of the selected one.
     /// Kestrel Work's left panel: which folder it's scoped to, and what's in it.
     /// Files open in their default app (Word, Excel, a PDF viewer, …).
+    /// The Motion workspace panel: the video project's shape, its scenes, its
+    /// verification, and one-click preview. Read fresh from disk each frame so
+    /// scenes the agent writes appear live.
+    fn motion_panel_ui(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.strong(egui::RichText::new("Kestrel Motion").color(ACCENT));
+        });
+        ui.label(
+            egui::RichText::new(
+                "Describe a video below — the agent authors, verifies and previews it here.",
+            )
+            .weak()
+            .small(),
+        );
+        ui.add_space(6.0);
+
+        let root = self.project_path();
+        if !root.is_dir() {
+            ui.colored_label(WARN, "Open or create a project folder first.");
+            return;
+        }
+
+        let project = match kestrel_core::load_motion_project(&root) {
+            Ok(p) => p,
+            Err(_) => {
+                ui.label(
+                    egui::RichText::new(
+                        "No video project yet. Ask below, e.g. \"Create a 45-second vertical \
+                         sketch explainer about…\" — or start one:",
+                    )
+                    .weak(),
+                );
+                ui.add_space(4.0);
+                if ui.button("✨ New sketch explainer").clicked() {
+                    match kestrel_core::create_motion_project(
+                        &root,
+                        "Untitled",
+                        kestrel_core::ProjectType::SketchExplainer,
+                        kestrel_core::MotionFormat::Vertical,
+                    ) {
+                        Ok(_) => self.status = "Created a Motion project (vertical).".into(),
+                        Err(e) => self.status = format!("Could not create project: {e}"),
+                    }
+                }
+                return;
+            }
+        };
+
+        // Project summary.
+        ui.horizontal_wrapped(|ui| {
+            ui.strong(&project.project.title);
+            ui.label(
+                egui::RichText::new(format!(
+                    "· {:?} · {}×{} · {} fps",
+                    project.project.format,
+                    project.project.width,
+                    project.project.height,
+                    project.project.fps
+                ))
+                .weak()
+                .small(),
+            );
+        });
+        if !project.project.theme.is_empty() {
+            ui.label(
+                egui::RichText::new(format!("brand: {}", project.project.theme))
+                    .small()
+                    .color(ACCENT),
+            );
+        }
+
+        // Verification at a glance.
+        let report = kestrel_core::verify_project(&project, Some(&root));
+        let (errors, warnings, _infos) = report.counts();
+        ui.horizontal(|ui| {
+            if report.passed() {
+                ui.colored_label(OK, "verifies");
+            } else {
+                ui.colored_label(ERROR, format!("{errors} error(s)"));
+            }
+            if warnings > 0 {
+                ui.colored_label(WARN, format!("{warnings} warning(s)"));
+            }
+            let captions = kestrel_core::load_captions(&root);
+            if !captions.cues.is_empty() {
+                ui.label(
+                    egui::RichText::new(format!("· {} caption cues", captions.cues.len()))
+                        .small()
+                        .weak(),
+                );
+            }
+        });
+
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(!project.scenes.is_empty(), egui::Button::new("▶ Preview"))
+                .on_hover_text("Render a watchable HTML preview and open it")
+                .clicked()
+            {
+                match kestrel_core::write_motion_preview(&root, &project) {
+                    Ok(path) => {
+                        let _ = kestrel_core::open_path(&path.display().to_string());
+                        self.status = format!("Preview: {}", path.display());
+                    }
+                    Err(e) => self.status = format!("Preview failed: {e}"),
+                }
+            }
+            if ui.button("Verify").clicked() {
+                self.status = if report.passed() {
+                    format!("Motion verifies — {warnings} warning(s).")
+                } else {
+                    format!("Motion: {errors} error(s), {warnings} warning(s).")
+                };
+            }
+            if ui
+                .button("Folder")
+                .on_hover_text("Open the project folder")
+                .clicked()
+            {
+                let _ = kestrel_core::open_path(&root.display().to_string());
+            }
+        });
+
+        ui.add_space(8.0);
+        ui.separator();
+        ui.label(
+            egui::RichText::new(format!(
+                "Scenes ({}) · {:.1}s total",
+                project.scenes.len(),
+                project.total_duration()
+            ))
+            .strong(),
+        );
+        ui.add_space(2.0);
+
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                if project.scenes.is_empty() {
+                    ui.label(egui::RichText::new("No scenes yet.").weak());
+                }
+                for (i, scene) in project.scenes.iter().enumerate() {
+                    let name = if scene.name.trim().is_empty() {
+                        scene.id.clone()
+                    } else {
+                        scene.name.clone()
+                    };
+                    // Flag scenes that own an error so the eye goes straight there.
+                    let has_error = report.issues.iter().any(|iss| {
+                        iss.severity == kestrel_core::MotionSeverity::Error
+                            && iss.scene.as_deref() == Some(scene.id.as_str())
+                    });
+                    ui.horizontal(|ui| {
+                        // Colour the scene number to flag one that owns an error;
+                        // no bullet glyph (egui's fonts box the small triangles).
+                        let colour = if has_error { ERROR } else { ACCENT };
+                        ui.label(
+                            egui::RichText::new(format!("{}.", i + 1))
+                                .strong()
+                                .color(colour),
+                        );
+                        ui.label(egui::RichText::new(&name).strong());
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{:.1}s · {}",
+                                    scene.duration,
+                                    scene.elements.len()
+                                ))
+                                .small()
+                                .weak(),
+                            );
+                        });
+                    });
+                    if let Some(narration) = &scene.narration {
+                        let line: String = if narration.chars().count() > 64 {
+                            format!("{}…", narration.chars().take(63).collect::<String>())
+                        } else {
+                            narration.clone()
+                        };
+                        ui.label(
+                            egui::RichText::new(format!("   “{line}”"))
+                                .small()
+                                .weak()
+                                .italics(),
+                        );
+                    }
+                }
+            });
+    }
+
     fn work_panel_ui(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.strong("💼 Kestrel Work");
