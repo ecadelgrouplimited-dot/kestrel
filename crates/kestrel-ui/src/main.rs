@@ -252,6 +252,14 @@ struct KestrelApp {
     new_project_parent: String,
     new_project_name: String,
     new_project_status: String,
+    // New Motion video modal state.
+    motion_new_open: bool,
+    motion_new_parent: String,
+    motion_new_name: String,
+    motion_new_title: String,
+    motion_new_type: kestrel_core::ProjectType,
+    motion_new_format: kestrel_core::MotionFormat,
+    motion_new_status: String,
     // Chat state.
     chat_input: String,
     chat_history: Vec<kestrel_core::ChatMessage>,
@@ -390,6 +398,13 @@ impl Default for KestrelApp {
             new_project_parent: String::new(),
             new_project_name: String::new(),
             new_project_status: String::new(),
+            motion_new_open: false,
+            motion_new_parent: String::new(),
+            motion_new_name: String::new(),
+            motion_new_title: String::new(),
+            motion_new_type: kestrel_core::ProjectType::SketchExplainer,
+            motion_new_format: kestrel_core::MotionFormat::Vertical,
+            motion_new_status: String::new(),
             chat_input: String::new(),
             chat_history: Vec::new(),
             chat_include_context: false,
@@ -909,6 +924,7 @@ impl eframe::App for KestrelApp {
         self.poll_agent(ctx);
         let busy = self.job.is_some();
         self.new_project_modal(ctx);
+        self.motion_new_modal(ctx);
         self.entry_modal(ctx);
         self.delete_modal(ctx);
         self.revert_modal(ctx);
@@ -2642,6 +2658,194 @@ impl KestrelApp {
         self.new_project_open = open;
     }
 
+    /// Prime and open the "New video" modal. Defaults the parent folder to
+    /// wherever the current project sits (or the user's home), so the common
+    /// case is one click and a name.
+    fn open_motion_new_modal(&mut self) {
+        if self.motion_new_parent.trim().is_empty() {
+            let here = self.project_path();
+            let default_parent = here
+                .parent()
+                .map(|p| p.display().to_string())
+                .filter(|s| !s.is_empty())
+                .or_else(|| std::env::var("USERPROFILE").ok())
+                .unwrap_or_else(|| self.path.clone());
+            self.motion_new_parent = default_parent;
+        }
+        self.motion_new_status.clear();
+        self.motion_new_open = true;
+    }
+
+    /// Point the app at an existing Motion project folder and enter Motion mode.
+    fn open_motion_project(&mut self, dir: PathBuf) {
+        self.open_project_path(dir);
+        self.enter_motion_mode();
+    }
+
+    /// The "New video" modal: title, kind, format, and a folder — the same
+    /// first-class create flow coding and Work projects get, so a video is as
+    /// easy to start as anything else.
+    fn motion_new_modal(&mut self, ctx: &egui::Context) {
+        if !self.motion_new_open {
+            return;
+        }
+        let mut open = self.motion_new_open;
+        let mut create = false;
+        let mut cancel = false;
+        egui::Window::new("New video")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .open(&mut open)
+            .show(ctx, |ui| {
+                egui::Grid::new("motion-new-grid")
+                    .num_columns(2)
+                    .spacing([10.0, 8.0])
+                    .show(ui, |ui| {
+                        ui.label("Title");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.motion_new_title)
+                                .desired_width(320.0)
+                                .hint_text("The Missing Stock"),
+                        );
+                        ui.end_row();
+
+                        ui.label("Kind");
+                        egui::ComboBox::from_id_source("motion-new-type")
+                            .selected_text(motion_type_label(self.motion_new_type))
+                            .width(320.0)
+                            .show_ui(ui, |ui| {
+                                use kestrel_core::ProjectType::*;
+                                for kind in [
+                                    SketchExplainer,
+                                    ProductTutorial,
+                                    SocialShort,
+                                    PresentationVideo,
+                                ] {
+                                    ui.selectable_value(
+                                        &mut self.motion_new_type,
+                                        kind,
+                                        motion_type_label(kind),
+                                    );
+                                }
+                            });
+                        ui.end_row();
+
+                        ui.label("Format");
+                        egui::ComboBox::from_id_source("motion-new-format")
+                            .selected_text(motion_format_label(self.motion_new_format))
+                            .width(320.0)
+                            .show_ui(ui, |ui| {
+                                use kestrel_core::MotionFormat::*;
+                                for fmt in [Vertical, Horizontal, Square] {
+                                    ui.selectable_value(
+                                        &mut self.motion_new_format,
+                                        fmt,
+                                        motion_format_label(fmt),
+                                    );
+                                }
+                            });
+                        ui.end_row();
+
+                        ui.label("Parent folder");
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.motion_new_parent)
+                                    .desired_width(240.0)
+                                    .hint_text("where to create the video folder"),
+                            );
+                            if ui.button("Browse…").clicked() {
+                                if let Some(dir) = rfd::FileDialog::new()
+                                    .set_title("Choose a parent folder")
+                                    .pick_folder()
+                                {
+                                    self.motion_new_parent = dir.display().to_string();
+                                }
+                            }
+                        });
+                        ui.end_row();
+
+                        ui.label("Folder name");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.motion_new_name)
+                                .desired_width(320.0)
+                                .hint_text("the-missing-stock"),
+                        );
+                        ui.end_row();
+                    });
+
+                // A live hint of where it will land, from title if name is blank.
+                let effective = motion_folder_name(&self.motion_new_name, &self.motion_new_title);
+                if !effective.is_empty() && !self.motion_new_parent.trim().is_empty() {
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "Creates {}",
+                            PathBuf::from(self.motion_new_parent.trim())
+                                .join(&effective)
+                                .display()
+                        ))
+                        .small()
+                        .weak(),
+                    );
+                }
+
+                ui.add_space(6.0);
+                if !self.motion_new_status.is_empty() {
+                    ui.colored_label(ERROR, &self.motion_new_status);
+                    ui.add_space(4.0);
+                }
+                ui.horizontal(|ui| {
+                    if ui.button("Create").clicked() {
+                        create = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+
+        if create {
+            let title = self.motion_new_title.trim();
+            let folder = motion_folder_name(&self.motion_new_name, &self.motion_new_title);
+            let parent = self.motion_new_parent.trim();
+            if title.is_empty() {
+                self.motion_new_status = "Give the video a title.".into();
+            } else if parent.is_empty() {
+                self.motion_new_status = "Choose a parent folder.".into();
+            } else if folder.is_empty() {
+                self.motion_new_status = "Give the folder a name.".into();
+            } else {
+                let root = PathBuf::from(parent).join(&folder);
+                match kestrel_core::create_motion_project(
+                    &root,
+                    title,
+                    self.motion_new_type,
+                    self.motion_new_format,
+                ) {
+                    Ok(_) => {
+                        self.motion_new_open = false;
+                        self.motion_new_name.clear();
+                        self.motion_new_title.clear();
+                        self.motion_new_status.clear();
+                        self.open_motion_project(root.clone());
+                        self.status = format!("Created video project {}.", root.display());
+                    }
+                    Err(err) => {
+                        self.motion_new_status = format!("Could not create the video: {err}")
+                    }
+                }
+            }
+            return;
+        }
+        if cancel {
+            self.motion_new_open = false;
+            self.motion_new_status.clear();
+            return;
+        }
+        self.motion_new_open = open;
+    }
+
     /// Render the scrollable chat transcript.
     fn chat_history_ui(&mut self, ui: &mut egui::Ui) {
         ui.add_space(6.0);
@@ -3228,28 +3432,43 @@ impl KestrelApp {
             return;
         }
 
+        // Entry points, always available: start a new video (with a title,
+        // type, format and its own folder — like coding/Work projects) or open
+        // an existing one.
+        ui.horizontal(|ui| {
+            if ui
+                .button("✨ New video…")
+                .on_hover_text("Create a new video project in a folder you choose")
+                .clicked()
+            {
+                self.open_motion_new_modal();
+            }
+            if ui
+                .button("📂 Open…")
+                .on_hover_text("Open a folder that already holds a video project")
+                .clicked()
+            {
+                if let Some(dir) = rfd::FileDialog::new()
+                    .set_title("Open a Motion video folder")
+                    .pick_folder()
+                {
+                    self.open_motion_project(dir);
+                }
+            }
+        });
+        ui.add_space(6.0);
+
         let project = match kestrel_core::load_motion_project(&root) {
             Ok(p) => p,
             Err(_) => {
                 ui.label(
                     egui::RichText::new(
-                        "No video project yet. Ask below, e.g. \"Create a 45-second vertical \
-                         sketch explainer about…\" — or start one:",
+                        "No video in this folder yet. Start one with New video… above, or just \
+                         describe it below — e.g. \"Create a 45-second vertical sketch explainer \
+                         about…\"",
                     )
                     .weak(),
                 );
-                ui.add_space(4.0);
-                if ui.button("✨ New sketch explainer").clicked() {
-                    match kestrel_core::create_motion_project(
-                        &root,
-                        "Untitled",
-                        kestrel_core::ProjectType::SketchExplainer,
-                        kestrel_core::MotionFormat::Vertical,
-                    ) {
-                        Ok(_) => self.status = "Created a Motion project (vertical).".into(),
-                        Err(e) => self.status = format!("Could not create project: {e}"),
-                    }
-                }
                 return;
             }
         };
@@ -5179,6 +5398,38 @@ fn slugify(name: &str) -> String {
         }
     }
     out.trim_matches('-').to_string()
+}
+
+/// The folder name for a new video: the explicit name if given, else a slug of
+/// the title — so a title alone is enough to create one.
+fn motion_folder_name(name: &str, title: &str) -> String {
+    let n = slugify(name);
+    if n.is_empty() {
+        slugify(title)
+    } else {
+        n
+    }
+}
+
+/// A human label for a Motion project kind.
+fn motion_type_label(kind: kestrel_core::ProjectType) -> &'static str {
+    use kestrel_core::ProjectType::*;
+    match kind {
+        SketchExplainer => "Sketch explainer",
+        ProductTutorial => "Product tutorial",
+        SocialShort => "Social short",
+        PresentationVideo => "Presentation video",
+    }
+}
+
+/// A human label for a Motion format, with its canonical dimensions.
+fn motion_format_label(format: kestrel_core::MotionFormat) -> &'static str {
+    use kestrel_core::MotionFormat::*;
+    match format {
+        Vertical => "Vertical · 1080×1920",
+        Horizontal => "Horizontal · 1920×1080",
+        Square => "Square · 1080×1080",
+    }
 }
 
 /// Validate an editor draft and build a `Workflow`, or return an error message.
