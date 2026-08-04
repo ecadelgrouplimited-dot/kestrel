@@ -396,11 +396,6 @@ fn render_scene_inner(
         esc_attr(font)
     );
 
-    // A reusable arrowhead marker for sketch arrows.
-    svg.push_str(
-        r##"<defs><marker id="arrowhead" markerWidth="12" markerHeight="12" refX="9" refY="4" orient="auto"><path d="M0,0 L10,4 L0,8 z" fill="#333"/></marker></defs>"##,
-    );
-
     render_background(&mut svg, &scene.background, w, h, brand);
 
     // Elements draw in `layer` order, stable within equal layers.
@@ -564,9 +559,15 @@ fn render_element(
         "cursor" => render_cursor(svg, el),
         "sketch-arrow" | "arrow" | "connector" => render_arrow(svg, el, scene),
         "sketch-character" | "character" => render_character(svg, el),
+        "sketch-rect" | "sketch-box" => render_sketch_rect(svg, el),
+        "sketch-circle" | "sketch-ellipse" => render_sketch_ellipse(svg, el),
+        "sketch-line" | "sketch-underline" | "underline" => render_sketch_line(svg, el),
+        "sketch-highlight" => render_sketch_highlight(svg, el, brand),
+        "checkmark" | "check" | "sketch-check" | "tick" => render_checkmark(svg, el),
+        "cross" | "sketch-cross" | "x-mark" => render_cross(svg, el),
         "rect" | "rectangle" | "highlight" => render_rect(svg, el),
         "circle" | "ellipse" => render_circle(svg, el),
-        "line" | "underline" => render_line(svg, el),
+        "line" => render_line(svg, el),
         // Anything else still renders as a labelled placeholder so a
         // verification-driven iteration can see it exists and where it sits.
         _ => render_placeholder(svg, el),
@@ -649,8 +650,8 @@ fn render_image(svg: &mut String, el: &Element) {
     }
 }
 
-/// A hand-drawn arrow from one element's centre to another's, with a slight
-/// deterministic curve so it reads as sketched rather than plotted.
+/// A hand-drawn arrow from one element's centre to another's: a rough shaft
+/// plus a rough two-stroke arrowhead, deterministic per element id (§6).
 fn render_arrow(svg: &mut String, el: &Element, scene: &Scene) {
     let from = el.prop_str("from").and_then(|id| element_center(scene, id));
     let to = el.prop_str("to").and_then(|id| element_center(scene, id));
@@ -663,29 +664,67 @@ fn render_arrow(svg: &mut String, el: &Element, scene: &Scene) {
             ((p.x, p.y), (p.x + s.0, p.y + s.1))
         }
     };
-    // Curve control point: midpoint nudged perpendicular by a stable amount.
-    let (mx, my) = ((start.0 + end.0) / 2.0, (start.1 + end.1) / 2.0);
     let (dx, dy) = (end.0 - start.0, end.1 - start.1);
     let len = (dx * dx + dy * dy).sqrt().max(1.0);
-    let jitter = 0.12 * len * seed_unit(&el.id); // deterministic per element id
-    let (nx, ny) = (-dy / len, dx / len);
-    let (cx, cy) = (mx + nx * jitter, my + ny * jitter);
-    let stroke = el.prop_str("stroke").unwrap_or("#333333");
+    let stroke = el
+        .prop_str("stroke")
+        .or(el.prop_str("color"))
+        .unwrap_or("#333333");
     let width = el
         .extra
         .get("strokeWidth")
         .and_then(|v| v.as_f64())
-        .unwrap_or(6.0);
-    // pathLength=1 lets a draw animation run stroke-dashoffset 1→0 without
-    // knowing the real length.
-    let _ = write!(
+        .unwrap_or(6.0) as f32;
+    let mut rng = Rng::new(&el.id);
+    let rough = roughness_for(len);
+
+    // A gentle bow in the shaft, so a straight arrow still reads as drawn.
+    let (nx, ny) = (-dy / len, dx / len);
+    let bow = 0.08 * len * seed_unit(&el.id);
+    let mid = (
+        (start.0 + end.0) / 2.0 + nx * bow,
+        (start.1 + end.1) / 2.0 + ny * bow,
+    );
+    rough_stroke(
         svg,
-        r##"<path d="M{:.1},{:.1} Q{cx:.1},{cy:.1} {:.1},{:.1}" fill="none" stroke="{}" stroke-width="{width:.1}" stroke-linecap="round" marker-end="url(#arrowhead)" pathLength="1"/>"##,
-        start.0,
-        start.1,
-        end.0,
-        end.1,
-        esc_attr(stroke)
+        &mut rng,
+        &[start, mid, end],
+        false,
+        stroke,
+        width,
+        rough,
+        1.0,
+    );
+
+    // Arrowhead: two short rough strokes back from the tip at ±26°.
+    let (ux, uy) = (dx / len, dy / len);
+    let head = (len * 0.06).clamp(18.0, 46.0);
+    let ang = 0.45_f32; // ~26°
+    let (ca, sa) = (ang.cos(), ang.sin());
+    let barb = |sign: f32| {
+        let rx = -ux * ca + sign * -uy * sa;
+        let ry = -uy * ca + sign * ux * sa;
+        (end.0 + rx * head, end.1 + ry * head)
+    };
+    rough_stroke(
+        svg,
+        &mut rng,
+        &[end, barb(1.0)],
+        false,
+        stroke,
+        width,
+        rough * 0.5,
+        1.0,
+    );
+    rough_stroke(
+        svg,
+        &mut rng,
+        &[end, barb(-1.0)],
+        false,
+        stroke,
+        width,
+        rough * 0.5,
+        1.0,
     );
 }
 
@@ -1367,6 +1406,311 @@ fn seed_unit(key: &str) -> f32 {
     unit - 0.5 // [-0.5, 0.5)
 }
 
+/// A tiny seeded PRNG (xorshift64) for the sketch system's *deterministic*
+/// randomness (§6: a sketch element looks identical every render unless
+/// regenerated). Seeded from the element id, so each element wobbles its own
+/// consistent way.
+struct Rng(u64);
+
+impl Rng {
+    fn new(seed: &str) -> Self {
+        let mut h: u64 = 0xcbf29ce484222325;
+        for byte in seed.bytes() {
+            h ^= byte as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        Rng(h | 1) // never zero, or xorshift sticks
+    }
+    fn next(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.0 = x;
+        x
+    }
+    /// A value in [-mag, mag).
+    fn jitter(&mut self, mag: f32) -> f32 {
+        ((self.next() % 100_000) as f32 / 100_000.0 - 0.5) * 2.0 * mag
+    }
+}
+
+/// A hand-drawn stroke through `pts`, in the rough.js manner: each segment is a
+/// cubic with jittered control points, drawn as two slightly different overlaid
+/// passes so it reads as sketched rather than plotted. `closed` joins the last
+/// point back to the first.
+#[allow(clippy::too_many_arguments)]
+fn rough_stroke(
+    svg: &mut String,
+    rng: &mut Rng,
+    pts: &[(f32, f32)],
+    closed: bool,
+    stroke: &str,
+    width: f32,
+    rough: f32,
+    opacity: f32,
+) {
+    if pts.len() < 2 {
+        return;
+    }
+    let mut segs: Vec<((f32, f32), (f32, f32))> = pts.windows(2).map(|w| (w[0], w[1])).collect();
+    if closed {
+        segs.push((pts[pts.len() - 1], pts[0]));
+    }
+    for _pass in 0..2 {
+        let (sx, sy) = segs[0].0;
+        let mut d = format!(
+            "M{:.1},{:.1}",
+            sx + rng.jitter(rough),
+            sy + rng.jitter(rough)
+        );
+        for (a, b) in &segs {
+            let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+            let c1 = (
+                a.0 + dx * 0.33 + rng.jitter(rough),
+                a.1 + dy * 0.33 + rng.jitter(rough),
+            );
+            let c2 = (
+                a.0 + dx * 0.66 + rng.jitter(rough),
+                a.1 + dy * 0.66 + rng.jitter(rough),
+            );
+            let end = (b.0 + rng.jitter(rough * 0.6), b.1 + rng.jitter(rough * 0.6));
+            let _ = write!(
+                d,
+                " C{:.1},{:.1} {:.1},{:.1} {:.1},{:.1}",
+                c1.0, c1.1, c2.0, c2.1, end.0, end.1
+            );
+        }
+        let _ = write!(
+            svg,
+            r##"<path d="{d}" fill="none" stroke="{}" stroke-width="{width:.1}" stroke-linecap="round" stroke-linejoin="round" opacity="{opacity}"/>"##,
+            esc_attr(stroke)
+        );
+    }
+}
+
+/// A sensible roughness for a stroke of length `len`: enough wobble to read as
+/// hand-drawn, never so much it looks broken.
+fn roughness_for(len: f32) -> f32 {
+    (len * 0.02).clamp(1.5, 9.0)
+}
+
+/// The four corners of an element's box, for rough rectangles.
+fn box_corners(el: &Element, default: (f32, f32)) -> [(f32, f32); 4] {
+    let p = el.position.unwrap_or_default_point();
+    let (w, h) = el.size.map(|s| (s.width, s.height)).unwrap_or(default);
+    [
+        (p.x, p.y),
+        (p.x + w, p.y),
+        (p.x + w, p.y + h),
+        (p.x, p.y + h),
+    ]
+}
+
+fn render_sketch_rect(svg: &mut String, el: &Element) {
+    let p = el.position.unwrap_or_default_point();
+    let (w, h) = el
+        .size
+        .map(|s| (s.width, s.height))
+        .unwrap_or((300.0, 180.0));
+    // An optional flat fill sits behind the hand-drawn outline.
+    if let Some(fill) = el.prop_str("fill") {
+        let _ = write!(
+            svg,
+            r##"<rect x="{:.1}" y="{:.1}" width="{w:.1}" height="{h:.1}" rx="6" fill="{}" opacity="0.9"/>"##,
+            p.x,
+            p.y,
+            esc_attr(fill)
+        );
+    }
+    let stroke = el
+        .prop_str("color")
+        .or(el.prop_str("stroke"))
+        .unwrap_or("#333333");
+    let width = el
+        .extra
+        .get("strokeWidth")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(4.0) as f32;
+    let mut rng = Rng::new(&el.id);
+    let rough = roughness_for((w + h) * 0.5);
+    rough_stroke(
+        svg,
+        &mut rng,
+        &box_corners(el, (300.0, 180.0)),
+        true,
+        stroke,
+        width,
+        rough,
+        1.0,
+    );
+}
+
+fn render_sketch_ellipse(svg: &mut String, el: &Element) {
+    let p = el.position.unwrap_or_default_point();
+    let (w, h) = el
+        .size
+        .map(|s| (s.width, s.height))
+        .unwrap_or((200.0, 200.0));
+    let (cx, cy, rx, ry) = (p.x + w / 2.0, p.y + h / 2.0, w / 2.0, h / 2.0);
+    if let Some(fill) = el.prop_str("fill") {
+        let _ = write!(
+            svg,
+            r##"<ellipse cx="{cx:.1}" cy="{cy:.1}" rx="{rx:.1}" ry="{ry:.1}" fill="{}" opacity="0.9"/>"##,
+            esc_attr(fill)
+        );
+    }
+    // Sample points around the ellipse; the cubic-per-segment smoothing in
+    // rough_stroke turns the ring into a wobbly hand-drawn oval.
+    const N: usize = 12;
+    let pts: Vec<(f32, f32)> = (0..N)
+        .map(|i| {
+            let a = std::f32::consts::TAU * i as f32 / N as f32;
+            (cx + rx * a.cos(), cy + ry * a.sin())
+        })
+        .collect();
+    let stroke = el
+        .prop_str("color")
+        .or(el.prop_str("stroke"))
+        .unwrap_or("#333333");
+    let width = el
+        .extra
+        .get("strokeWidth")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(4.0) as f32;
+    let mut rng = Rng::new(&el.id);
+    rough_stroke(
+        svg,
+        &mut rng,
+        &pts,
+        true,
+        stroke,
+        width,
+        roughness_for((rx + ry) * 0.5),
+        1.0,
+    );
+}
+
+fn render_sketch_line(svg: &mut String, el: &Element) {
+    let p = el.position.unwrap_or_default_point();
+    let (w, h) = el.size.map(|s| (s.width, s.height)).unwrap_or((240.0, 0.0));
+    let stroke = el
+        .prop_str("color")
+        .or(el.prop_str("stroke"))
+        .unwrap_or("#333333");
+    let width = el
+        .extra
+        .get("strokeWidth")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(if el.kind.contains("underline") {
+            5.0
+        } else {
+            4.0
+        }) as f32;
+    let mut rng = Rng::new(&el.id);
+    let len = (w * w + h * h).sqrt();
+    rough_stroke(
+        svg,
+        &mut rng,
+        &[(p.x, p.y), (p.x + w, p.y + h)],
+        false,
+        stroke,
+        width,
+        roughness_for(len),
+        1.0,
+    );
+}
+
+/// A marker-pen highlight: a thick, translucent hand-drawn band.
+fn render_sketch_highlight(
+    svg: &mut String,
+    el: &Element,
+    brand: Option<&crate::motion_brand::BrandKit>,
+) {
+    let p = el.position.unwrap_or_default_point();
+    let (w, h) = el
+        .size
+        .map(|s| (s.width, s.height))
+        .unwrap_or((300.0, 48.0));
+    let colour = el
+        .prop_str("color")
+        .or_else(|| brand.map(|b| b.accent.as_str()))
+        .unwrap_or("#ffd54a");
+    let mut rng = Rng::new(&el.id);
+    // One thick stroke down the middle, so it reads as a swipe of highlighter.
+    let mid = p.y + h / 2.0;
+    rough_stroke(
+        svg,
+        &mut rng,
+        &[(p.x, mid), (p.x + w, mid)],
+        false,
+        colour,
+        h * 0.9,
+        roughness_for(w) * 0.6,
+        0.45,
+    );
+}
+
+fn render_checkmark(svg: &mut String, el: &Element) {
+    let p = el.position.unwrap_or_default_point();
+    let (w, h) = el.size.map(|s| (s.width, s.height)).unwrap_or((80.0, 80.0));
+    let stroke = el.prop_str("color").unwrap_or("#5ABE6E");
+    let width = el
+        .extra
+        .get("strokeWidth")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(8.0) as f32;
+    let pts = [
+        (p.x, p.y + h * 0.55),
+        (p.x + w * 0.38, p.y + h),
+        (p.x + w, p.y),
+    ];
+    let mut rng = Rng::new(&el.id);
+    rough_stroke(
+        svg,
+        &mut rng,
+        &pts,
+        false,
+        stroke,
+        width,
+        roughness_for(w) * 0.7,
+        1.0,
+    );
+}
+
+fn render_cross(svg: &mut String, el: &Element) {
+    let p = el.position.unwrap_or_default_point();
+    let (w, h) = el.size.map(|s| (s.width, s.height)).unwrap_or((70.0, 70.0));
+    let stroke = el.prop_str("color").unwrap_or("#DC6464");
+    let width = el
+        .extra
+        .get("strokeWidth")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(8.0) as f32;
+    let mut rng = Rng::new(&el.id);
+    let rough = roughness_for(w) * 0.7;
+    rough_stroke(
+        svg,
+        &mut rng,
+        &[(p.x, p.y), (p.x + w, p.y + h)],
+        false,
+        stroke,
+        width,
+        rough,
+        1.0,
+    );
+    rough_stroke(
+        svg,
+        &mut rng,
+        &[(p.x + w, p.y), (p.x, p.y + h)],
+        false,
+        stroke,
+        width,
+        rough,
+        1.0,
+    );
+}
+
 /// Escape text content for XML/SVG.
 fn esc_text(s: &str) -> String {
     s.replace('&', "&amp;")
@@ -1434,8 +1778,9 @@ mod tests {
         // The background colour and the title text made it in.
         assert!(svg.contains("#F7F4EC"));
         assert!(svg.contains("Where did the stock go?"));
-        // The arrow resolved to a curved path with an arrowhead marker.
-        assert!(svg.contains("marker-end=\"url(#arrowhead)\""));
+        // The arrow renders as hand-drawn rough paths (shaft + barbs), not a
+        // clean marker-ended line.
+        assert!(svg.contains("<path"));
         // The character stand-in and the image placeholder are present.
         assert!(svg.contains("shop-owner"));
         assert!(svg.contains("🖼 shelf") || svg.contains("shelf"));
@@ -1679,6 +2024,52 @@ mod tests {
         let svg = render_one("chart", serde_json::json!({ "data": [] }));
         assert!(svg.contains("stroke-dasharray")); // the placeholder box
         assert!(svg.contains("(chart)"));
+    }
+
+    #[test]
+    fn sketch_primitives_are_rough_and_deterministic() {
+        // Each sketch kind renders as overlaid rough paths (two passes each).
+        for kind in [
+            "sketch-rect",
+            "sketch-circle",
+            "sketch-line",
+            "checkmark",
+            "cross",
+            "sketch-highlight",
+        ] {
+            let a = render_one(kind, serde_json::json!({}));
+            let b = render_one(kind, serde_json::json!({}));
+            assert!(a.contains("<path"), "{kind} should draw paths");
+            // Cubic segments are the signature of the rough stroke.
+            assert!(a.contains(" C"), "{kind} should use cubic segments");
+            // Deterministic: identical input → byte-identical output (§6, §15).
+            assert_eq!(a, b, "{kind} must render deterministically");
+        }
+        // Different element ids wobble differently (the randomness is real).
+        let one = render_one("sketch-rect", serde_json::json!({}));
+        let mut project = MotionProject::new("t", ProjectType::SketchExplainer, Format::Horizontal);
+        project.scenes.push(crate::motion::Scene {
+            id: "s".into(),
+            name: String::new(),
+            duration: 4.0,
+            narration: None,
+            audio: None,
+            background: Background::default(),
+            elements: vec![crate::motion::Element {
+                id: "different-id".into(),
+                kind: "sketch-rect".into(),
+                position: Some(crate::motion::Point { x: 200.0, y: 200.0 }),
+                size: Some(crate::motion::Size {
+                    width: 800.0,
+                    height: 400.0,
+                }),
+                animation: None,
+                layer: 0,
+                extra: std::collections::BTreeMap::new(),
+            }],
+        });
+        let other = SvgRenderer.render_scene_svg(&project, &project.scenes[0]);
+        assert_ne!(one, other, "different ids should wobble differently");
     }
 
     #[test]

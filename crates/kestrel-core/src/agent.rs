@@ -322,10 +322,12 @@ fn motion_tools() -> Vec<ToolSpec> {
                           how you regenerate or shorten a single scene without touching the \
                           others); otherwise it is appended. Elements are the structured \
                           components — each needs a unique `id` and a `type`: text, title, \
-                          caption, cta, callout, sketch-arrow, sketch-character, image, chart (with \
+                          caption, cta, callout, sketch-character, image, chart (with \
                           `data` [{label,value}] and `chartKind` bar|line), browser-frame (with a \
-                          `url` and optional screenshot `asset`), device-frame, cursor, rect, \
-                          circle, line, highlight. Each takes a \
+                          `url` and optional screenshot `asset`), device-frame, cursor. For a \
+                          sketch explainer prefer the HAND-DRAWN kinds: sketch-arrow (from/to), \
+                          sketch-rect (optional `fill`), sketch-circle, sketch-line, \
+                          sketch-underline, sketch-highlight, checkmark, cross. Each takes a \
                           `position` {x,y}, usually a `size` {width,height}, and an optional \
                           `animation` {type,start,duration}. Positions are in pixels from the \
                           top-left of the frame. Keep text inside the safe area (a 5% margin) and, \
@@ -539,10 +541,12 @@ pub fn motion_system_prompt(root: &Path) -> String {
             voice-over can attach later — LEAVE ROOM for voice-over; don't cram. If the user \
             gives you narration audio, use voice_motion to attach and time each scene to it.\n\
          3. Author each scene with write_scene using approved component types. Give every element \
-            a unique id. Keep readable text inside the 5% safe-area margin; on vertical, keep \
-            captions above the bottom 12% where the platform UI sits. Make animation start+duration \
-            fit within the scene. If the user names a brand, apply it with brand_motion so the look \
-            is consistent.\n\
+            a unique id. For a sketch explainer, build with the hand-drawn kinds (sketch-rect, \
+            sketch-circle, sketch-arrow, sketch-underline, sketch-highlight, checkmark, cross) so \
+            it reads as a whiteboard sketch, not clip-art. Keep readable text inside the 5% \
+            safe-area margin; on vertical, keep captions above the bottom 12% where the platform \
+            UI sits. Make animation start+duration fit within the scene. If the user names a \
+            brand, apply it with brand_motion so the look is consistent.\n\
          4. VERIFY with verify_motion and REPAIR. An ERROR is a broken build — fix the named scene \
             and re-verify until it passes. A clean pass is the bar for \"done\". Then \
             caption_motion() to caption the narration, and preview_motion() to render it and \
