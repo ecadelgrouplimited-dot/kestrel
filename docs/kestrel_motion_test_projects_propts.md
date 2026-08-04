@@ -271,6 +271,102 @@ through its own features.
 
 ---
 
+## 8. Smart Business Book — one pain, one fix, one CTA
+
+A campaign of short **vertical sketch explainers**, each aimed at a single
+business problem a small shop, vendor, or service owner feels — and how **Smart
+Business Book (SBB)** fixes it, ending on one clear call to action. Whiteboard
+look throughout: hand-drawn boxes, arrows, checkmarks/crosses, a shop-owner
+`sketch-character`, animated captions, room for voice-over.
+
+All of these follow the **§2.1 sketch-explainer success criteria** (every visual
+is a hand-drawn kind, verifies clean, whiteboard feel) **plus**: the video names
+a *real, relatable* business pain, shows the SBB fix as the turn, and ends on
+**one** unambiguous CTA. Aim for **25–35s, 5–6 scenes, 1080×1920**. Use a
+consistent SBB brand kit across the set (warm gold on near-black, a "Smart
+Business Book" watermark) so they read as one campaign.
+
+### 8.1 Stock — never run out, never overstock
+> 30-second vertical sketch explainer: **"Stop guessing your stock."** Hook: a
+> shop owner staring at half-empty shelves, a customer walking out because the
+> item's gone. Problem: ordering by memory means dead stock on some shelves and
+> empty gaps on others — money frozen or money lost. Turn: SBB tracks every item
+> in and out and flags what to reorder and when. Close on a shelf that's just
+> right, with a checkmark. **CTA: "Know your stock — get Smart Business Book."**
+
+### 8.2 Debtors — who owes you money?
+> 30-second vertical sketch explainer: **"Your money is in other people's
+> pockets."** Hook: a friendly "pay you next week" that never comes; a notebook
+> full of scribbled IOUs. Problem: credit sales you can't track become sales you
+> never collect. Turn: SBB records every credit sale and shows exactly who owes
+> what, so you can follow up. Close on a paid-up ledger with a green checkmark.
+> **CTA: "Get paid what you're owed — Smart Business Book."**
+
+### 8.3 Cash flow — are you actually making a profit?
+> 30-second vertical sketch explainer: **"Busy isn't the same as profitable."**
+> Hook: a packed shop, a smiling owner — then an empty cash box. Problem: strong
+> sales can still hide a loss when you don't know your real costs. Turn: SBB puts
+> sales, costs, and profit on one screen so you see what you actually keep. Close
+> on a clear "profit up" line chart. **CTA: "See your real profit — start with
+> Smart Business Book."**
+
+### 8.4 Expenses — where did the money go?
+> 25-second vertical sketch explainer: **"Small leaks sink the boat."** Hook:
+> coins slipping through a hand — a little here, a little there. Problem:
+> untracked small expenses quietly eat the month's profit. Turn: SBB logs every
+> expense and shows where the money really goes, in a quick bar chart. Close on a
+> plugged leak with a checkmark. **CTA: "Plug the leaks — Smart Business Book."**
+
+### 8.5 Getting paid — send invoices, get paid faster
+> 30-second vertical sketch explainer: **"Chasing payments all day?"** Hook: an
+> owner on the phone, again, asking for money owed. Problem: handwritten bills and
+> "I'll pay later" stretch a quick sale into a month-long chase. Turn: SBB creates
+> a clean invoice in seconds and tracks who's paid. Close on a "PAID" stamp with a
+> checkmark. **CTA: "Invoice in seconds — get Smart Business Book."**
+
+### 8.6 Records — ready for tax season in minutes
+> 30-second vertical sketch explainer: **"Tax season shouldn't be a nightmare."**
+> Hook: a shoebox exploding with crumpled receipts. Problem: a year of loose paper
+> means days of stress and guesswork. Turn: SBB keeps every sale and expense in
+> one place, so your records are ready when you need them. Close on a tidy report
+> with a checkmark. **CTA: "Stay ready — Smart Business Book."**
+
+### 8.7 Knowing your numbers — your whole business at a glance
+> 30-second vertical sketch explainer: **"Do you know your numbers?"** Hook: an
+> owner asked "how's business?" — and shrugging. Problem: running on gut feel
+> means missing what's working and what's bleeding. Turn: SBB shows today's sales,
+> top products, and profit on one dashboard. Close on a confident owner reading a
+> clear chart. **CTA: "Know your numbers — open Smart Business Book."**
+
+### 8.8 From paper to app — ditch the exercise book
+> 25-second vertical sketch explainer: **"Still running your business in an
+> exercise book?"** Hook: a worn paper ledger, smudged and torn, a cross over it.
+> Problem: paper gets lost, adds up wrong, and tells you nothing. Turn: SBB is the
+> business book that adds up for you and remembers everything. Close on the paper
+> book replaced by a phone, checkmark. **CTA: "Upgrade your book — Smart Business
+> Book."**
+
+### 8.9 Multiple staff / branches — know what everyone's doing
+> 30-second vertical sketch explainer: **"Who sold what, where?"** Hook: two shop
+> branches, an owner who can't be in both. Problem: without a shared record, sales
+> and stock across staff and branches are a black box. Turn: SBB gives every branch
+> one book the owner can see from anywhere. Close on both branches ticking green.
+> **CTA: "See every branch — Smart Business Book."**
+
+### 8.10 Reorder timing — restock at the right moment
+> 25-second vertical sketch explainer: **"Order too late, lose the sale. Too
+> early, freeze your cash."** Hook: a "SOLD OUT" sign next to a shelf overflowing
+> with the wrong thing. Problem: reordering by guesswork costs you either way.
+> Turn: SBB watches your stock levels and tells you what to reorder, and when.
+> Close on a perfectly-timed delivery, checkmark. **CTA: "Reorder at the right
+> time — Smart Business Book."**
+
+> **Campaign tip:** run 8.1–8.10 with the *same* SBB `brand_motion` kit and a
+> shared CTA style, then `render_motion` each to a 1080×1920 MP4 — that's a
+> ready-to-post set of shorts, one per objection, all on brand.
+
+---
+
 ## Regression checklist (quick pass after any change)
 
 - [ ] `motion_new` scaffolds the folder tree; a titled project lands in its own
