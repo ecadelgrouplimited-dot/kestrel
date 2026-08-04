@@ -246,6 +246,7 @@ mod tests {
             name: String::new(),
             duration: 6.0,
             narration: Some("Your business may be losing stock without you noticing it.".into()),
+            audio: None,
             background: Default::default(),
             elements: vec![],
         });
@@ -254,6 +255,7 @@ mod tests {
             name: String::new(),
             duration: 4.0,
             narration: None, // no narration -> no cues
+            audio: None,
             background: Default::default(),
             elements: vec![],
         });
@@ -262,6 +264,7 @@ mod tests {
             name: String::new(),
             duration: 5.0,
             narration: Some("Track every item.".into()),
+            audio: None,
             background: Default::default(),
             elements: vec![],
         });
@@ -294,6 +297,7 @@ mod tests {
                  several caption cues because no single caption should be too wide to read."
                     .into(),
             ),
+            audio: None,
             background: Default::default(),
             elements: vec![],
         });

@@ -15,6 +15,7 @@ pub mod mail;
 pub mod media;
 pub mod memory;
 pub mod motion;
+pub mod motion_audio;
 pub mod motion_brand;
 pub mod motion_caption;
 pub mod motion_render;
@@ -85,6 +86,9 @@ pub use motion::{
     Animation, Background, Element, Format as MotionFormat, MotionIssue, MotionProject,
     ProjectMeta, ProjectType, Scene, Severity as MotionSeverity,
     VerificationReport as MotionReport,
+};
+pub use motion_audio::{
+    build_narration_track, has_voiceover, narration_status, probe_duration, SceneAudio,
 };
 pub use motion_brand::{load_brand, save_brand, BrandKit};
 pub use motion_caption::{load_captions, save_captions, Caption, CaptionTrack};

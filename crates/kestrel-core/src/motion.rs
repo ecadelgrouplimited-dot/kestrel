@@ -187,6 +187,11 @@ pub struct Scene {
     /// audio synchronisation (§8) has somewhere to attach.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub narration: Option<String>,
+    /// A voice-over audio clip for this scene, by project-relative path (usually
+    /// under `assets/audio/`). When set, the scene can be timed to the clip and
+    /// the clip is mixed into the exported MP4 (§8).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio: Option<String>,
     #[serde(default)]
     pub background: Background,
     #[serde(default)]
@@ -1016,6 +1021,7 @@ mod tests {
             name: "one".into(),
             duration: 5.0,
             narration: None,
+            audio: None,
             background: Background::default(),
             elements: vec![
                 Element {
@@ -1059,6 +1065,7 @@ mod tests {
             name: String::new(),
             duration: 5.0,
             narration: None,
+            audio: None,
             background: Background::default(),
             elements: vec![
                 Element {
@@ -1100,6 +1107,7 @@ mod tests {
             name: String::new(),
             duration: 2.0,
             narration: None,
+            audio: None,
             background: Background::default(),
             elements: vec![Element {
                 id: "t".into(),
@@ -1138,6 +1146,7 @@ mod tests {
             name: String::new(),
             duration: 5.0,
             narration: None,
+            audio: None,
             background: Background::default(),
             elements: vec![Element {
                 id: "t".into(),
@@ -1179,6 +1188,7 @@ mod tests {
             name: "Hook".into(),
             duration: 6.0,
             narration: Some("hi".into()),
+            audio: None,
             background: Background::default(),
             elements: vec![Element {
                 id: "title".into(),
@@ -1232,6 +1242,7 @@ mod tests {
                 name: name.to_string(),
                 duration: 4.0,
                 narration: None,
+                audio: None,
                 background: Background::default(),
                 elements: Vec::new(),
             };

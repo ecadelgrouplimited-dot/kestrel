@@ -248,6 +248,7 @@ pub fn tools_for(profile: Profile) -> Vec<ToolSpec> {
                 "write_scene",
                 "verify_motion",
                 "caption_motion",
+                "voice_motion",
                 "brand_motion",
                 "preview_motion",
                 "render_motion",
@@ -398,6 +399,29 @@ fn motion_tools() -> Vec<ToolSpec> {
             }),
         },
         ToolSpec {
+            name: "voice_motion".to_string(),
+            description: "Attach a voice-over audio clip to a scene (§8). Give the scene id and \
+                          the path to an audio file (wav/mp3/m4a); the clip is copied into \
+                          assets/audio/, its real duration is measured, and — unless you pass \
+                          align=false — the scene's duration is set to match the voice-over so the \
+                          visuals fit the narration. After changing timings, run caption_motion \
+                          again so captions stay aligned. On export the clips are mixed into the \
+                          MP4. Needs FFmpeg."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "scene": { "type": "string", "description": "The scene id to voice." },
+                    "file": { "type": "string", "description": "Path to the audio clip." },
+                    "align": {
+                        "type": "boolean",
+                        "description": "Set the scene duration to the clip's duration (default true).",
+                    },
+                },
+                "required": ["scene", "file"],
+            }),
+        },
+        ToolSpec {
             name: "brand_motion".to_string(),
             description: "Define or update the project's brand kit (§13) and apply it: colours, a \
                           font, caption colours, and an optional watermark, saved to \
@@ -483,6 +507,9 @@ pub fn motion_system_prompt(root: &Path) -> String {
          - caption_motion(): generate editable captions from the scenes' narration, aligned to \
            the timeline (saved as captions.json + an SRT sidecar). Captions overlay live in the \
            preview; they are never burned into the render.\n\
+         - voice_motion(scene, file): attach a voice-over clip to a scene and time the scene to \
+           it (§8). If the user provides narration audio, voice each scene, then re-run \
+           caption_motion so captions realign. The clips mix into the exported MP4.\n\
          - brand_motion(name, colours, font, watermark): define and apply a brand kit. It fills \
            in text colour, font, themed backgrounds and captions where a scene hasn't chosen its \
            own, so a brand recolours the video without changing its message. Give a scene \
@@ -506,7 +533,8 @@ pub fn motion_system_prompt(root: &Path) -> String {
             drives everything.\n\
          2. Divide it into scenes and set realistic per-scene durations. For a short, aim for \
             4–10 scenes and 30–90s total. Put each scene's spoken line in its `narration` so \
-            voice-over can attach later — LEAVE ROOM for voice-over; don't cram.\n\
+            voice-over can attach later — LEAVE ROOM for voice-over; don't cram. If the user \
+            gives you narration audio, use voice_motion to attach and time each scene to it.\n\
          3. Author each scene with write_scene using approved component types. Give every element \
             a unique id. Keep readable text inside the 5% safe-area margin; on vertical, keep \
             captions above the bottom 12% where the platform UI sits. Make animation start+duration \
@@ -1355,6 +1383,7 @@ pub fn describe_call(call: &ToolCall) -> String {
         }
         "verify_motion" => "🧪 Verifying the video".to_string(),
         "caption_motion" => "💬 Generating captions".to_string(),
+        "voice_motion" => format!("🎙 Voicing scene {}", arg("scene")),
         "brand_motion" => format!("🎨 Applying brand kit \"{}\"", arg("name")),
         "preview_motion" => "🎞 Rendering the video preview".to_string(),
         "render_motion" => "🎬 Exporting the video to MP4".to_string(),
@@ -1880,6 +1909,7 @@ pub fn execute_tool(root: &Path, call: &ToolCall) -> String {
         "write_scene" => execute_write_scene(root, call),
         "verify_motion" => execute_verify_motion(root),
         "caption_motion" => execute_caption_motion(root, call),
+        "voice_motion" => execute_voice_motion(root, call),
         "brand_motion" => execute_brand_motion(root, call),
         "preview_motion" => execute_preview_motion(root, call),
         "render_motion" => execute_render_motion(root, call),
@@ -2051,6 +2081,90 @@ fn execute_caption_motion(root: &Path, call: &ToolCall) -> String {
          overlay live in the preview.",
         track.cues.len()
     )
+}
+
+/// Attach a voice-over clip to a scene and (by default) time the scene to it.
+fn execute_voice_motion(root: &Path, call: &ToolCall) -> String {
+    let scene_id = match call.input.get("scene").and_then(|v| v.as_str()) {
+        Some(s) if !s.trim().is_empty() => s.trim().to_string(),
+        _ => return "error: `scene` (the scene id) is required".to_string(),
+    };
+    let file = match call.input.get("file").and_then(|v| v.as_str()) {
+        Some(f) if !f.trim().is_empty() => f.trim().to_string(),
+        _ => return "error: `file` (the audio clip path) is required".to_string(),
+    };
+    let align = call
+        .input
+        .get("align")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+
+    let mut project = match crate::motion::load_project(root) {
+        Ok(p) => p,
+        Err(err) => return format!("error: {err} (create the project first with motion_new)"),
+    };
+    if !project.scenes.iter().any(|s| s.id == scene_id) {
+        return format!("error: no scene '{scene_id}' in this project");
+    }
+
+    // Resolve the source clip: an absolute path is copied into assets/audio/; a
+    // project-relative path is used where it lies.
+    let src = std::path::Path::new(&file);
+    let rel_path = if src.is_absolute() {
+        if !src.exists() {
+            return format!("error: no such audio file: {file}");
+        }
+        let base = src
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "clip".to_string());
+        let dest_rel = format!("assets/audio/{scene_id}-{base}");
+        let dest = root.join(&dest_rel);
+        if let Some(parent) = dest.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Err(e) = std::fs::copy(src, &dest) {
+            return format!("error: could not copy the clip: {e}");
+        }
+        dest_rel
+    } else {
+        if !root.join(src).exists() {
+            return format!("error: no such audio file in the project: {file}");
+        }
+        file.replace('\\', "/")
+    };
+
+    let duration = crate::motion_audio::probe_duration(&root.join(&rel_path));
+    let mut retimed = None;
+    if let Some(scene) = project.scenes.iter_mut().find(|s| s.id == scene_id) {
+        scene.audio = Some(rel_path.clone());
+        if align {
+            if let Some(d) = duration {
+                let d = d.max(0.5);
+                scene.duration = (d * 1000.0).round() / 1000.0;
+                retimed = Some(scene.duration);
+            }
+        }
+    }
+    if let Err(e) = crate::motion::save_project(root, &project) {
+        return format!("error: could not save project: {e}");
+    }
+
+    let dur_note = match duration {
+        Some(d) => format!("{d:.2}s"),
+        None => "unknown length (ffprobe unavailable)".to_string(),
+    };
+    match retimed {
+        Some(d) => format!(
+            "Voiced scene '{scene_id}' with {rel_path} ({dur_note}) and set the scene to {d:.2}s to \
+             match. Re-run caption_motion so captions realign; the clip mixes into the MP4 on \
+             export."
+        ),
+        None => format!(
+            "Attached {rel_path} ({dur_note}) to scene '{scene_id}'. It mixes into the MP4 on \
+             export."
+        ),
+    }
 }
 
 /// Define/update the brand kit and point the project's theme at it.

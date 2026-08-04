@@ -3516,6 +3516,14 @@ impl KestrelApp {
                         .weak(),
                 );
             }
+            let voiced = project.scenes.iter().filter(|s| s.audio.is_some()).count();
+            if voiced > 0 {
+                ui.label(
+                    egui::RichText::new(format!("· {voiced}/{} voiced", project.scenes.len()))
+                        .small()
+                        .weak(),
+                );
+            }
         });
 
         ui.add_space(4.0);
@@ -3619,9 +3627,14 @@ impl KestrelApp {
                         );
                         ui.label(egui::RichText::new(&name).strong());
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let voiced = if scene.audio.is_some() {
+                                " · voiced"
+                            } else {
+                                ""
+                            };
                             ui.label(
                                 egui::RichText::new(format!(
-                                    "{:.1}s · {}",
+                                    "{:.1}s · {}{voiced}",
                                     scene.duration,
                                     scene.elements.len()
                                 ))

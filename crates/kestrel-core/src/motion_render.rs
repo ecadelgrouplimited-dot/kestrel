@@ -234,46 +234,43 @@ pub fn export_mp4(
     };
     let out_path = out_dir.join(&out_name);
 
-    // Silent stereo AAC track so the file carries audio, per §14 (real narration
-    // muxing comes with the audio phase).
-    let status = std::process::Command::new(&ffmpeg)
-        .current_dir(&out_dir)
-        .args([
-            "-y",
-            "-f",
-            "concat",
-            "-safe",
-            "0",
-            "-i",
-            ".mframes.txt",
+    // The soundtrack: a real narration track when any scene has a voice-over
+    // clip (§8), otherwise silence so the file still carries an audio stream.
+    let narration = out_dir.join(".narration.wav");
+    let has_audio = crate::motion_audio::has_voiceover(project)
+        && crate::motion_audio::build_narration_track(project, root, &narration).is_ok();
+
+    let total = format!("{:.3}", project.total_duration().max(0.1));
+    let vf = format!("fps={fps},format=yuv420p");
+    let mut cmd = std::process::Command::new(&ffmpeg);
+    cmd.current_dir(&out_dir)
+        .args(["-y", "-f", "concat", "-safe", "0", "-i", ".mframes.txt"]);
+    if has_audio {
+        cmd.args(["-i", ".narration.wav"]);
+    } else {
+        cmd.args([
             "-f",
             "lavfi",
             "-i",
             "anullsrc=channel_layout=stereo:sample_rate=44100",
-            "-vf",
-            &format!("fps={fps},format=yuv420p"),
-            "-c:v",
-            "libx264",
-            "-preset",
-            "medium",
-            "-c:a",
-            "aac",
-            "-shortest",
-            "-movflags",
-            "+faststart",
-            // Pin the exact runtime: the concat demuxer's trailing repeated
-            // frame otherwise overhangs the intended length.
-            "-t",
-            &format!("{:.3}", project.total_duration().max(0.1)),
-        ])
-        .arg(&out_name)
-        .output();
+        ]);
+    }
+    cmd.args(["-map", "0:v", "-map", "1:a"])
+        .args(["-vf", &vf])
+        .args(["-c:v", "libx264", "-preset", "medium"])
+        .args(["-c:a", "aac", "-shortest", "-movflags", "+faststart"])
+        // Pin the exact runtime: the concat demuxer's trailing repeated frame
+        // otherwise overhangs the intended length.
+        .args(["-t", &total])
+        .arg(&out_name);
+    let status = cmd.output();
 
-    // Clean up frames regardless of outcome.
+    // Clean up frames and the narration track regardless of outcome.
     for f in &frame_files {
         let _ = std::fs::remove_file(f);
     }
     let _ = std::fs::remove_file(&list_path);
+    let _ = std::fs::remove_file(&narration);
 
     match status {
         Ok(out) if out.status.success() && out_path.exists() => Ok(out_path),
@@ -1201,6 +1198,7 @@ mod tests {
             name: String::new(),
             duration: 3.0,
             narration: None,
+            audio: None,
             background: Background::default(),
             elements: vec![crate::motion::Element {
                 id: "t".into(),
@@ -1265,6 +1263,7 @@ mod tests {
             narration: Some(
                 "A fairly long line that will split into two caption cues here.".into(),
             ),
+            audio: None,
             background: Background::default(),
             elements: vec![],
         });
@@ -1273,6 +1272,7 @@ mod tests {
             name: String::new(),
             duration: 3.0,
             narration: None, // captionless -> one segment
+            audio: None,
             background: Background::default(),
             elements: vec![],
         });
