@@ -580,6 +580,26 @@ fn verify_scene_elements(
             }
         }
 
+        // A chart with no data renders as an empty box.
+        if el.kind == "chart" {
+            let count = el
+                .extra
+                .get("data")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
+            if count == 0 {
+                issues.push(issue(
+                    Severity::Warning,
+                    "empty-chart",
+                    Some(&scene.id),
+                    Some(&el.id),
+                    format!("chart '{}' has no data", el.id),
+                    Some("set its `data` to an array of {label, value} points".into()),
+                ));
+            }
+        }
+
         verify_placement(scene, el, cw, ch, project.project.format, issues);
         verify_animation(scene, el, issues);
         verify_references(scene, el, &element_ids, assets_root, issues);

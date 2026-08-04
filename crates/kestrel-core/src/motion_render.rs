@@ -555,8 +555,13 @@ fn render_element(
     let _ = write!(svg, r##"<g style="{anim_style}">"##);
 
     match el.kind.as_str() {
-        "text" | "title" | "caption" | "cta" | "callout" => render_text(svg, el, brand),
+        "text" | "title" | "caption" | "cta" => render_text(svg, el, brand),
+        "callout" | "speech-bubble" => render_callout(svg, el, brand),
+        "chart" => render_chart(svg, el, brand),
         "image" | "screenshot" => render_image(svg, el),
+        "browser-frame" | "browser" => render_browser_frame(svg, el),
+        "device-frame" | "device" | "phone" => render_device_frame(svg, el),
+        "cursor" => render_cursor(svg, el),
         "sketch-arrow" | "arrow" | "connector" => render_arrow(svg, el, scene),
         "sketch-character" | "character" => render_character(svg, el),
         "rect" | "rectangle" | "highlight" => render_rect(svg, el),
@@ -777,6 +782,312 @@ fn render_placeholder(svg: &mut String, el: &Element) {
         pos.x + w / 2.0,
         pos.y + h / 2.0,
         esc_text(&format!("{} ({})", el.id, el.kind))
+    );
+}
+
+/// A default categorical palette for charts, when the brand doesn't drive it.
+const CHART_PALETTE: [&str; 6] = [
+    "#DC8D1F", "#5ABE6E", "#6AA0DC", "#DC6464", "#B07ADC", "#DCB450",
+];
+
+/// Read a chart's `data` as (label, value) pairs from the property bag.
+fn chart_data(el: &Element) -> Vec<(String, f64)> {
+    el.extra
+        .get("data")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|item| {
+                    let value = item.get("value").and_then(|v| v.as_f64())?;
+                    let label = item
+                        .get("label")
+                        .and_then(|l| l.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    Some((label, value))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A bar or line chart drawn as SVG from `data` — deterministic, resolution-
+/// independent, no plotting dependency. `chartKind` selects bar (default) or
+/// line; the primary bar colour comes from the brand.
+fn render_chart(svg: &mut String, el: &Element, brand: Option<&crate::motion_brand::BrandKit>) {
+    let pos = el.position.unwrap_or_default_point();
+    let (w, h) = el
+        .size
+        .map(|s| (s.width, s.height))
+        .unwrap_or((640.0, 420.0));
+    let data = chart_data(el);
+    if data.is_empty() {
+        render_placeholder(svg, el);
+        return;
+    }
+    let kind = el.prop_str("chartKind").unwrap_or("bar");
+    let axis = brand.map(|b| b.text.as_str()).unwrap_or("#888");
+    let primary = el
+        .prop_str("color")
+        .or_else(|| brand.map(|b| b.primary.as_str()))
+        .unwrap_or("#DC8D1F");
+
+    // Plot area: leave room for value labels on top and category labels below.
+    let pad_top = h * 0.10;
+    let pad_bottom = h * 0.16;
+    let pad_left = w * 0.04;
+    let plot_w = w - pad_left * 2.0;
+    let plot_h = h - pad_top - pad_bottom;
+    let base_y = pos.y + pad_top + plot_h;
+    let max = data
+        .iter()
+        .map(|(_, v)| *v)
+        .fold(0.0_f64, f64::max)
+        .max(1e-6);
+    let label_font = (w * 0.028).clamp(12.0, 30.0);
+
+    // Baseline axis.
+    let _ = write!(
+        svg,
+        r##"<line x1="{:.1}" y1="{base_y:.1}" x2="{:.1}" y2="{base_y:.1}" stroke="{}" stroke-width="2" opacity="0.6"/>"##,
+        pos.x + pad_left,
+        pos.x + pad_left + plot_w,
+        esc_attr(axis)
+    );
+
+    let n = data.len();
+    let slot = plot_w / n as f32;
+    if kind == "line" {
+        // A polyline through the points, with a dot at each.
+        let mut points = String::new();
+        for (i, (_, value)) in data.iter().enumerate() {
+            let x = pos.x + pad_left + slot * (i as f32 + 0.5);
+            let y = base_y - (*value as f32 / max as f32) * plot_h;
+            let _ = write!(points, "{x:.1},{y:.1} ");
+        }
+        let _ = write!(
+            svg,
+            r##"<polyline points="{}" fill="none" stroke="{}" stroke-width="4" stroke-linejoin="round" stroke-linecap="round"/>"##,
+            points.trim(),
+            esc_attr(primary)
+        );
+        for (i, (_, value)) in data.iter().enumerate() {
+            let x = pos.x + pad_left + slot * (i as f32 + 0.5);
+            let y = base_y - (*value as f32 / max as f32) * plot_h;
+            let _ = write!(
+                svg,
+                r##"<circle cx="{x:.1}" cy="{y:.1}" r="6" fill="{}"/>"##,
+                esc_attr(primary)
+            );
+        }
+    } else {
+        // Bars, one per datum, coloured from the palette so a series reads.
+        let bar_w = slot * 0.62;
+        for (i, (_, value)) in data.iter().enumerate() {
+            let bh = (*value as f32 / max as f32) * plot_h;
+            let x = pos.x + pad_left + slot * i as f32 + (slot - bar_w) / 2.0;
+            let y = base_y - bh;
+            let fill = if el.prop_str("color").is_some() {
+                primary.to_string()
+            } else {
+                CHART_PALETTE[i % CHART_PALETTE.len()].to_string()
+            };
+            let _ = write!(
+                svg,
+                r##"<rect x="{x:.1}" y="{y:.1}" width="{bar_w:.1}" height="{bh:.1}" rx="4" fill="{}"/>"##,
+                esc_attr(&fill)
+            );
+        }
+    }
+
+    // Value labels above each point/bar, category labels below the axis.
+    for (i, (label, value)) in data.iter().enumerate() {
+        let cx = pos.x + pad_left + slot * (i as f32 + 0.5);
+        let top_y = base_y - (*value as f32 / max as f32) * plot_h - label_font * 0.4;
+        let val_str = if (value.fract()).abs() < 1e-6 {
+            format!("{}", *value as i64)
+        } else {
+            format!("{value:.1}")
+        };
+        let _ = write!(
+            svg,
+            r##"<text x="{cx:.1}" y="{top_y:.1}" font-size="{label_font:.0}" fill="{}" text-anchor="middle">{}</text>"##,
+            esc_attr(axis),
+            esc_text(&val_str)
+        );
+        if !label.is_empty() {
+            let _ = write!(
+                svg,
+                r##"<text x="{cx:.1}" y="{:.1}" font-size="{label_font:.0}" fill="{}" text-anchor="middle" opacity="0.85">{}</text>"##,
+                base_y + label_font * 1.4,
+                esc_attr(axis),
+                esc_text(label)
+            );
+        }
+    }
+}
+
+/// A browser window frame around an inner screenshot (or a plain content area) —
+/// for product tutorials (§10). Traffic-light dots, an address bar, and the
+/// inner image.
+fn render_browser_frame(svg: &mut String, el: &Element) {
+    let pos = el.position.unwrap_or_default_point();
+    let (w, h) = el
+        .size
+        .map(|s| (s.width, s.height))
+        .unwrap_or((900.0, 560.0));
+    let bar = (h * 0.09).clamp(28.0, 64.0);
+    let url = el.prop_str("url").unwrap_or("");
+    // Window + chrome bar.
+    let _ = write!(
+        svg,
+        r##"<rect x="{:.1}" y="{:.1}" width="{w:.1}" height="{h:.1}" rx="12" fill="#ffffff" stroke="#cfcac0" stroke-width="2"/><rect x="{:.1}" y="{:.1}" width="{w:.1}" height="{bar:.1}" rx="12" fill="#ece9e2"/><rect x="{:.1}" y="{:.1}" width="{w:.1}" height="{:.1}" fill="#ece9e2"/>"##,
+        pos.x,
+        pos.y, // window
+        pos.x,
+        pos.y, // chrome top (rounded)
+        pos.x,
+        pos.y + bar / 2.0,
+        bar / 2.0, // square off the chrome's bottom corners
+    );
+    // Traffic lights.
+    let r = bar * 0.16;
+    let cy = pos.y + bar / 2.0;
+    for (i, colour) in ["#ec6a5e", "#f4bf4f", "#61c554"].iter().enumerate() {
+        let cx = pos.x + bar * 0.5 + i as f32 * r * 3.0;
+        let _ = write!(
+            svg,
+            r##"<circle cx="{cx:.1}" cy="{cy:.1}" r="{r:.1}" fill="{colour}"/>"##
+        );
+    }
+    // Address pill.
+    let pill_x = pos.x + bar * 0.5 + r * 9.0;
+    let pill_w = (w - (pill_x - pos.x) - bar * 0.5).max(0.0);
+    let _ = write!(
+        svg,
+        r##"<rect x="{pill_x:.1}" y="{:.1}" width="{pill_w:.1}" height="{:.1}" rx="{:.1}" fill="#ffffff" stroke="#d8d3c8"/><text x="{:.1}" y="{:.1}" font-size="{:.0}" fill="#8a8474">{}</text>"##,
+        pos.y + bar * 0.28,
+        bar * 0.44,
+        bar * 0.22,
+        pill_x + bar * 0.4,
+        pos.y + bar * 0.62,
+        bar * 0.32,
+        esc_text(url)
+    );
+    // Inner content: an image asset, or a light content area.
+    let (iy, ih) = (pos.y + bar, h - bar);
+    if let Some(asset) = el.prop_str("asset") {
+        let _ = write!(
+            svg,
+            r##"<image href="../{}" x="{:.1}" y="{iy:.1}" width="{w:.1}" height="{ih:.1}" preserveAspectRatio="xMidYMid slice"/>"##,
+            esc_attr(asset),
+            pos.x
+        );
+    } else {
+        let _ = write!(
+            svg,
+            r##"<rect x="{:.1}" y="{iy:.1}" width="{w:.1}" height="{ih:.1}" fill="#f7f5f0"/>"##,
+            pos.x
+        );
+    }
+}
+
+/// A phone device frame around an inner screenshot — for tutorials and mobile
+/// mockups (§10).
+fn render_device_frame(svg: &mut String, el: &Element) {
+    let pos = el.position.unwrap_or_default_point();
+    let (w, h) = el
+        .size
+        .map(|s| (s.width, s.height))
+        .unwrap_or((360.0, 740.0));
+    let bezel = (w * 0.05).clamp(10.0, 40.0);
+    let radius = w * 0.12;
+    let _ = write!(
+        svg,
+        r##"<rect x="{:.1}" y="{:.1}" width="{w:.1}" height="{h:.1}" rx="{radius:.1}" fill="#141414"/>"##,
+        pos.x, pos.y
+    );
+    let (ix, iy) = (pos.x + bezel, pos.y + bezel);
+    let (iw, ih) = (w - bezel * 2.0, h - bezel * 2.0);
+    let inner_r = radius * 0.7;
+    if let Some(asset) = el.prop_str("asset") {
+        // Clip the screenshot to the rounded screen.
+        let clip = format!("dev-{}", el.id);
+        let _ = write!(
+            svg,
+            r##"<clipPath id="{clip}"><rect x="{ix:.1}" y="{iy:.1}" width="{iw:.1}" height="{ih:.1}" rx="{inner_r:.1}"/></clipPath><image href="../{}" x="{ix:.1}" y="{iy:.1}" width="{iw:.1}" height="{ih:.1}" preserveAspectRatio="xMidYMid slice" clip-path="url(#{clip})"/>"##,
+            esc_attr(asset)
+        );
+    } else {
+        let _ = write!(
+            svg,
+            r##"<rect x="{ix:.1}" y="{iy:.1}" width="{iw:.1}" height="{ih:.1}" rx="{inner_r:.1}" fill="#f7f5f0"/>"##
+        );
+    }
+    // A notch.
+    let notch_w = w * 0.34;
+    let _ = write!(
+        svg,
+        r##"<rect x="{:.1}" y="{:.1}" width="{notch_w:.1}" height="{:.1}" rx="{:.1}" fill="#141414"/>"##,
+        pos.x + (w - notch_w) / 2.0,
+        pos.y + bezel * 0.5,
+        bezel * 0.7,
+        bezel * 0.35
+    );
+}
+
+/// A mouse cursor at a point — for tutorial walkthroughs (§10).
+fn render_cursor(svg: &mut String, el: &Element) {
+    let pos = el.position.unwrap_or_default_point();
+    let scale = el
+        .size
+        .map(|s| s.width / 24.0)
+        .unwrap_or(1.6)
+        .clamp(0.8, 6.0);
+    let fill = el.prop_str("color").unwrap_or("#111111");
+    // A classic arrow pointer, its tip at the element position.
+    let _ = write!(
+        svg,
+        r##"<path transform="translate({:.1},{:.1}) scale({scale:.2})" d="M0,0 L0,20 L5,15 L9,23 L12,22 L8,14 L15,14 Z" fill="{}" stroke="#fff" stroke-width="1.2"/>"##,
+        pos.x,
+        pos.y,
+        esc_attr(fill)
+    );
+}
+
+/// A callout: a rounded label box with a little pointer, for annotating a
+/// tutorial or emphasising a point (§10).
+fn render_callout(svg: &mut String, el: &Element, brand: Option<&crate::motion_brand::BrandKit>) {
+    let pos = el.position.unwrap_or_default_point();
+    let (w, h) = el
+        .size
+        .map(|s| (s.width, s.height))
+        .unwrap_or((420.0, 120.0));
+    let text = el.text_content().unwrap_or("");
+    let bg = el
+        .prop_str("color")
+        .or_else(|| brand.map(|b| b.primary.as_str()))
+        .unwrap_or("#DC8D1F");
+    let fg = el.prop_str("textColor").unwrap_or("#1a1206");
+    let font = (h * 0.32).clamp(16.0, 60.0);
+    let (cx, cy) = (pos.x + w / 2.0, pos.y + h / 2.0);
+    // Box with a downward pointer at bottom-left.
+    let _ = write!(
+        svg,
+        r##"<rect x="{:.1}" y="{:.1}" width="{w:.1}" height="{h:.1}" rx="{:.1}" fill="{}"/><path d="M{:.1},{:.1} l{:.1},{:.1} l{:.1},0 Z" fill="{}"/><text x="{cx:.1}" y="{:.1}" font-size="{font:.0}" font-weight="600" fill="{}" text-anchor="middle">{}</text>"##,
+        pos.x,
+        pos.y,
+        (h * 0.16).min(20.0),
+        esc_attr(bg),
+        pos.x + w * 0.22,
+        pos.y + h,
+        h * 0.16,
+        h * 0.22,
+        h * 0.16,
+        esc_attr(bg),
+        cy + font * 0.35,
+        esc_attr(fg),
+        esc_text(text)
     );
 }
 
@@ -1294,5 +1605,105 @@ mod tests {
         let project = MotionProject::new("empty", ProjectType::SocialShort, Format::Square);
         let err = export_mp4(&project, Path::new("."), &ExportOptions::default()).unwrap_err();
         assert!(err.contains("no scenes"));
+    }
+
+    /// Render a scene holding one element of `kind` with the given extra props.
+    fn render_one(kind: &str, extra: serde_json::Value) -> String {
+        let mut project =
+            MotionProject::new("t", ProjectType::PresentationVideo, Format::Horizontal);
+        let extra_map = extra
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        project.scenes.push(crate::motion::Scene {
+            id: "s".into(),
+            name: String::new(),
+            duration: 4.0,
+            narration: None,
+            audio: None,
+            background: Background::default(),
+            elements: vec![crate::motion::Element {
+                id: "e".into(),
+                kind: kind.into(),
+                position: Some(crate::motion::Point { x: 200.0, y: 200.0 }),
+                size: Some(crate::motion::Size {
+                    width: 800.0,
+                    height: 400.0,
+                }),
+                animation: None,
+                layer: 0,
+                extra: extra_map,
+            }],
+        });
+        SvgRenderer.render_scene_svg(&project, &project.scenes[0])
+    }
+
+    #[test]
+    fn bar_chart_draws_a_bar_per_datum() {
+        let svg = render_one(
+            "chart",
+            serde_json::json!({
+                "chartKind": "bar",
+                "data": [
+                    {"label": "Jan", "value": 10},
+                    {"label": "Feb", "value": 25},
+                    {"label": "Mar", "value": 15},
+                ],
+            }),
+        );
+        // Three bars (rect with rx=4 from the chart), the axis, and the labels.
+        assert_eq!(svg.matches(r#"rx="4""#).count(), 3, "expected 3 bars");
+        assert!(svg.contains("Jan") && svg.contains("Mar"));
+        assert!(svg.contains("25")); // the max value label
+        assert!(svg.contains("<line")); // baseline axis
+    }
+
+    #[test]
+    fn line_chart_draws_a_polyline() {
+        let svg = render_one(
+            "chart",
+            serde_json::json!({
+                "chartKind": "line",
+                "data": [{"label":"a","value":1},{"label":"b","value":4},{"label":"c","value":2}],
+            }),
+        );
+        assert!(svg.contains("<polyline"));
+        // A dot per point.
+        assert_eq!(svg.matches("<circle").count(), 3);
+    }
+
+    #[test]
+    fn empty_chart_falls_back_to_a_placeholder() {
+        let svg = render_one("chart", serde_json::json!({ "data": [] }));
+        assert!(svg.contains("stroke-dasharray")); // the placeholder box
+        assert!(svg.contains("(chart)"));
+    }
+
+    #[test]
+    fn tutorial_frames_and_annotations_render() {
+        // Browser frame with a URL and traffic lights.
+        let browser = render_one(
+            "browser-frame",
+            serde_json::json!({ "url": "app.example.com" }),
+        );
+        assert!(browser.contains("app.example.com"));
+        assert!(browser.contains("#ec6a5e")); // the red traffic light
+
+        // Device frame clips its screenshot to a rounded screen.
+        let device = render_one(
+            "device-frame",
+            serde_json::json!({ "asset": "assets/screenshots/x.png" }),
+        );
+        assert!(device.contains("clipPath"));
+
+        // A cursor is a pointer path anchored at its position.
+        let cursor = render_one("cursor", serde_json::json!({}));
+        assert!(cursor.contains("<path") && cursor.contains("translate(200"));
+
+        // A callout carries its text.
+        let callout = render_one("callout", serde_json::json!({ "content": "Click here" }));
+        assert!(callout.contains("Click here"));
     }
 }

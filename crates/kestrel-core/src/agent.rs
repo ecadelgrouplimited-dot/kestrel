@@ -321,8 +321,11 @@ fn motion_tools() -> Vec<ToolSpec> {
                           and elements). If a scene with that id exists it is replaced (this is \
                           how you regenerate or shorten a single scene without touching the \
                           others); otherwise it is appended. Elements are the structured \
-                          components — each needs a unique `id` and a `type` (text, title, \
-                          caption, image, sketch-arrow, sketch-character, chart, cta, …), a \
+                          components — each needs a unique `id` and a `type`: text, title, \
+                          caption, cta, callout, sketch-arrow, sketch-character, image, chart (with \
+                          `data` [{label,value}] and `chartKind` bar|line), browser-frame (with a \
+                          `url` and optional screenshot `asset`), device-frame, cursor, rect, \
+                          circle, line, highlight. Each takes a \
                           `position` {x,y}, usually a `size` {width,height}, and an optional \
                           `animation` {type,start,duration}. Positions are in pixels from the \
                           top-left of the frame. Keep text inside the safe area (a 5% margin) and, \
