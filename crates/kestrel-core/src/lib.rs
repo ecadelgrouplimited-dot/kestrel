@@ -15,6 +15,7 @@ pub mod mail;
 pub mod media;
 pub mod memory;
 pub mod motion;
+pub mod motion_render;
 pub mod office;
 pub mod plan;
 pub mod policy;
@@ -82,6 +83,9 @@ pub use motion::{
     Animation, Background, Element, Format as MotionFormat, MotionIssue, MotionProject,
     ProjectMeta, ProjectType, Scene, Severity as MotionSeverity,
     VerificationReport as MotionReport,
+};
+pub use motion_render::{
+    write_preview as write_motion_preview, ExportOptions, Renderer, SvgRenderer,
 };
 pub use office::{kind_for, read_document, DocKind};
 pub use plan::{

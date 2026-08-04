@@ -247,6 +247,7 @@ pub fn tools_for(profile: Profile) -> Vec<ToolSpec> {
                 "motion_status",
                 "write_scene",
                 "verify_motion",
+                "preview_motion",
                 // Files & content (scripts, briefs, brand themes, assets)
                 "read_file",
                 "read_doc",
@@ -355,6 +356,25 @@ fn motion_tools() -> Vec<ToolSpec> {
                     .to_string(),
             input_schema: serde_json::json!({ "type": "object", "properties": {} }),
         },
+        ToolSpec {
+            name: "preview_motion".to_string(),
+            description: "Render the video project to a self-contained, watchable HTML preview \
+                          (output/preview.html) and open it in the browser. The preview plays \
+                          every scene on its real timeline with its animations, a safe-area \
+                          toggle, and a scrubber. Use it to SEE the result — after building the \
+                          scenes and once verification passes — and after a revision so the user \
+                          can watch the change."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "open": {
+                        "type": "boolean",
+                        "description": "Open the preview in the browser (default true).",
+                    },
+                },
+            }),
+        },
     ]
 }
 
@@ -393,6 +413,9 @@ pub fn motion_system_prompt(root: &Path) -> String {
          - motion_status(): the current outline — scenes, durations, element counts, total \
            runtime, last verification. Read it before revising.\n\
          - verify_motion(): the QA engine. Run it before finishing; fix every ERROR and re-verify.\n\
+         - preview_motion(): render the project to a watchable HTML preview and open it, so you \
+           and the user can SEE the result. Do this once it verifies clean, and again after a \
+           revision.\n\
          - write_file / read_file / edit_file: the script and brief live in script/ (brief.md, \
            narration.md); brand themes in theme/. Keep the narration text in sync with each \
            scene's `narration`.\n\
@@ -413,7 +436,8 @@ pub fn motion_system_prompt(root: &Path) -> String {
             captions above the bottom 12% where the platform UI sits. Make animation start+duration \
             fit within the scene.\n\
          4. VERIFY with verify_motion and REPAIR. An ERROR is a broken build — fix the named scene \
-            and re-verify until it passes. A clean pass is the bar for \"done\".\n\
+            and re-verify until it passes. A clean pass is the bar for \"done\". Then \
+            preview_motion() to render it and watch it.\n\
          5. Be deterministic and specific. Reuse components and the brand theme rather than \
             reinventing per scene. Don't invent facts, and don't claim a render exists that you \
             didn't produce.\n\n\
@@ -1252,6 +1276,7 @@ pub fn describe_call(call: &ToolCall) -> String {
             format!("🎬 Writing scene {id}")
         }
         "verify_motion" => "🧪 Verifying the video".to_string(),
+        "preview_motion" => "🎞 Rendering the video preview".to_string(),
         other => other.to_string(),
     }
 }
@@ -1773,6 +1798,7 @@ pub fn execute_tool(root: &Path, call: &ToolCall) -> String {
         "motion_status" => execute_motion_status(root),
         "write_scene" => execute_write_scene(root, call),
         "verify_motion" => execute_verify_motion(root),
+        "preview_motion" => execute_preview_motion(root, call),
         other => format!("error: unknown tool {other}"),
     }
 }
@@ -1916,6 +1942,37 @@ fn execute_verify_motion(root: &Path) -> String {
         Ok(report) => report.render(),
         Err(err) => format!("error: {err} (create the project first with motion_new)"),
     }
+}
+
+/// Render the project to a self-contained HTML preview and (by default) open it.
+fn execute_preview_motion(root: &Path, call: &ToolCall) -> String {
+    let project = match crate::motion::load_project(root) {
+        Ok(p) => p,
+        Err(err) => return format!("error: {err} (create the project first with motion_new)"),
+    };
+    let path = match crate::motion_render::write_preview(root, &project) {
+        Ok(p) => p,
+        Err(err) => return format!("error: could not write preview: {err}"),
+    };
+    let should_open = call
+        .input
+        .get("open")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let opened = if should_open {
+        // open_path uses the OS association — the browser for an .html file.
+        crate::syscap::open_path(&path.display().to_string());
+        " and opened it in the browser"
+    } else {
+        ""
+    };
+    format!(
+        "Rendered {} scene(s), {:.1}s, to {}{opened}. It plays every scene on its timeline with a \
+         safe-area toggle and a scrubber.",
+        project.scenes.len(),
+        project.total_duration(),
+        path.display()
+    )
 }
 
 /// Replace the unique occurrence of `old` with `new` in a file. Fails if `old`
