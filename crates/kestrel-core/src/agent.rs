@@ -187,6 +187,9 @@ pub enum Profile {
     Build,
     /// Kestrel Work — everyday knowledge work (research, documents, data).
     Work,
+    /// Kestrel Motion — code-native video: structured scenes it authors,
+    /// verifies, and repairs.
+    Motion,
 }
 
 /// The tools a profile may use. Work gets the autonomy, file, and research
@@ -233,7 +236,126 @@ pub fn tools_for(profile: Profile) -> Vec<ToolSpec> {
                 .filter(|t| WORK_TOOLS.contains(&t.name.as_str()))
                 .collect()
         }
+        Profile::Motion => {
+            const MOTION_TOOLS: &[&str] = &[
+                // Autonomy
+                "update_plan",
+                "remember",
+                "spawn_subagent",
+                // Motion authoring & QA
+                "motion_new",
+                "motion_status",
+                "write_scene",
+                "verify_motion",
+                // Files & content (scripts, briefs, brand themes, assets)
+                "read_file",
+                "read_doc",
+                "write_file",
+                "edit_file",
+                "list_dir",
+                "search",
+                // Research (visual metaphors, facts for the script)
+                "web_search",
+                "http_get",
+                // System (run a local renderer/export, show the result)
+                "run_command",
+                "run_background",
+                "task_status",
+                "open_file",
+                "open_url",
+                "screenshot",
+            ];
+            let mut tools: Vec<ToolSpec> = builtin_tools()
+                .into_iter()
+                .filter(|t| MOTION_TOOLS.contains(&t.name.as_str()))
+                .collect();
+            tools.extend(motion_tools());
+            tools
+        }
     }
+}
+
+/// The tools unique to Kestrel Motion: scaffold a project, inspect it, write a
+/// scene, and verify. Kept separate from `builtin_tools` so Build and Work don't
+/// carry them.
+fn motion_tools() -> Vec<ToolSpec> {
+    vec![
+        ToolSpec {
+            name: "motion_new".to_string(),
+            description: "Create a new Kestrel Motion video project in the workspace: scaffolds \
+                          the project folders and a starter motion.project.json. Call this ONCE at \
+                          the start of a new video. `type` is the video kind; `format` is the \
+                          aspect (vertical for shorts, horizontal for landscape, square for feed)."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "title": { "type": "string" },
+                    "type": {
+                        "type": "string",
+                        "enum": ["sketch-explainer", "product-tutorial", "social-short", "presentation-video"],
+                    },
+                    "format": { "type": "string", "enum": ["vertical", "horizontal", "square"] },
+                },
+                "required": ["title", "type", "format"],
+            }),
+        },
+        ToolSpec {
+            name: "motion_status".to_string(),
+            description: "Show the current video project's outline: each scene's id, name, \
+                          duration and element count, the total runtime, and the last \
+                          verification result. Use it before a revision so you edit only what \
+                          needs changing rather than rebuilding the project."
+                .to_string(),
+            input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+        },
+        ToolSpec {
+            name: "write_scene".to_string(),
+            description: "Add or replace ONE scene in the video project, by its `id`. Pass the \
+                          full scene object (id, name, duration, optional narration, background, \
+                          and elements). If a scene with that id exists it is replaced (this is \
+                          how you regenerate or shorten a single scene without touching the \
+                          others); otherwise it is appended. Elements are the structured \
+                          components — each needs a unique `id` and a `type` (text, title, \
+                          caption, image, sketch-arrow, sketch-character, chart, cta, …), a \
+                          `position` {x,y}, usually a `size` {width,height}, and an optional \
+                          `animation` {type,start,duration}. Positions are in pixels from the \
+                          top-left of the frame. Keep text inside the safe area (a 5% margin) and, \
+                          on vertical, keep captions out of the bottom 12%."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "scene": {
+                        "type": "object",
+                        "description": "A full Motion scene object.",
+                        "properties": {
+                            "id": { "type": "string" },
+                            "name": { "type": "string" },
+                            "duration": { "type": "number", "description": "Seconds on screen." },
+                            "narration": { "type": "string" },
+                            "background": { "type": "object" },
+                            "elements": { "type": "array", "items": { "type": "object" } },
+                        },
+                        "required": ["id", "duration", "elements"],
+                    },
+                },
+                "required": ["scene"],
+            }),
+        },
+        ToolSpec {
+            name: "verify_motion".to_string(),
+            description:
+                "Run the Motion verification engine over the whole project and return the \
+                          issues: off-safe-area or off-canvas elements, empty text, animation \
+                          timing that overflows a scene, broken from/to references, missing \
+                          assets, bad durations. Treat any ERROR like a broken build — fix the \
+                          offending scene with write_scene and re-verify until it passes. Do this \
+                          before telling the user the video is done."
+                    .to_string(),
+            input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+        },
+    ]
 }
 
 /// The system prompt for a profile.
@@ -241,7 +363,67 @@ pub fn system_prompt_for(profile: Profile, root: &Path) -> String {
     match profile {
         Profile::Build => agent_loop_system_prompt(root),
         Profile::Work => work_system_prompt(root),
+        Profile::Motion => motion_system_prompt(root),
     }
+}
+
+/// The system prompt for Kestrel Motion — authoring structured video projects.
+pub fn motion_system_prompt(root: &Path) -> String {
+    format!(
+        "You are Kestrel Motion, an autonomous visual-production agent running natively on the \
+         user's Windows machine. You turn a plain-language brief into a STRUCTURED, editable video \
+         project — not one fragile blob of animation code. Every video is a project of \
+         independently editable, verifiable scenes.\n\n\
+         THE MODEL YOU WORK IN:\n\
+         A project has metadata (title, type, format, dimensions, fps, theme) and an ordered list \
+         of scenes. Each scene has an id, a duration in seconds, an optional narration line, a \
+         background, and a list of elements. Each element is a component — text, title, caption, \
+         image, chart, sketch-arrow, sketch-character, cta, and so on — with a unique id, a \
+         `type`, a `position` {{x,y}} in pixels from the top-left, usually a `size` \
+         {{width,height}}, and an optional `animation` {{type,start,duration}} whose times are in \
+         seconds relative to the scene. You generate this structure; a renderer turns it into \
+         frames. Do NOT write raw rendering code — author scenes.\n\n\
+         YOUR TOOLS:\n\
+         - update_plan(goal, steps): FIRST, for any real video, break the job into steps (script → \
+           scenes → verify → hand off for voice-over/export) and keep it current.\n\
+         - motion_new(title, type, format): create the project once at the start.\n\
+         - write_scene(scene): add or replace ONE scene by id. This is your main tool. To revise \
+           (\"make scene 3 shorter\", \"replace the chart\", \"regenerate the intro\"), rewrite \
+           just that scene — never rebuild the whole project.\n\
+         - motion_status(): the current outline — scenes, durations, element counts, total \
+           runtime, last verification. Read it before revising.\n\
+         - verify_motion(): the QA engine. Run it before finishing; fix every ERROR and re-verify.\n\
+         - write_file / read_file / edit_file: the script and brief live in script/ (brief.md, \
+           narration.md); brand themes in theme/. Keep the narration text in sync with each \
+           scene's `narration`.\n\
+         - web_search / http_get: research facts for the script or visual metaphors when you need \
+           them. Never assert a fact you didn't check.\n\
+         - run_command / run_background / task_status: if a local renderer or export step exists, \
+           run it and monitor it. open_file / open_url / screenshot: show the user the result.\n\
+         - remember / spawn_subagent: durable project facts, and delegation for big self-contained \
+           chunks.\n\n\
+         HOW TO WORK:\n\
+         1. PLAN, then write the SCRIPT first (script/brief.md, script/narration.md). The script \
+            drives everything.\n\
+         2. Divide it into scenes and set realistic per-scene durations. For a short, aim for \
+            4–10 scenes and 30–90s total. Put each scene's spoken line in its `narration` so \
+            voice-over can attach later — LEAVE ROOM for voice-over; don't cram.\n\
+         3. Author each scene with write_scene using approved component types. Give every element \
+            a unique id. Keep readable text inside the 5% safe-area margin; on vertical, keep \
+            captions above the bottom 12% where the platform UI sits. Make animation start+duration \
+            fit within the scene.\n\
+         4. VERIFY with verify_motion and REPAIR. An ERROR is a broken build — fix the named scene \
+            and re-verify until it passes. A clean pass is the bar for \"done\".\n\
+         5. Be deterministic and specific. Reuse components and the brand theme rather than \
+            reinventing per scene. Don't invent facts, and don't claim a render exists that you \
+            didn't produce.\n\n\
+         Work only inside the workspace folder below. When done, stop calling tools and summarise: \
+         the project's scenes, total runtime, the verification result, and what the user should do \
+         next (record/upload voice-over, then export).\n\n\
+         {}The workspace folder is: {}",
+        memory_prompt(root),
+        root.display()
+    )
 }
 
 /// The system prompt for Kestrel Work — everyday knowledge work rather than code.
@@ -1058,6 +1240,18 @@ pub fn describe_call(call: &ToolCall) -> String {
         "stop_app" => format!("🛑 Stopping app {}", arg("pid")),
         "screenshot" => "📸 Taking a screenshot".to_string(),
         "install_tool" => format!("📦 Installing {}", arg("command")),
+        "motion_new" => format!("🎬 Creating video project \"{}\"", arg("title")),
+        "motion_status" => "🎞 Reading the video outline".to_string(),
+        "write_scene" => {
+            let id = call
+                .input
+                .get("scene")
+                .and_then(|s| s.get("id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            format!("🎬 Writing scene {id}")
+        }
+        "verify_motion" => "🧪 Verifying the video".to_string(),
         other => other.to_string(),
     }
 }
@@ -1575,7 +1769,152 @@ pub fn execute_tool(root: &Path, call: &ToolCall) -> String {
             }
             Err(err) => format!("error: {err}"),
         },
+        "motion_new" => execute_motion_new(root, call),
+        "motion_status" => execute_motion_status(root),
+        "write_scene" => execute_write_scene(root, call),
+        "verify_motion" => execute_verify_motion(root),
         other => format!("error: unknown tool {other}"),
+    }
+}
+
+/// Scaffold a new Motion project in the workspace.
+fn execute_motion_new(root: &Path, call: &ToolCall) -> String {
+    let arg = |key: &str| {
+        call.input
+            .get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    let title = arg("title");
+    let kind = match crate::motion::ProjectType::deserialize(serde_json::Value::String(arg("type")))
+    {
+        Ok(k) => k,
+        Err(_) => {
+            return "error: type must be one of sketch-explainer, product-tutorial, \
+                          social-short, presentation-video"
+                .to_string()
+        }
+    };
+    let format = match crate::motion::Format::deserialize(serde_json::Value::String(arg("format")))
+    {
+        Ok(f) => f,
+        Err(_) => return "error: format must be vertical, horizontal, or square".to_string(),
+    };
+    match crate::motion::create_project(root, &title, kind, format) {
+        Ok(project) => {
+            let (w, h) = (project.project.width, project.project.height);
+            format!(
+                "Created Motion project \"{title}\" ({w}×{h}). Scaffolded script/, scenes/, \
+                 assets/, theme/, captions/, verification/, output/. Now write the script into \
+                 script/brief.md and script/narration.md, then author scenes with write_scene."
+            )
+        }
+        Err(err) => format!("error: could not create project: {err}"),
+    }
+}
+
+/// A compact outline of the current project for revision.
+fn execute_motion_status(root: &Path) -> String {
+    let project = match crate::motion::load_project(root) {
+        Ok(p) => p,
+        Err(err) => return format!("error: {err} (create one first with motion_new)"),
+    };
+    let mut out = format!(
+        "Project \"{}\" — {:?}, {}×{}, {} fps. {} scene(s), {:.1}s total.\n",
+        project.project.title,
+        project.project.format,
+        project.project.width,
+        project.project.height,
+        project.project.fps,
+        project.scenes.len(),
+        project.total_duration()
+    );
+    for scene in &project.scenes {
+        out.push_str(&format!(
+            "  {} \"{}\" — {:.1}s, {} element(s)\n",
+            scene.id,
+            scene.name,
+            scene.duration,
+            scene.elements.len()
+        ));
+    }
+    let report = crate::motion::verify_project(&project, Some(root));
+    let (e, w, i) = report.counts();
+    out.push_str(&format!(
+        "Last check: {}.",
+        if report.passed() {
+            format!("passing ({w} warning(s), {i} info)")
+        } else {
+            format!("{e} error(s), {w} warning(s)")
+        }
+    ));
+    out
+}
+
+/// Add or replace one scene by id, then quick-verify the project.
+fn execute_write_scene(root: &Path, call: &ToolCall) -> String {
+    let Some(scene_val) = call.input.get("scene") else {
+        return "error: `scene` is required — pass the full scene object".to_string();
+    };
+    let scene: crate::motion::Scene = match crate::motion::Scene::deserialize(scene_val.clone()) {
+        Ok(s) => s,
+        Err(err) => return format!("error: invalid scene: {err}"),
+    };
+    let mut project = match crate::motion::load_project(root) {
+        Ok(p) => p,
+        Err(err) => return format!("error: {err} (create the project first with motion_new)"),
+    };
+
+    let replaced = if let Some(existing) = project.scenes.iter_mut().find(|s| s.id == scene.id) {
+        *existing = scene.clone();
+        true
+    } else {
+        project.scenes.push(scene.clone());
+        false
+    };
+    if let Err(err) = crate::motion::save_project(root, &project) {
+        return format!("error: could not save project: {err}");
+    }
+
+    // Report just this scene's issues so the model can fix them immediately.
+    let report = crate::motion::verify_project(&project, Some(root));
+    let scene_issues: Vec<&crate::motion::MotionIssue> = report
+        .issues
+        .iter()
+        .filter(|iss| iss.scene.as_deref() == Some(scene.id.as_str()))
+        .collect();
+    let verb = if replaced { "Replaced" } else { "Added" };
+    if scene_issues.is_empty() {
+        format!(
+            "{verb} scene '{}' ({:.1}s, {} element(s)) — no issues in this scene.",
+            scene.id,
+            scene.duration,
+            scene.elements.len()
+        )
+    } else {
+        let mut out = format!(
+            "{verb} scene '{}', but it has {} issue(s):\n",
+            scene.id,
+            scene_issues.len()
+        );
+        for iss in scene_issues {
+            out.push_str(&format!(
+                "  {} {}: {}\n",
+                iss.severity.glyph(),
+                iss.code,
+                iss.message
+            ));
+        }
+        out
+    }
+}
+
+/// Run the full verification engine and write the report to disk.
+fn execute_verify_motion(root: &Path) -> String {
+    match crate::motion::verify_on_disk(root) {
+        Ok(report) => report.render(),
+        Err(err) => format!("error: {err} (create the project first with motion_new)"),
     }
 }
 
@@ -3346,6 +3685,174 @@ mod tests {
                 "work should not have {absent}"
             );
         }
+    }
+
+    #[test]
+    fn motion_profile_gets_the_motion_tools() {
+        let motion: Vec<String> = tools_for(Profile::Motion)
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        // The Motion-specific pack…
+        for expected in [
+            "motion_new",
+            "motion_status",
+            "write_scene",
+            "verify_motion",
+            "update_plan",
+            "web_search",
+        ] {
+            assert!(
+                motion.contains(&expected.to_string()),
+                "motion missing {expected}"
+            );
+        }
+        // …without the coding toolchain or the mail tools.
+        for absent in ["git", "rename_symbol", "send_mail", "write_doc"] {
+            assert!(
+                !motion.contains(&absent.to_string()),
+                "motion should not have {absent}"
+            );
+        }
+    }
+
+    #[test]
+    fn motion_agent_authors_verifies_and_repairs() {
+        let dir = std::env::temp_dir().join(format!("kestrel-motion-agent-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Create the project.
+        let created = execute_tool(
+            &dir,
+            &ToolCall {
+                id: "1".into(),
+                name: "motion_new".into(),
+                input: serde_json::json!({
+                    "title": "The Missing Stock",
+                    "type": "sketch-explainer",
+                    "format": "vertical",
+                }),
+            },
+        );
+        assert!(created.contains("1080×1920"), "got: {created}");
+        assert!(dir.join("motion.project.json").exists());
+
+        // Write a scene with a BROKEN arrow reference — the tool should report it.
+        let broken = execute_tool(
+            &dir,
+            &ToolCall {
+                id: "2".into(),
+                name: "write_scene".into(),
+                input: serde_json::json!({
+                    "scene": {
+                        "id": "scene-01",
+                        "name": "Hook",
+                        "duration": 6,
+                        "narration": "Your business may be losing stock.",
+                        "background": { "type": "solid", "color": "#F7F4EC" },
+                        "elements": [
+                            {
+                                "id": "title",
+                                "type": "title",
+                                "content": "Where did the stock go?",
+                                "position": { "x": 300, "y": 800 },
+                                "size": { "width": 480, "height": 160 }
+                            },
+                            {
+                                "id": "arrow",
+                                "type": "sketch-arrow",
+                                "from": "title",
+                                "to": "ghost"
+                            }
+                        ]
+                    }
+                }),
+            },
+        );
+        assert!(
+            broken.contains("broken-reference"),
+            "expected a broken ref, got: {broken}"
+        );
+
+        // Repair the scene by pointing the arrow at a real element.
+        let fixed = execute_tool(
+            &dir,
+            &ToolCall {
+                id: "3".into(),
+                name: "write_scene".into(),
+                input: serde_json::json!({
+                    "scene": {
+                        "id": "scene-01",
+                        "name": "Hook",
+                        "duration": 6,
+                        "background": { "type": "solid", "color": "#F7F4EC" },
+                        "elements": [
+                            {
+                                "id": "title",
+                                "type": "title",
+                                "content": "Where did the stock go?",
+                                "position": { "x": 300, "y": 800 },
+                                "size": { "width": 480, "height": 160 }
+                            },
+                            {
+                                "id": "shelf",
+                                "type": "image",
+                                "position": { "x": 400, "y": 1100 }
+                            },
+                            {
+                                "id": "arrow",
+                                "type": "sketch-arrow",
+                                "from": "title",
+                                "to": "shelf"
+                            }
+                        ]
+                    }
+                }),
+            },
+        );
+        assert!(fixed.contains("Replaced scene 'scene-01'"), "got: {fixed}");
+        assert!(
+            fixed.contains("no issues"),
+            "expected clean scene, got: {fixed}"
+        );
+
+        // Whole-project verification passes and writes the report where §12 says.
+        let report = execute_tool(
+            &dir,
+            &ToolCall {
+                id: "4".into(),
+                name: "verify_motion".into(),
+                input: serde_json::json!({}),
+            },
+        );
+        assert!(report.contains("passed"), "got: {report}");
+        assert!(dir.join("verification/latest-report.json").exists());
+
+        // The status view reflects the one scene.
+        let status = execute_tool(
+            &dir,
+            &ToolCall {
+                id: "5".into(),
+                name: "motion_status".into(),
+                input: serde_json::json!({}),
+            },
+        );
+        assert!(status.contains("scene-01"));
+        assert!(status.contains("6.0s total"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn motion_prompt_is_video_shaped() {
+        let prompt = motion_system_prompt(std::path::Path::new("."));
+        assert!(prompt.contains("Kestrel Motion"));
+        assert!(prompt.contains("write_scene"));
+        assert!(prompt.contains("verify_motion"));
+        // It must steer away from raw rendering code and toward structured scenes.
+        assert!(prompt
+            .to_lowercase()
+            .contains("do not write raw rendering code"));
     }
 
     #[test]

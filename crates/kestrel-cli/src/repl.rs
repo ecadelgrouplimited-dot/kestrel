@@ -57,10 +57,10 @@ pub fn run(root: PathBuf) -> std::io::Result<()> {
     let _ = editor.load_history(&history_file);
 
     loop {
-        let prompt = if session.profile == Profile::Work {
-            "work › "
-        } else {
-            "› "
+        let prompt = match session.profile {
+            Profile::Work => "work › ",
+            Profile::Motion => "motion › ",
+            Profile::Build => "› ",
         };
         match editor.readline(prompt) {
             Ok(line) => {
@@ -242,6 +242,10 @@ fn command(session: &mut Session, term: &mut Term, line: &str) -> Flow {
             session.profile = Profile::Build;
             term.line(&s.accent("  switched to Kestrel Build — coding"));
         }
+        "/motion" => {
+            session.profile = Profile::Motion;
+            term.line(&s.accent("  switched to Kestrel Motion — code-native video"));
+        }
         "/continue" => {
             if session.incomplete {
                 turn(session, "Continue from where you left off.");
@@ -351,6 +355,7 @@ fn help(term: &mut Term) {
         ("/provider [name]", "show or switch the provider"),
         ("/work", "switch to Kestrel Work (documents, research)"),
         ("/build", "switch to Kestrel Build (coding)"),
+        ("/motion", "switch to Kestrel Motion (code-native video)"),
         ("/clear", "start a fresh conversation"),
         ("/cwd", "the folder being worked in"),
         ("/exit", "leave (Ctrl-D also works)"),
