@@ -250,6 +250,7 @@ pub fn tools_for(profile: Profile) -> Vec<ToolSpec> {
                 "caption_motion",
                 "brand_motion",
                 "preview_motion",
+                "render_motion",
                 // Files & content (scripts, briefs, brand themes, assets)
                 "read_file",
                 "read_doc",
@@ -422,6 +423,25 @@ fn motion_tools() -> Vec<ToolSpec> {
                 "required": ["name"],
             }),
         },
+        ToolSpec {
+            name: "render_motion".to_string(),
+            description: "Export the video to a real MP4 (output/final-video.mp4): H.264 + AAC at \
+                          the project's resolution and frame rate, with captions and the brand \
+                          burned in. This is the final deliverable — do it once the video \
+                          verifies clean and previews well. Needs FFmpeg installed; it will say \
+                          so if it's missing. (The MP4 is a settled-frame cut of the storyboard; \
+                          in-scene motion plays in the live preview.)"
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "file": {
+                        "type": "string",
+                        "description": "Output file name (default final-video.mp4).",
+                    },
+                },
+            }),
+        },
     ]
 }
 
@@ -470,6 +490,8 @@ pub fn motion_system_prompt(root: &Path) -> String {
          - preview_motion(): render the project to a watchable HTML preview and open it, so you \
            and the user can SEE the result. Do this once it verifies clean, and again after a \
            revision.\n\
+         - render_motion(): export the final MP4 (H.264+AAC, captions and brand burned in). The \
+           deliverable, once the video verifies and previews well. Needs FFmpeg.\n\
          - write_file / read_file / edit_file: the script and brief live in script/ (brief.md, \
            narration.md); brand themes in theme/. Keep the narration text in sync with each \
            scene's `narration`.\n\
@@ -1335,6 +1357,7 @@ pub fn describe_call(call: &ToolCall) -> String {
         "caption_motion" => "💬 Generating captions".to_string(),
         "brand_motion" => format!("🎨 Applying brand kit \"{}\"", arg("name")),
         "preview_motion" => "🎞 Rendering the video preview".to_string(),
+        "render_motion" => "🎬 Exporting the video to MP4".to_string(),
         other => other.to_string(),
     }
 }
@@ -1859,6 +1882,7 @@ pub fn execute_tool(root: &Path, call: &ToolCall) -> String {
         "caption_motion" => execute_caption_motion(root, call),
         "brand_motion" => execute_brand_motion(root, call),
         "preview_motion" => execute_preview_motion(root, call),
+        "render_motion" => execute_render_motion(root, call),
         other => format!("error: unknown tool {other}"),
     }
 }
@@ -2122,6 +2146,35 @@ fn execute_preview_motion(root: &Path, call: &ToolCall) -> String {
         project.total_duration(),
         path.display()
     )
+}
+
+/// Export the video to an MP4 with FFmpeg.
+fn execute_render_motion(root: &Path, call: &ToolCall) -> String {
+    let project = match crate::motion::load_project(root) {
+        Ok(p) => p,
+        Err(err) => return format!("error: {err} (create the project first with motion_new)"),
+    };
+    let mut opts = crate::motion_render::ExportOptions::default();
+    if let Some(file) = call.input.get("file").and_then(|v| v.as_str()) {
+        if !file.trim().is_empty() {
+            opts.file_name = file.trim().to_string();
+        }
+    }
+    match crate::motion_render::export_mp4(&project, root, &opts) {
+        Ok(path) => {
+            let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            format!(
+                "Exported the video to {} ({:.1} MB, {:.1}s, {}×{}). This is the final MP4 — \
+                 captions and brand are burned in.",
+                path.display(),
+                size as f64 / 1_048_576.0,
+                project.total_duration(),
+                project.project.width,
+                project.project.height
+            )
+        }
+        Err(err) => format!("error: {err}"),
+    }
 }
 
 /// Replace the unique occurrence of `old` with `new` in a file. Fails if `old`

@@ -86,19 +86,257 @@ impl Renderer for SvgRenderer {
 
     fn export(
         &self,
-        _project: &MotionProject,
-        _root: &Path,
-        _opts: &ExportOptions,
+        project: &MotionProject,
+        root: &Path,
+        opts: &ExportOptions,
     ) -> Result<PathBuf, String> {
-        // Encoding needs a frame-rasterising pipeline (headless-browser or
-        // resvg → FFmpeg). Rather than emit a half-working MP4, the SVG backend
-        // says so plainly; the HTML preview is the deliverable it does produce.
-        Err(
-            "the SVG renderer produces a live HTML preview, not an encoded MP4 yet — \
-             render_preview_html gives a watchable, self-contained player. MP4 export lands with \
-             the frame pipeline."
-                .to_string(),
-        )
+        export_mp4(project, root, opts)
+    }
+}
+
+/// A timeline segment for export: a still frame held for `duration` seconds,
+/// with the caption to burn into it.
+struct Segment<'a> {
+    scene: &'a Scene,
+    caption: Option<String>,
+    duration: f32,
+}
+
+/// Split the project into export segments. A narrated scene's caption cues
+/// become one segment each (so captions change on time in the MP4); a scene
+/// with no cues is a single captionless segment for its whole duration.
+fn export_segments<'a>(
+    project: &'a MotionProject,
+    captions: &crate::motion_caption::CaptionTrack,
+) -> Vec<Segment<'a>> {
+    let mut segments = Vec::new();
+    let mut clock = 0.0f32;
+    for scene in &project.scenes {
+        let (start, end) = (clock, clock + scene.duration);
+        clock = end;
+        let cues: Vec<&crate::motion_caption::Caption> = captions
+            .cues
+            .iter()
+            .filter(|c| c.start >= start - 1e-3 && c.start < end - 1e-3)
+            .collect();
+        if cues.is_empty() {
+            segments.push(Segment {
+                scene,
+                caption: None,
+                duration: scene.duration.max(0.1),
+            });
+        } else {
+            // Cover from the scene start through each cue, and any tail after the
+            // last cue, so the segment durations sum to the scene duration.
+            let mut cursor = start;
+            for (i, cue) in cues.iter().enumerate() {
+                // A gap before the first cue shows the frame without a caption.
+                if i == 0 && cue.start > cursor + 1e-3 {
+                    segments.push(Segment {
+                        scene,
+                        caption: None,
+                        duration: cue.start - cursor,
+                    });
+                    cursor = cue.start;
+                }
+                let seg_end = if i == cues.len() - 1 {
+                    end
+                } else {
+                    cues[i + 1].start
+                };
+                segments.push(Segment {
+                    scene,
+                    caption: Some(cue.text.replace('\n', " ")),
+                    duration: (seg_end - cursor).max(0.1),
+                });
+                cursor = seg_end;
+            }
+        }
+    }
+    segments
+}
+
+/// Encode the project to an MP4 by screenshotting a still per caption segment
+/// and stitching them with FFmpeg at the project's frame rate. Requires a
+/// headless browser (already used for acceptance checks) and FFmpeg on PATH;
+/// both are reported clearly if missing.
+///
+/// The stills are settled frames (entry animations resolved), so the MP4 is a
+/// correctly-timed, branded, captioned cut of the storyboard. In-scene motion
+/// plays in the live HTML preview; bringing it into the encode is the job of a
+/// per-frame rasteriser, gated behind the directive's tooling review.
+pub fn export_mp4(
+    project: &MotionProject,
+    root: &Path,
+    opts: &ExportOptions,
+) -> Result<PathBuf, String> {
+    if project.scenes.is_empty() {
+        return Err("nothing to export — the project has no scenes".into());
+    }
+    let browser = crate::browser::find_browser()
+        .ok_or("no Chrome/Edge found to render frames for the export")?;
+    let ffmpeg = find_ffmpeg().ok_or(
+        "FFmpeg isn't installed or on PATH — it encodes the frames into an MP4. Install it \
+         (e.g. `winget install Gyan.FFmpeg`) and try again.",
+    )?;
+
+    let (w, h) = (project.project.width, project.project.height);
+    let brand = crate::motion_brand::load_brand(root);
+    let captions = crate::motion_caption::load_captions(root);
+    let segments = export_segments(project, &captions);
+
+    let out_dir = root.join("output");
+    std::fs::create_dir_all(&out_dir).map_err(|e| format!("could not create output/: {e}"))?;
+    // Frame files live in output/ so the SVG's `../asset` paths resolve exactly
+    // as they do for the preview. They're cleaned up at the end.
+    let mut frame_files = Vec::new();
+    let mut concat = String::from("ffconcat version 1.0\n");
+    for (i, seg) in segments.iter().enumerate() {
+        let svg = render_scene_inner(
+            project,
+            seg.scene,
+            false,
+            brand.as_ref(),
+            true,
+            seg.caption.as_deref(),
+        );
+        let html = format!(
+            "<!doctype html><meta charset=utf-8><style>html,body{{margin:0;padding:0;background:#000}}svg{{display:block}}</style>{svg}"
+        );
+        let html_path = out_dir.join(format!(".mframe-{i:03}.html"));
+        let png_name = format!(".mframe-{i:03}.png");
+        let png_path = out_dir.join(&png_name);
+        std::fs::write(&html_path, html).map_err(|e| format!("frame write failed: {e}"))?;
+        screenshot_frame(&browser, &html_path, &png_path, w, h)?;
+        frame_files.push(html_path);
+        frame_files.push(png_path);
+        concat.push_str(&format!(
+            "file '{png_name}'\nduration {:.3}\n",
+            seg.duration
+        ));
+    }
+    // The concat demuxer ignores the last entry's duration, so repeat the final
+    // frame to hold it for its full time.
+    if let Some(last) = segments.len().checked_sub(1) {
+        concat.push_str(&format!("file '.mframe-{last:03}.png'\n"));
+    }
+    let list_path = out_dir.join(".mframes.txt");
+    std::fs::write(&list_path, concat).map_err(|e| format!("concat list write failed: {e}"))?;
+
+    let fps = opts.fps.unwrap_or(project.project.fps).clamp(1, 60);
+    let out_name = if opts.file_name.trim().is_empty() {
+        "final-video.mp4".to_string()
+    } else {
+        opts.file_name.clone()
+    };
+    let out_path = out_dir.join(&out_name);
+
+    // Silent stereo AAC track so the file carries audio, per §14 (real narration
+    // muxing comes with the audio phase).
+    let status = std::process::Command::new(&ffmpeg)
+        .current_dir(&out_dir)
+        .args([
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            ".mframes.txt",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=channel_layout=stereo:sample_rate=44100",
+            "-vf",
+            &format!("fps={fps},format=yuv420p"),
+            "-c:v",
+            "libx264",
+            "-preset",
+            "medium",
+            "-c:a",
+            "aac",
+            "-shortest",
+            "-movflags",
+            "+faststart",
+            // Pin the exact runtime: the concat demuxer's trailing repeated
+            // frame otherwise overhangs the intended length.
+            "-t",
+            &format!("{:.3}", project.total_duration().max(0.1)),
+        ])
+        .arg(&out_name)
+        .output();
+
+    // Clean up frames regardless of outcome.
+    for f in &frame_files {
+        let _ = std::fs::remove_file(f);
+    }
+    let _ = std::fs::remove_file(&list_path);
+
+    match status {
+        Ok(out) if out.status.success() && out_path.exists() => Ok(out_path),
+        Ok(out) => Err(format!(
+            "FFmpeg failed to encode the video: {}",
+            String::from_utf8_lossy(&out.stderr)
+                .lines()
+                .last()
+                .unwrap_or("unknown error")
+        )),
+        Err(e) => Err(format!("could not run FFmpeg: {e}")),
+    }
+}
+
+/// Locate FFmpeg: on PATH, or the WinGet shim directory it commonly installs to.
+fn find_ffmpeg() -> Option<String> {
+    if std::process::Command::new("ffmpeg")
+        .arg("-version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+    {
+        return Some("ffmpeg".to_string());
+    }
+    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        let shim = format!(r"{local}\Microsoft\WinGet\Links\ffmpeg.exe");
+        if Path::new(&shim).exists() {
+            return Some(shim);
+        }
+    }
+    None
+}
+
+/// Screenshot one frame HTML to a PNG at exactly `w`×`h` via headless Chrome.
+fn screenshot_frame(browser: &str, html: &Path, png: &Path, w: u32, h: u32) -> Result<(), String> {
+    let profile = std::env::temp_dir().join(format!(
+        "kestrel-mframe-{}-{}",
+        std::process::id(),
+        png.file_name().and_then(|n| n.to_str()).unwrap_or("f")
+    ));
+    let url = format!("file:///{}", html.display().to_string().replace('\\', "/"));
+    let out = std::process::Command::new(browser)
+        .args([
+            "--headless=new",
+            "--disable-gpu",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--hide-scrollbars",
+            "--force-device-scale-factor=1",
+            "--disable-extensions",
+            "--virtual-time-budget=1200",
+        ])
+        .arg(format!("--window-size={w},{h}"))
+        .arg(format!("--screenshot={}", png.display()))
+        .arg(format!("--user-data-dir={}", profile.display()))
+        .arg(&url)
+        .output()
+        .map_err(|e| format!("could not run the browser for a frame: {e}"))?;
+    let _ = std::fs::remove_dir_all(&profile);
+    if png.exists() {
+        Ok(())
+    } else {
+        Err(format!(
+            "the browser did not produce a frame image: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))
     }
 }
 
@@ -132,6 +370,21 @@ fn render_scene(
     overlay_safe_area: bool,
     brand: Option<&crate::motion_brand::BrandKit>,
 ) -> String {
+    render_scene_inner(project, scene, overlay_safe_area, brand, false, None)
+}
+
+/// The full scene renderer. `static_frame` drops the entry animations so every
+/// element shows at its settled state (for a still frame the export screenshots);
+/// `caption`, when set, burns a caption band into the frame — only ever for
+/// export, never into the editable project (§9).
+fn render_scene_inner(
+    project: &MotionProject,
+    scene: &Scene,
+    overlay_safe_area: bool,
+    brand: Option<&crate::motion_brand::BrandKit>,
+    static_frame: bool,
+    caption: Option<&str>,
+) -> String {
     let (w, h) = (project.project.width, project.project.height);
     let font = brand
         .map(|b| b.font_family.as_str())
@@ -154,7 +407,11 @@ fn render_scene(
     let mut ordered: Vec<&Element> = scene.elements.iter().collect();
     ordered.sort_by_key(|e| e.layer);
     for el in ordered {
-        render_element(&mut svg, el, scene, brand);
+        render_element(&mut svg, el, scene, brand, static_frame);
+    }
+
+    if let Some(text) = caption {
+        render_caption_band(&mut svg, text, w, h, project.project.format, brand);
     }
 
     if let Some(mark) = brand.and_then(|b| b.watermark.as_deref()) {
@@ -236,14 +493,65 @@ fn render_background(
     }
 }
 
-/// Draw one element, wrapped in a group carrying its entry animation.
+/// Burn a caption band into a still frame (export only). Centred, with the
+/// brand caption colours, sitting above the bottom UI reserve on vertical.
+fn render_caption_band(
+    svg: &mut String,
+    text: &str,
+    w: u32,
+    h: u32,
+    format: crate::motion::Format,
+    brand: Option<&crate::motion_brand::BrandKit>,
+) {
+    if text.trim().is_empty() {
+        return;
+    }
+    let (w, h) = (w as f32, h as f32);
+    let bottom_reserve = if format == crate::motion::Format::Vertical {
+        0.13
+    } else {
+        0.07
+    };
+    let font = (w * 0.032).clamp(20.0, 56.0);
+    // A rough pill sized to the text; SVG can't measure, so estimate width from
+    // the glyph count and centre it, clamped to the safe width.
+    let est_w = (text.chars().count() as f32 * font * 0.55 + font).min(w * 0.9);
+    let cx = w / 2.0;
+    let baseline = h * (1.0 - bottom_reserve);
+    let pad = font * 0.35;
+    let bg = brand
+        .map(|b| b.caption_background.as_str())
+        .unwrap_or("rgba(0,0,0,0.62)");
+    let fg = brand.map(|b| b.caption_text.as_str()).unwrap_or("#ffffff");
+    let _ = write!(
+        svg,
+        r##"<rect x="{:.0}" y="{:.0}" width="{:.0}" height="{:.0}" rx="{:.0}" fill="{}"/><text x="{cx:.0}" y="{:.0}" font-size="{font:.0}" font-weight="600" fill="{}" text-anchor="middle">{}</text>"##,
+        cx - est_w / 2.0,
+        baseline - font - pad,
+        est_w,
+        font + pad * 2.0,
+        font * 0.25,
+        esc_attr(bg),
+        baseline - pad,
+        esc_attr(fg),
+        esc_text(text)
+    );
+}
+
+/// Draw one element, wrapped in a group carrying its entry animation. When
+/// `static_frame` is set the animation is dropped, so the element shows settled.
 fn render_element(
     svg: &mut String,
     el: &Element,
     scene: &Scene,
     brand: Option<&crate::motion_brand::BrandKit>,
+    static_frame: bool,
 ) {
-    let anim_style = animation_style(el.animation.as_ref());
+    let anim_style = if static_frame {
+        String::new()
+    } else {
+        animation_style(el.animation.as_ref())
+    };
     let _ = write!(svg, r##"<g style="{anim_style}">"##);
 
     match el.kind.as_str() {
@@ -924,11 +1232,64 @@ mod tests {
     }
 
     #[test]
-    fn export_is_honest_about_mp4() {
+    fn static_frame_drops_animation_and_can_burn_a_caption() {
         let project = sample_project();
-        let err = SvgRenderer
-            .export(&project, Path::new("."), &ExportOptions::default())
-            .unwrap_err();
-        assert!(err.to_lowercase().contains("preview"));
+        // A settled export frame with a burned-in caption.
+        let frame = render_scene_inner(
+            &project,
+            &project.scenes[0],
+            false,
+            None,
+            true,
+            Some("Your business may be losing stock."),
+        );
+        // No CSS animation in a still frame (it would render mid-transition).
+        assert!(!frame.contains("animation:"));
+        // The caption text is drawn into the frame.
+        assert!(frame.contains("Your business may be losing stock."));
+        // The live preview frame, by contrast, keeps its animations.
+        let live = SvgRenderer.render_scene_svg(&project, &project.scenes[0]);
+        assert!(live.contains("animation:"));
+    }
+
+    #[test]
+    fn export_segments_tile_the_timeline() {
+        let mut project = MotionProject::new("t", ProjectType::SketchExplainer, Format::Vertical);
+        project.scenes.push(crate::motion::Scene {
+            id: "s1".into(),
+            name: String::new(),
+            duration: 6.0,
+            narration: Some(
+                "A fairly long line that will split into two caption cues here.".into(),
+            ),
+            background: Background::default(),
+            elements: vec![],
+        });
+        project.scenes.push(crate::motion::Scene {
+            id: "s2".into(),
+            name: String::new(),
+            duration: 3.0,
+            narration: None, // captionless -> one segment
+            background: Background::default(),
+            elements: vec![],
+        });
+        let captions = crate::motion_caption::CaptionTrack::from_project(&project);
+        let segments = export_segments(&project, &captions);
+        // Segment durations sum to the total runtime.
+        let total: f32 = segments.iter().map(|s| s.duration).sum();
+        assert!(
+            (total - project.total_duration()).abs() < 0.05,
+            "sum was {total}"
+        );
+        // The captionless scene contributes exactly one caption-free segment.
+        assert!(segments.iter().any(|s| s.caption.is_none()));
+        assert!(segments.iter().any(|s| s.caption.is_some()));
+    }
+
+    #[test]
+    fn export_needs_scenes() {
+        let project = MotionProject::new("empty", ProjectType::SocialShort, Format::Square);
+        let err = export_mp4(&project, Path::new("."), &ExportOptions::default()).unwrap_err();
+        assert!(err.contains("no scenes"));
     }
 }

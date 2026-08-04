@@ -3541,6 +3541,36 @@ impl KestrelApp {
                 };
             }
             if ui
+                .add_enabled(!project.scenes.is_empty(), egui::Button::new("Export MP4"))
+                .on_hover_text("Encode the final MP4 (needs FFmpeg) — runs in the background")
+                .clicked()
+            {
+                // Export screenshots frames and runs FFmpeg, so it goes on a
+                // worker thread; it opens the file when done.
+                let root = root.clone();
+                let project = project.clone();
+                self.spawn(move || {
+                    let outcome = kestrel_core::export_motion_mp4(
+                        &project,
+                        &root,
+                        &kestrel_core::ExportOptions::default(),
+                    );
+                    match outcome {
+                        Ok(path) => {
+                            let _ = kestrel_core::open_path(&path.display().to_string());
+                            JobOutcome::Text {
+                                output: format!("Exported {}", path.display()),
+                                status: format!("Exported video → {}", path.display()),
+                            }
+                        }
+                        Err(e) => JobOutcome::Text {
+                            output: String::new(),
+                            status: format!("Export failed: {e}"),
+                        },
+                    }
+                });
+            }
+            if ui
                 .button("Folder")
                 .on_hover_text("Open the project folder")
                 .clicked()

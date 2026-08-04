@@ -89,7 +89,8 @@ pub use motion::{
 pub use motion_brand::{load_brand, save_brand, BrandKit};
 pub use motion_caption::{load_captions, save_captions, Caption, CaptionTrack};
 pub use motion_render::{
-    write_preview as write_motion_preview, ExportOptions, Renderer, SvgRenderer,
+    export_mp4 as export_motion_mp4, write_preview as write_motion_preview, ExportOptions,
+    Renderer, SvgRenderer,
 };
 pub use office::{kind_for, read_document, DocKind};
 pub use plan::{
