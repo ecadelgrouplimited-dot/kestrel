@@ -11,9 +11,12 @@
 //! independent (which §6 wants for sketch art), it animates deterministically in
 //! the browser via baked CSS keyframes — the same project renders identically
 //! every time, as §15 demands — and it adds not one line to the dependency tree
-//! on a machine where disk is tight. MP4 export (which needs a frame-rasterising
-//! pipeline) sits behind the same trait and is reported honestly as unavailable
-//! until that pipeline lands, so the interface is right from the start.
+//! on a machine where disk is tight. MP4 export ([`export_mp4`]) rides the same
+//! trait: it screenshots a settled still per caption segment with the headless
+//! browser and stitches them with FFmpeg — a real H.264/AAC file using only
+//! tools already present. In-scene entry motion stays in the live preview until
+//! a per-frame rasteriser (gated behind the directive's tooling review) replaces
+//! the still capture; that's a backend swap, not a format change.
 //!
 //! The coordinate model matches the verifier exactly: `position` is the
 //! element's top-left in pixels, `size` its extent. One model, so what verifies
