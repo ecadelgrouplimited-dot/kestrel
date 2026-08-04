@@ -15,7 +15,7 @@ fn main() {
       "scenes": [
         { "id": "scene-01", "name": "The Hook", "duration": 4,
           "narration": "Your business may be losing stock without you noticing.",
-          "background": { "type": "solid", "color": "#F7F4EC" },
+          "background": { "type": "theme" },
           "elements": [
             { "id": "title", "type": "title", "content": "Where did the stock go?",
               "position": { "x": 110, "y": 320 }, "size": { "width": 860, "height": 150 },
@@ -47,6 +47,12 @@ fn main() {
     // Generate captions from the narration so the preview overlays them.
     let captions = kestrel_core::motion_caption::CaptionTrack::from_project(&project);
     kestrel_core::motion_caption::save_captions(root, &captions).expect("save captions");
+    // Apply a brand kit with a watermark so the preview shows branding.
+    let kit = kestrel_core::motion_brand::BrandKit {
+        watermark: Some("Smart Business Book".into()),
+        ..Default::default()
+    };
+    kestrel_core::motion_brand::save_brand(root, &kit).expect("save brand");
     let path = write_preview(root, &project).expect("write preview");
     println!("{}", path.display());
 }

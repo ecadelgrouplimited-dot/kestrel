@@ -94,6 +94,10 @@ pub enum Background {
     },
     /// An image asset, by project-relative path.
     Image { asset: String },
+    /// Defer to the applied brand kit's background (§13). Lets a scene inherit
+    /// the brand's ground without hard-coding a colour, so re-branding a project
+    /// doesn't touch every scene.
+    Theme,
 }
 
 impl Default for Background {

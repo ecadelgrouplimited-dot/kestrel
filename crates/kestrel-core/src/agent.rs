@@ -248,6 +248,7 @@ pub fn tools_for(profile: Profile) -> Vec<ToolSpec> {
                 "write_scene",
                 "verify_motion",
                 "caption_motion",
+                "brand_motion",
                 "preview_motion",
                 // Files & content (scripts, briefs, brand themes, assets)
                 "read_file",
@@ -395,6 +396,32 @@ fn motion_tools() -> Vec<ToolSpec> {
                 },
             }),
         },
+        ToolSpec {
+            name: "brand_motion".to_string(),
+            description: "Define or update the project's brand kit (§13) and apply it: colours, a \
+                          font, caption colours, and an optional watermark, saved to \
+                          theme/brand-theme.json. The kit informs rendering — it fills in a text \
+                          colour, font, themed background, and watermark only where a scene hasn't \
+                          set its own — so applying a brand recolours the video WITHOUT changing \
+                          its message. Give a scene `background: {\"type\":\"theme\"}` to let it \
+                          inherit the brand ground. Colours are CSS (e.g. #DC8D1F)."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "The brand kit's name." },
+                    "background": { "type": "string" },
+                    "text": { "type": "string" },
+                    "primary": { "type": "string" },
+                    "accent": { "type": "string" },
+                    "font_family": { "type": "string", "description": "A CSS font stack." },
+                    "caption_background": { "type": "string" },
+                    "caption_text": { "type": "string" },
+                    "watermark": { "type": "string", "description": "Optional corner watermark text." },
+                },
+                "required": ["name"],
+            }),
+        },
     ]
 }
 
@@ -436,6 +463,10 @@ pub fn motion_system_prompt(root: &Path) -> String {
          - caption_motion(): generate editable captions from the scenes' narration, aligned to \
            the timeline (saved as captions.json + an SRT sidecar). Captions overlay live in the \
            preview; they are never burned into the render.\n\
+         - brand_motion(name, colours, font, watermark): define and apply a brand kit. It fills \
+           in text colour, font, themed backgrounds and captions where a scene hasn't chosen its \
+           own, so a brand recolours the video without changing its message. Give a scene \
+           `background: {{\"type\":\"theme\"}}` to inherit the brand ground.\n\
          - preview_motion(): render the project to a watchable HTML preview and open it, so you \
            and the user can SEE the result. Do this once it verifies clean, and again after a \
            revision.\n\
@@ -457,7 +488,8 @@ pub fn motion_system_prompt(root: &Path) -> String {
          3. Author each scene with write_scene using approved component types. Give every element \
             a unique id. Keep readable text inside the 5% safe-area margin; on vertical, keep \
             captions above the bottom 12% where the platform UI sits. Make animation start+duration \
-            fit within the scene.\n\
+            fit within the scene. If the user names a brand, apply it with brand_motion so the look \
+            is consistent.\n\
          4. VERIFY with verify_motion and REPAIR. An ERROR is a broken build — fix the named scene \
             and re-verify until it passes. A clean pass is the bar for \"done\". Then \
             caption_motion() to caption the narration, and preview_motion() to render it and \
@@ -1301,6 +1333,7 @@ pub fn describe_call(call: &ToolCall) -> String {
         }
         "verify_motion" => "🧪 Verifying the video".to_string(),
         "caption_motion" => "💬 Generating captions".to_string(),
+        "brand_motion" => format!("🎨 Applying brand kit \"{}\"", arg("name")),
         "preview_motion" => "🎞 Rendering the video preview".to_string(),
         other => other.to_string(),
     }
@@ -1824,6 +1857,7 @@ pub fn execute_tool(root: &Path, call: &ToolCall) -> String {
         "write_scene" => execute_write_scene(root, call),
         "verify_motion" => execute_verify_motion(root),
         "caption_motion" => execute_caption_motion(root, call),
+        "brand_motion" => execute_brand_motion(root, call),
         "preview_motion" => execute_preview_motion(root, call),
         other => format!("error: unknown tool {other}"),
     }
@@ -1992,6 +2026,70 @@ fn execute_caption_motion(root: &Path, call: &ToolCall) -> String {
         "Generated {} caption cue(s), saved to captions/captions.json and captions.srt. They \
          overlay live in the preview.",
         track.cues.len()
+    )
+}
+
+/// Define/update the brand kit and point the project's theme at it.
+fn execute_brand_motion(root: &Path, call: &ToolCall) -> String {
+    let str_arg = |key: &str| call.input.get(key).and_then(|v| v.as_str());
+    let name = match str_arg("name") {
+        Some(n) if !n.trim().is_empty() => n.to_string(),
+        _ => return "error: a brand kit needs a `name`".to_string(),
+    };
+    // Start from the existing kit (or the default) and override provided fields,
+    // so a partial update doesn't blow away the rest of the kit.
+    let mut kit = crate::motion_brand::load_brand(root).unwrap_or_default();
+    kit.name = name.clone();
+    if let Some(v) = str_arg("background") {
+        kit.background = v.to_string();
+    }
+    if let Some(v) = str_arg("text") {
+        kit.text = v.to_string();
+    }
+    if let Some(v) = str_arg("primary") {
+        kit.primary = v.to_string();
+    }
+    if let Some(v) = str_arg("accent") {
+        kit.accent = v.to_string();
+    }
+    if let Some(v) = str_arg("font_family") {
+        kit.font_family = v.to_string();
+    }
+    if let Some(v) = str_arg("caption_background") {
+        kit.caption_background = v.to_string();
+    }
+    if let Some(v) = str_arg("caption_text") {
+        kit.caption_text = v.to_string();
+    }
+    if let Some(v) = str_arg("watermark") {
+        kit.watermark = if v.trim().is_empty() {
+            None
+        } else {
+            Some(v.to_string())
+        };
+    }
+
+    if let Err(err) = crate::motion_brand::save_brand(root, &kit) {
+        return format!("error: could not save the brand kit: {err}");
+    }
+    // Point the project's theme at this kit, if a project exists.
+    if let Ok(mut project) = crate::motion::load_project(root) {
+        if project.project.theme != name {
+            project.project.theme = name.clone();
+            let _ = crate::motion::save_project(root, &project);
+        }
+    }
+    format!(
+        "Saved brand kit \"{name}\" (primary {}, accent {}) to theme/brand-theme.json and applied \
+         it to the project. It styles text, font, themed backgrounds{}, and captions in the \
+         preview.",
+        kit.primary,
+        kit.accent,
+        if kit.watermark.is_some() {
+            ", a watermark"
+        } else {
+            ""
+        }
     )
 }
 
@@ -4012,6 +4110,79 @@ mod tests {
         // The caption made it into the player as data, not into a scene SVG.
         assert!(html.contains("const captions = ["));
         assert!(html.contains("walking out the door") || html.contains("Three signs"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn motion_brand_kit_applies_at_render() {
+        let dir = std::env::temp_dir().join(format!("kestrel-motion-brand-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        execute_tool(
+            &dir,
+            &ToolCall {
+                id: "1".into(),
+                name: "motion_new".into(),
+                input: serde_json::json!({
+                    "title": "Brand Test", "type": "sketch-explainer", "format": "vertical",
+                }),
+            },
+        );
+        // A scene that defers its background to the brand and lets its title
+        // take the brand's text colour.
+        execute_tool(
+            &dir,
+            &ToolCall {
+                id: "2".into(),
+                name: "write_scene".into(),
+                input: serde_json::json!({
+                    "scene": {
+                        "id": "s1", "duration": 5,
+                        "background": { "type": "theme" },
+                        "elements": [
+                            { "id": "t", "type": "title", "content": "On brand",
+                              "position": { "x": 200, "y": 800 },
+                              "size": { "width": 680, "height": 140 } }
+                        ]
+                    }
+                }),
+            },
+        );
+        let applied = execute_tool(
+            &dir,
+            &ToolCall {
+                id: "3".into(),
+                name: "brand_motion".into(),
+                input: serde_json::json!({
+                    "name": "acme",
+                    "background": "#101820",
+                    "text": "#eaf2ff",
+                    "accent": "#ffcc33",
+                    "watermark": "ACME",
+                }),
+            },
+        );
+        assert!(applied.contains("acme"), "got: {applied}");
+        assert!(dir.join("theme/brand-theme.json").exists());
+        // The project's theme now points at the kit.
+        let project = crate::motion::load_project(&dir).unwrap();
+        assert_eq!(project.project.theme, "acme");
+
+        // Render and confirm the kit reached the SVG: themed background, brand
+        // text colour on the un-coloured title, and the watermark.
+        execute_tool(
+            &dir,
+            &ToolCall {
+                id: "4".into(),
+                name: "preview_motion".into(),
+                input: serde_json::json!({ "open": false }),
+            },
+        );
+        let html = std::fs::read_to_string(dir.join("output/preview.html")).unwrap();
+        assert!(html.contains("#101820"), "themed background missing");
+        assert!(html.contains("#eaf2ff"), "brand text colour missing");
+        assert!(html.contains("ACME"), "watermark missing");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -15,6 +15,7 @@ pub mod mail;
 pub mod media;
 pub mod memory;
 pub mod motion;
+pub mod motion_brand;
 pub mod motion_caption;
 pub mod motion_render;
 pub mod office;
@@ -85,6 +86,7 @@ pub use motion::{
     ProjectMeta, ProjectType, Scene, Severity as MotionSeverity,
     VerificationReport as MotionReport,
 };
+pub use motion_brand::{load_brand, save_brand, BrandKit};
 pub use motion_caption::{load_captions, save_captions, Caption, CaptionTrack};
 pub use motion_render::{
     write_preview as write_motion_preview, ExportOptions, Renderer, SvgRenderer,

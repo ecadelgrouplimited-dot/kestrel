@@ -73,11 +73,15 @@ impl Renderer for SvgRenderer {
     }
 
     fn render_scene_svg(&self, project: &MotionProject, scene: &Scene) -> String {
-        render_scene(project, scene, false)
+        render_scene(project, scene, false, None)
     }
 
     fn render_preview_html(&self, project: &MotionProject) -> String {
-        preview_html(project, &crate::motion_caption::CaptionTrack::default())
+        preview_html(
+            project,
+            &crate::motion_caption::CaptionTrack::default(),
+            None,
+        )
     }
 
     fn export(
@@ -109,7 +113,8 @@ pub fn write_preview(root: &Path, project: &MotionProject) -> std::io::Result<Pa
     std::fs::create_dir_all(&dir)?;
     let path = dir.join("preview.html");
     let captions = crate::motion_caption::load_captions(root);
-    std::fs::write(&path, preview_html(project, &captions))?;
+    let brand = crate::motion_brand::load_brand(root);
+    std::fs::write(&path, preview_html(project, &captions, brand.as_ref()))?;
     Ok(path)
 }
 
@@ -119,12 +124,23 @@ pub fn write_preview(root: &Path, project: &MotionProject) -> std::io::Result<Pa
 
 /// Render one scene to an SVG document. When `overlay_safe_area` is set, the
 /// title-safe margin is drawn as a dashed guide (used by the preview toggle).
-fn render_scene(project: &MotionProject, scene: &Scene, overlay_safe_area: bool) -> String {
+/// `brand`, when present, supplies the font, default text colour, themed
+/// background, and watermark (§13).
+fn render_scene(
+    project: &MotionProject,
+    scene: &Scene,
+    overlay_safe_area: bool,
+    brand: Option<&crate::motion_brand::BrandKit>,
+) -> String {
     let (w, h) = (project.project.width, project.project.height);
+    let font = brand
+        .map(|b| b.font_family.as_str())
+        .unwrap_or("Segoe UI, Arial, sans-serif");
     let mut svg = String::new();
     let _ = write!(
         svg,
-        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" width="{w}" height="{h}" preserveAspectRatio="xMidYMid meet" font-family="Segoe UI, Arial, sans-serif">"##
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" width="{w}" height="{h}" preserveAspectRatio="xMidYMid meet" font-family="{}">"##,
+        esc_attr(font)
     );
 
     // A reusable arrowhead marker for sketch arrows.
@@ -132,13 +148,27 @@ fn render_scene(project: &MotionProject, scene: &Scene, overlay_safe_area: bool)
         r##"<defs><marker id="arrowhead" markerWidth="12" markerHeight="12" refX="9" refY="4" orient="auto"><path d="M0,0 L10,4 L0,8 z" fill="#333"/></marker></defs>"##,
     );
 
-    render_background(&mut svg, &scene.background, w, h);
+    render_background(&mut svg, &scene.background, w, h, brand);
 
     // Elements draw in `layer` order, stable within equal layers.
     let mut ordered: Vec<&Element> = scene.elements.iter().collect();
     ordered.sort_by_key(|e| e.layer);
     for el in ordered {
-        render_element(&mut svg, el, scene);
+        render_element(&mut svg, el, scene, brand);
+    }
+
+    if let Some(mark) = brand.and_then(|b| b.watermark.as_deref()) {
+        // A small, unobtrusive watermark in the bottom-right, inside the safe
+        // margin (§13).
+        let _ = write!(
+            svg,
+            r##"<text x="{:.0}" y="{:.0}" font-size="{:.0}" fill="{}" opacity="0.5" text-anchor="end">{}</text>"##,
+            w as f32 * 0.95,
+            h as f32 * 0.965,
+            (w as f32 * 0.022).clamp(16.0, 40.0),
+            esc_attr(brand.map(|b| b.text.as_str()).unwrap_or("#888")),
+            esc_text(mark)
+        );
     }
 
     if overlay_safe_area {
@@ -156,9 +186,25 @@ fn render_scene(project: &MotionProject, scene: &Scene, overlay_safe_area: bool)
 }
 
 /// Draw the scene backdrop.
-fn render_background(svg: &mut String, bg: &Background, w: u32, h: u32) {
+fn render_background(
+    svg: &mut String,
+    bg: &Background,
+    w: u32,
+    h: u32,
+    brand: Option<&crate::motion_brand::BrandKit>,
+) {
     match bg {
         Background::Solid { color } => {
+            let _ = write!(
+                svg,
+                r##"<rect x="0" y="0" width="{w}" height="{h}" fill="{}"/>"##,
+                esc_attr(color)
+            );
+        }
+        Background::Theme => {
+            // Defer to the brand's ground; fall back to a neutral dark if no
+            // kit is applied.
+            let color = brand.map(|b| b.background.as_str()).unwrap_or("#0A0A0B");
             let _ = write!(
                 svg,
                 r##"<rect x="0" y="0" width="{w}" height="{h}" fill="{}"/>"##,
@@ -191,12 +237,17 @@ fn render_background(svg: &mut String, bg: &Background, w: u32, h: u32) {
 }
 
 /// Draw one element, wrapped in a group carrying its entry animation.
-fn render_element(svg: &mut String, el: &Element, scene: &Scene) {
+fn render_element(
+    svg: &mut String,
+    el: &Element,
+    scene: &Scene,
+    brand: Option<&crate::motion_brand::BrandKit>,
+) {
     let anim_style = animation_style(el.animation.as_ref());
     let _ = write!(svg, r##"<g style="{anim_style}">"##);
 
     match el.kind.as_str() {
-        "text" | "title" | "caption" | "cta" | "callout" => render_text(svg, el),
+        "text" | "title" | "caption" | "cta" | "callout" => render_text(svg, el, brand),
         "image" | "screenshot" => render_image(svg, el),
         "sketch-arrow" | "arrow" | "connector" => render_arrow(svg, el, scene),
         "sketch-character" | "character" => render_character(svg, el),
@@ -211,7 +262,7 @@ fn render_element(svg: &mut String, el: &Element, scene: &Scene) {
     svg.push_str("</g>");
 }
 
-fn render_text(svg: &mut String, el: &Element) {
+fn render_text(svg: &mut String, el: &Element, brand: Option<&crate::motion_brand::BrandKit>) {
     let content = el.text_content().unwrap_or("");
     let pos = el.position.unwrap_or_default_point();
     let size = el.size;
@@ -234,7 +285,13 @@ fn render_text(svg: &mut String, el: &Element) {
                 .clamp(16.0, 400.0)
         }
     };
-    let fill = el.prop_str("color").unwrap_or("#111111");
+    // An explicit colour on the element wins; otherwise the brand supplies a
+    // default for this kind (CTA → accent, else body text). Without a kit, a
+    // dark ink keeps text legible on the default light scaffolding.
+    let brand_default = brand
+        .map(|b| b.text_color_for(&el.kind))
+        .unwrap_or("#111111");
+    let fill = el.prop_str("color").unwrap_or(brand_default);
     let weight = if matches!(el.kind.as_str(), "title" | "cta") {
         "700"
     } else {
@@ -460,13 +517,17 @@ const ANIM_KEYFRAMES: &str = r##"
 // The preview player — one self-contained HTML file.
 // ---------------------------------------------------------------------------
 
-fn preview_html(project: &MotionProject, captions: &crate::motion_caption::CaptionTrack) -> String {
+fn preview_html(
+    project: &MotionProject,
+    captions: &crate::motion_caption::CaptionTrack,
+    brand: Option<&crate::motion_brand::BrandKit>,
+) -> String {
     let mut scenes_svg = String::new();
     for scene in &project.scenes {
         // Each scene's SVG is embedded as a data-bearing template the player
         // swaps in; swapping restarts the CSS animations, so each scene plays
         // its entry animations when it appears.
-        let svg = render_scene(project, scene, false);
+        let svg = render_scene(project, scene, false, brand);
         let _ = write!(
             scenes_svg,
             r##"<template class="scene" data-duration="{}">{}</template>"##,
@@ -523,7 +584,7 @@ main {{ flex: 1; display: grid; place-items: center; padding: 18px; }}
 #safe {{ position: absolute; inset: 5%; border: 2px dashed rgba(224,64,63,.7); border-radius: 4px; pointer-events: none; display: none; }}
 #stage.show-safe #safe {{ display: block; }}
 #caption {{ position: absolute; left: 6%; right: 6%; bottom: {cap_bottom}%; text-align: center; pointer-events: none; }}
-#caption span {{ display: inline; background: rgba(0,0,0,.62); color: #fff; font-weight: 600; font-size: clamp(14px, 2.1vw, 28px); line-height: 1.35; padding: .18em .5em; border-radius: 6px; box-decoration-break: clone; -webkit-box-decoration-break: clone; }}
+#caption span {{ display: inline; background: {cap_bg}; color: {cap_fg}; font-weight: 600; font-size: clamp(14px, 2.1vw, 28px); line-height: 1.35; padding: .18em .5em; border-radius: 6px; box-decoration-break: clone; -webkit-box-decoration-break: clone; }}
 #caption:empty {{ display: none; }}
 footer {{ padding: 12px 18px; border-top: 1px solid #262626; display: flex; align-items: center; gap: 14px; }}
 button {{ background: var(--raised); color: #eee; border: 1px solid #333; border-radius: 7px; padding: 7px 14px; cursor: pointer; font-size: 14px; }}
@@ -635,6 +696,12 @@ render(0);
         } else {
             7
         },
+        cap_bg = brand
+            .map(|b| b.caption_background.clone())
+            .unwrap_or_else(|| "rgba(0,0,0,.62)".to_string()),
+        cap_fg = brand
+            .map(|b| b.caption_text.clone())
+            .unwrap_or_else(|| "#ffffff".to_string()),
         n = project.scenes.len(),
     )
 }
