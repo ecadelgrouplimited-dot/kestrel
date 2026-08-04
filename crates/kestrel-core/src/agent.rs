@@ -247,6 +247,7 @@ pub fn tools_for(profile: Profile) -> Vec<ToolSpec> {
                 "motion_status",
                 "write_scene",
                 "verify_motion",
+                "caption_motion",
                 "preview_motion",
                 // Files & content (scripts, briefs, brand themes, assets)
                 "read_file",
@@ -375,6 +376,25 @@ fn motion_tools() -> Vec<ToolSpec> {
                 },
             }),
         },
+        ToolSpec {
+            name: "caption_motion".to_string(),
+            description: "Generate editable captions for the video from each scene's narration, \
+                          aligned to the scene timeline, and save them (captions/captions.json \
+                          plus a captions.srt sidecar). The preview overlays them live — captions \
+                          stay editable data, never burned into the render. Optionally pass `srt` \
+                          to import an existing SRT instead of generating. Do this after the \
+                          scenes and their narration are set."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "srt": {
+                        "type": "string",
+                        "description": "Optional: import this SRT text instead of generating from narration.",
+                    },
+                },
+            }),
+        },
     ]
 }
 
@@ -413,6 +433,9 @@ pub fn motion_system_prompt(root: &Path) -> String {
          - motion_status(): the current outline — scenes, durations, element counts, total \
            runtime, last verification. Read it before revising.\n\
          - verify_motion(): the QA engine. Run it before finishing; fix every ERROR and re-verify.\n\
+         - caption_motion(): generate editable captions from the scenes' narration, aligned to \
+           the timeline (saved as captions.json + an SRT sidecar). Captions overlay live in the \
+           preview; they are never burned into the render.\n\
          - preview_motion(): render the project to a watchable HTML preview and open it, so you \
            and the user can SEE the result. Do this once it verifies clean, and again after a \
            revision.\n\
@@ -437,7 +460,8 @@ pub fn motion_system_prompt(root: &Path) -> String {
             fit within the scene.\n\
          4. VERIFY with verify_motion and REPAIR. An ERROR is a broken build — fix the named scene \
             and re-verify until it passes. A clean pass is the bar for \"done\". Then \
-            preview_motion() to render it and watch it.\n\
+            caption_motion() to caption the narration, and preview_motion() to render it and \
+            watch it.\n\
          5. Be deterministic and specific. Reuse components and the brand theme rather than \
             reinventing per scene. Don't invent facts, and don't claim a render exists that you \
             didn't produce.\n\n\
@@ -1276,6 +1300,7 @@ pub fn describe_call(call: &ToolCall) -> String {
             format!("🎬 Writing scene {id}")
         }
         "verify_motion" => "🧪 Verifying the video".to_string(),
+        "caption_motion" => "💬 Generating captions".to_string(),
         "preview_motion" => "🎞 Rendering the video preview".to_string(),
         other => other.to_string(),
     }
@@ -1798,6 +1823,7 @@ pub fn execute_tool(root: &Path, call: &ToolCall) -> String {
         "motion_status" => execute_motion_status(root),
         "write_scene" => execute_write_scene(root, call),
         "verify_motion" => execute_verify_motion(root),
+        "caption_motion" => execute_caption_motion(root, call),
         "preview_motion" => execute_preview_motion(root, call),
         other => format!("error: unknown tool {other}"),
     }
@@ -1942,6 +1968,31 @@ fn execute_verify_motion(root: &Path) -> String {
         Ok(report) => report.render(),
         Err(err) => format!("error: {err} (create the project first with motion_new)"),
     }
+}
+
+/// Generate (or import) captions and save them beside the project.
+fn execute_caption_motion(root: &Path, call: &ToolCall) -> String {
+    let project = match crate::motion::load_project(root) {
+        Ok(p) => p,
+        Err(err) => return format!("error: {err} (create the project first with motion_new)"),
+    };
+    let track = match call.input.get("srt").and_then(|v| v.as_str()) {
+        Some(srt) if !srt.trim().is_empty() => crate::motion_caption::CaptionTrack::from_srt(srt),
+        _ => crate::motion_caption::CaptionTrack::from_project(&project),
+    };
+    if track.cues.is_empty() {
+        return "No captions produced — the scenes have no narration yet. Set each scene's \
+                `narration` (via write_scene) and try again."
+            .to_string();
+    }
+    if let Err(err) = crate::motion_caption::save_captions(root, &track) {
+        return format!("error: could not save captions: {err}");
+    }
+    format!(
+        "Generated {} caption cue(s), saved to captions/captions.json and captions.srt. They \
+         overlay live in the preview.",
+        track.cues.len()
+    )
 }
 
 /// Render the project to a self-contained HTML preview and (by default) open it.
@@ -3896,6 +3947,71 @@ mod tests {
         );
         assert!(status.contains("scene-01"));
         assert!(status.contains("6.0s total"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn motion_captions_and_preview() {
+        let dir = std::env::temp_dir().join(format!("kestrel-motion-cap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        execute_tool(
+            &dir,
+            &ToolCall {
+                id: "1".into(),
+                name: "motion_new".into(),
+                input: serde_json::json!({
+                    "title": "Cap Test", "type": "social-short", "format": "vertical",
+                }),
+            },
+        );
+        execute_tool(
+            &dir,
+            &ToolCall {
+                id: "2".into(),
+                name: "write_scene".into(),
+                input: serde_json::json!({
+                    "scene": {
+                        "id": "s1", "name": "Hook", "duration": 5,
+                        "narration": "Three signs your stock is walking out the door.",
+                        "elements": [
+                            { "id": "t", "type": "title", "content": "3 warning signs",
+                              "position": { "x": 200, "y": 700 },
+                              "size": { "width": 680, "height": 140 } }
+                        ]
+                    }
+                }),
+            },
+        );
+
+        // Generate captions from the narration.
+        let cap = execute_tool(
+            &dir,
+            &ToolCall {
+                id: "3".into(),
+                name: "caption_motion".into(),
+                input: serde_json::json!({}),
+            },
+        );
+        assert!(cap.contains("caption cue"), "got: {cap}");
+        assert!(dir.join("captions/captions.json").exists());
+        assert!(dir.join("captions/captions.srt").exists());
+
+        // Render the preview (without opening a browser in the test).
+        let prev = execute_tool(
+            &dir,
+            &ToolCall {
+                id: "4".into(),
+                name: "preview_motion".into(),
+                input: serde_json::json!({ "open": false }),
+            },
+        );
+        assert!(prev.contains("Rendered"), "got: {prev}");
+        let html = std::fs::read_to_string(dir.join("output/preview.html")).unwrap();
+        // The caption made it into the player as data, not into a scene SVG.
+        assert!(html.contains("const captions = ["));
+        assert!(html.contains("walking out the door") || html.contains("Three signs"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -77,7 +77,7 @@ impl Renderer for SvgRenderer {
     }
 
     fn render_preview_html(&self, project: &MotionProject) -> String {
-        preview_html(project)
+        preview_html(project, &crate::motion_caption::CaptionTrack::default())
     }
 
     fn export(
@@ -100,11 +100,16 @@ impl Renderer for SvgRenderer {
 
 /// Write the preview player for a project to `output/preview.html` and return
 /// its path. This is what the agent's `preview_motion` tool calls.
+///
+/// If the project has a caption track on disk (`captions/captions.json`), it is
+/// overlaid live in the player — captions stay editable data, never baked into
+/// the scene SVG (§9).
 pub fn write_preview(root: &Path, project: &MotionProject) -> std::io::Result<PathBuf> {
     let dir = root.join("output");
     std::fs::create_dir_all(&dir)?;
     let path = dir.join("preview.html");
-    std::fs::write(&path, SvgRenderer.render_preview_html(project))?;
+    let captions = crate::motion_caption::load_captions(root);
+    std::fs::write(&path, preview_html(project, &captions))?;
     Ok(path)
 }
 
@@ -455,7 +460,7 @@ const ANIM_KEYFRAMES: &str = r##"
 // The preview player — one self-contained HTML file.
 // ---------------------------------------------------------------------------
 
-fn preview_html(project: &MotionProject) -> String {
+fn preview_html(project: &MotionProject, captions: &crate::motion_caption::CaptionTrack) -> String {
     let mut scenes_svg = String::new();
     for scene in &project.scenes {
         // Each scene's SVG is embedded as a data-bearing template the player
@@ -468,6 +473,21 @@ fn preview_html(project: &MotionProject) -> String {
             scene.duration, svg
         );
     }
+
+    // Captions ride the player as data — an array of {{s,e,t}} the overlay
+    // shows by time — never drawn into the scene SVG (§9).
+    let captions_json: Vec<String> = captions
+        .cues
+        .iter()
+        .map(|c| {
+            format!(
+                r#"{{"s":{:.3},"e":{:.3},"t":"{}"}}"#,
+                c.start,
+                c.end,
+                esc_js(&c.text.replace('\n', " "))
+            )
+        })
+        .collect();
     let durations: Vec<String> = project
         .scenes
         .iter()
@@ -502,6 +522,9 @@ main {{ flex: 1; display: grid; place-items: center; padding: 18px; }}
 #stage svg {{ width: 100%; height: 100%; display: block; }}
 #safe {{ position: absolute; inset: 5%; border: 2px dashed rgba(224,64,63,.7); border-radius: 4px; pointer-events: none; display: none; }}
 #stage.show-safe #safe {{ display: block; }}
+#caption {{ position: absolute; left: 6%; right: 6%; bottom: {cap_bottom}%; text-align: center; pointer-events: none; }}
+#caption span {{ display: inline; background: rgba(0,0,0,.62); color: #fff; font-weight: 600; font-size: clamp(14px, 2.1vw, 28px); line-height: 1.35; padding: .18em .5em; border-radius: 6px; box-decoration-break: clone; -webkit-box-decoration-break: clone; }}
+#caption:empty {{ display: none; }}
 footer {{ padding: 12px 18px; border-top: 1px solid #262626; display: flex; align-items: center; gap: 14px; }}
 button {{ background: var(--raised); color: #eee; border: 1px solid #333; border-radius: 7px; padding: 7px 14px; cursor: pointer; font-size: 14px; }}
 button:hover {{ border-color: var(--gold); }}
@@ -520,7 +543,7 @@ button.primary {{ background: var(--gold); color: #1a1206; border-color: var(--g
   <span class="meta">{w}×{h} · {n} scenes · {total:.1}s</span>
 </header>
 <main>
-  <div id="stage"><div id="mount"></div><div id="safe"></div></div>
+  <div id="stage"><div id="mount"></div><div id="safe"></div><div id="caption"></div></div>
 </main>
 <footer>
   <button id="play" class="primary">▶ Play</button>
@@ -528,6 +551,7 @@ button.primary {{ background: var(--gold); color: #1a1206; border-color: var(--g
   <span id="label"></span>
   <div id="track"><div id="bar"></div></div>
   <span id="clock">0.0 / {total:.1}s</span>
+  <button id="capbtn">CC</button>
   <button id="safebtn">Safe area</button>
 </footer>
 <div id="scenes" hidden>{scenes}</div>
@@ -535,14 +559,16 @@ button.primary {{ background: var(--gold); color: #1a1206; border-color: var(--g
 const scenes = [...document.querySelectorAll('#scenes .scene')].map(t => t.innerHTML);
 const durations = [{durations}];
 const names = [{names}];
+const captions = [{captions}];
 const total = {total};
 const mount = document.getElementById('mount');
 const bar = document.getElementById('bar');
 const clock = document.getElementById('clock');
 const label = document.getElementById('label');
 const stage = document.getElementById('stage');
+const cap = document.getElementById('caption');
 const playBtn = document.getElementById('play');
-let shown = -1, playing = false, anchor = 0, base = 0, raf = 0;
+let shown = -1, playing = false, anchor = 0, base = 0, raf = 0, capsOn = true;
 
 function show(idx) {{
   if (idx === shown) return;
@@ -560,11 +586,18 @@ function sceneAt(t) {{
   }}
   return durations.length - 1;
 }}
+function activeCaption(t) {{
+  for (const c of captions) {{ if (t >= c.s && t < c.e) return c.t; }}
+  return '';
+}}
 function render(t) {{
   const clamped = Math.min(t, total);
   show(sceneAt(clamped));
   bar.style.width = (total ? 100 * clamped / total : 0) + '%';
   clock.textContent = clamped.toFixed(1) + ' / ' + total.toFixed(1) + 's';
+  const line = capsOn ? activeCaption(clamped) : '';
+  cap.innerHTML = line ? '<span></span>' : '';
+  if (line) cap.firstChild.textContent = line;
 }}
 function tick(now) {{
   if (!playing) return;
@@ -587,6 +620,7 @@ function pause() {{
 playBtn.onclick = () => playing ? pause() : play();
 document.getElementById('restart').onclick = () => {{ pause(); base = 0; shown = -1; render(0); playBtn.textContent = '▶ Play'; }};
 document.getElementById('safebtn').onclick = () => stage.classList.toggle('show-safe');
+document.getElementById('capbtn').onclick = (e) => {{ capsOn = !capsOn; e.target.style.opacity = capsOn ? '1' : '.45'; render(base); }};
 render(0);
 </script>
 </body>
@@ -595,8 +629,30 @@ render(0);
         scenes = scenes_svg,
         durations = durations.join(","),
         names = names.join(","),
+        captions = captions_json.join(","),
+        cap_bottom = if project.project.format == crate::motion::Format::Vertical {
+            13
+        } else {
+            7
+        },
         n = project.scenes.len(),
     )
+}
+
+/// Escape a string for embedding inside a JSON/JS double-quoted string.
+fn esc_js(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => {}
+            '<' => out.push_str("\\u003c"), // never let </script> escape the block
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// A display label for a scene (name, or the id when unnamed).

@@ -43,6 +43,10 @@ fn main() {
       ] }"##;
 
     let project = MotionProject::from_json(json).expect("sample must parse");
-    let path = write_preview(std::path::Path::new(&out), &project).expect("write preview");
+    let root = std::path::Path::new(&out);
+    // Generate captions from the narration so the preview overlays them.
+    let captions = kestrel_core::motion_caption::CaptionTrack::from_project(&project);
+    kestrel_core::motion_caption::save_captions(root, &captions).expect("save captions");
+    let path = write_preview(root, &project).expect("write preview");
     println!("{}", path.display());
 }
