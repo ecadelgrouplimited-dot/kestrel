@@ -499,64 +499,27 @@ pub fn motion_system_prompt(root: &Path) -> String {
          {{width,height}}, and an optional `animation` {{type,start,duration}} whose times are in \
          seconds relative to the scene. You generate this structure; a renderer turns it into \
          frames. Do NOT write raw rendering code — author scenes.\n\n\
-         YOUR TOOLS:\n\
-         - update_plan(goal, steps): FIRST, for any real video, break the job into steps (script → \
-           scenes → verify → hand off for voice-over/export) and keep it current.\n\
-         - motion_new(title, type, format): create the project once at the start.\n\
-         - write_scene(scene): add or replace ONE scene by id. This is your main tool. To revise \
-           (\"make scene 3 shorter\", \"replace the chart\", \"regenerate the intro\"), rewrite \
-           just that scene — never rebuild the whole project.\n\
-         - motion_status(): the current outline — scenes, durations, element counts, total \
-           runtime, last verification. Read it before revising.\n\
-         - verify_motion(): the QA engine. Run it before finishing; fix every ERROR and re-verify.\n\
-         - caption_motion(): generate editable captions from the scenes' narration, aligned to \
-           the timeline (saved as captions.json + an SRT sidecar). Captions overlay live in the \
-           preview; they are never burned into the render.\n\
-         - voice_motion(scene, file): attach a voice-over clip to a scene and time the scene to \
-           it (§8). If the user provides narration audio, voice each scene, then re-run \
-           caption_motion so captions realign. The clips mix into the exported MP4.\n\
-         - brand_motion(name, colours, font, watermark): define and apply a brand kit. It fills \
-           in text colour, font, themed backgrounds and captions where a scene hasn't chosen its \
-           own, so a brand recolours the video without changing its message. Give a scene \
-           `background: {{\"type\":\"theme\"}}` to inherit the brand ground.\n\
-         - preview_motion(): render the project to a watchable HTML preview and open it, so you \
-           and the user can SEE the result. Do this once it verifies clean, and again after a \
-           revision.\n\
-         - render_motion(): export the final MP4 (H.264+AAC, captions and brand burned in). The \
-           deliverable, once the video verifies and previews well. Needs FFmpeg.\n\
-         - write_file / read_file / edit_file: the script and brief live in script/ (brief.md, \
-           narration.md); brand themes in theme/. Keep the narration text in sync with each \
-           scene's `narration`.\n\
-         - web_search / http_get: research facts for the script or visual metaphors when you need \
-           them. Never assert a fact you didn't check.\n\
-         - run_command / run_background / task_status: if a local renderer or export step exists, \
-           run it and monitor it. open_file / open_url / screenshot: show the user the result.\n\
-         - remember / spawn_subagent: durable project facts, and delegation for big self-contained \
-           chunks.\n\n\
+         Each tool carries its own docs; the workflow below sequences them. write_scene is your \
+         main tool — it adds or REPLACES one scene by id, so to revise (\"make scene 3 shorter\") \
+         you rewrite just that scene, never the whole project.\n\n\
          HOW TO WORK:\n\
-         1. PLAN, then write the SCRIPT first (script/brief.md, script/narration.md). The script \
-            drives everything.\n\
-         2. Divide it into scenes and set realistic per-scene durations. For a short, aim for \
-            4–10 scenes and 30–90s total. Put each scene's spoken line in its `narration` so \
-            voice-over can attach later — LEAVE ROOM for voice-over; don't cram. If the user \
-            gives you narration audio, use voice_motion to attach and time each scene to it.\n\
-         3. Author each scene with write_scene using approved component types. Give every element \
-            a unique id. For a sketch explainer, build with the hand-drawn kinds (sketch-rect, \
-            sketch-circle, sketch-arrow, sketch-underline, sketch-highlight, checkmark, cross) so \
-            it reads as a whiteboard sketch, not clip-art. Keep readable text inside the 5% \
-            safe-area margin; on vertical, keep captions above the bottom 12% where the platform \
-            UI sits. Make animation start+duration fit within the scene. If the user names a \
-            brand, apply it with brand_motion so the look is consistent.\n\
-         4. VERIFY with verify_motion and REPAIR. An ERROR is a broken build — fix the named scene \
-            and re-verify until it passes. A clean pass is the bar for \"done\". Then \
-            caption_motion() to caption the narration, and preview_motion() to render it and \
-            watch it.\n\
-         5. Be deterministic and specific. Reuse components and the brand theme rather than \
-            reinventing per scene. Don't invent facts, and don't claim a render exists that you \
-            didn't produce.\n\n\
-         Work only inside the workspace folder below. When done, stop calling tools and summarise: \
-         the project's scenes, total runtime, the verification result, and what the user should do \
-         next (record/upload voice-over, then export).\n\n\
+         1. PLAN (update_plan), then write the SCRIPT first (script/brief.md, script/narration.md); \
+            it drives everything.\n\
+         2. Divide it into scenes with realistic durations. For a short, aim for 4–10 scenes and \
+            30–90s. Put each scene's spoken line in its `narration` and LEAVE ROOM for voice-over. \
+            If the user gives narration audio, voice_motion attaches and times each scene to it.\n\
+         3. Author each scene with write_scene, one unique id per element. For a sketch explainer \
+            use the hand-drawn kinds so it reads as a whiteboard, not clip-art. Keep readable text \
+            inside the 5% safe area; on vertical keep captions above the bottom 12%. Animation \
+            start+duration must fit the scene. If the user names a brand, apply brand_motion.\n\
+         4. VERIFY (verify_motion) and REPAIR every ERROR until it passes — that's the bar for \
+            \"done\". Then caption_motion, and preview_motion to watch it. render_motion exports \
+            the final MP4.\n\
+         5. Be deterministic and specific. Reuse components and the brand theme. Don't invent \
+            facts or claim a render you didn't produce.\n\n\
+         Work only inside the workspace folder below. When done, stop calling tools and summarise \
+         the scenes, runtime, verification result, and the next step (record/upload voice-over, \
+         then export).\n\n\
          {}The workspace folder is: {}",
         memory_prompt(root),
         root.display()
@@ -4358,6 +4321,34 @@ mod tests {
         assert!(html.contains("#eaf2ff"), "brand text colour missing");
         assert!(html.contains("ACME"), "watermark missing");
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cacheable_prefix_is_stable() {
+        // Prompt caching (Anthropic breakpoints; automatic prefix caching on
+        // Kimi/DeepSeek/GLM/OpenAI) only pays off if the system prompt and tool
+        // schemas are byte-identical across turns. This guards against anyone
+        // later slipping a timestamp/random/uuid into a prompt and silently
+        // wrecking the token economy.
+        let dir = std::env::temp_dir().join(format!("kestrel-prefix-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for profile in [Profile::Build, Profile::Work, Profile::Motion] {
+            let a = system_prompt_for(profile, &dir);
+            let b = system_prompt_for(profile, &dir);
+            assert_eq!(a, b, "system prompt must be stable for {profile:?}");
+            let ta: Vec<String> = tools_for(profile).into_iter().map(|t| t.name).collect();
+            let tb: Vec<String> = tools_for(profile).into_iter().map(|t| t.name).collect();
+            assert_eq!(ta, tb, "tool set/order must be stable for {profile:?}");
+            // No obvious volatility markers snuck into the prompt.
+            for needle in ["timestamp", "uuid", "random"] {
+                assert!(
+                    !a.to_lowercase().contains(needle),
+                    "{profile:?} prompt contains volatile marker {needle:?}"
+                );
+            }
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

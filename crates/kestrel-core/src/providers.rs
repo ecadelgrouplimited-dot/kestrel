@@ -266,8 +266,10 @@ fn accumulate_stream_usage(kind: ProviderKind, value: &serde_json::Value, usage:
             _ => {}
         },
         ProviderKind::Openai => {
-            if value.get("usage").is_some() {
-                let cached = u("/usage/prompt_tokens_details/cached_tokens").unwrap_or(0);
+            if let Some(usage_obj) = value.get("usage") {
+                // Read cache hits across the OpenAI/Kimi/DeepSeek/GLM field
+                // conventions, so every provider's savings are credited.
+                let cached = openai_cached_tokens(usage_obj);
                 let prompt = u("/usage/prompt_tokens").unwrap_or(0);
                 usage.input_tokens = prompt.saturating_sub(cached);
                 usage.cache_read = cached;
@@ -777,6 +779,30 @@ pub fn parse_turn(kind: ProviderKind, response: &serde_json::Value) -> Result<Tu
     }
 }
 
+/// The count of prompt tokens served from cache, across the field conventions
+/// the OpenAI-compatible providers actually use — so cache savings are credited
+/// for every model, not just the ones that happen to match OpenAI's shape:
+///
+/// - `prompt_tokens_details.cached_tokens` — OpenAI, Moonshot/Kimi, z.ai GLM,
+///   and newer DeepSeek. (Verified live: Kimi K3 reports it here in both
+///   streaming and non-streaming.)
+/// - `cached_tokens` (top-level) — Moonshot also mirrors it here.
+/// - `prompt_cache_hit_tokens` — DeepSeek's classic field.
+///
+/// The largest of whatever is present wins, so a provider populating several
+/// consistent fields is fine and a partial one still counts.
+fn openai_cached_tokens(usage: &serde_json::Value) -> u64 {
+    [
+        "/prompt_tokens_details/cached_tokens",
+        "/cached_tokens",
+        "/prompt_cache_hit_tokens",
+    ]
+    .iter()
+    .filter_map(|ptr| usage.pointer(ptr).and_then(|v| v.as_u64()))
+    .max()
+    .unwrap_or(0)
+}
+
 /// Extract token usage (including cache accounting) from a full response.
 pub fn parse_usage(kind: ProviderKind, response: &serde_json::Value) -> Usage {
     let u = |ptr: &str| response.pointer(ptr).and_then(|v| v.as_u64()).unwrap_or(0);
@@ -788,7 +814,7 @@ pub fn parse_usage(kind: ProviderKind, response: &serde_json::Value) -> Usage {
             cache_write: u("/usage/cache_creation_input_tokens"),
         },
         ProviderKind::Openai => {
-            let cached = u("/usage/prompt_tokens_details/cached_tokens");
+            let cached = response.get("usage").map(openai_cached_tokens).unwrap_or(0);
             let prompt = u("/usage/prompt_tokens");
             Usage {
                 input_tokens: prompt.saturating_sub(cached),
@@ -1234,6 +1260,31 @@ mod tests {
         assert_eq!(u.input_tokens, 200);
         assert_eq!(u.cache_read, 800);
         assert_eq!(u.output_tokens, 50);
+
+        // DeepSeek reports cache hits as `prompt_cache_hit_tokens`, not the
+        // OpenAI-style nested field — credit it anyway.
+        let deepseek = serde_json::json!({
+            "usage": {
+                "prompt_tokens": 1000,
+                "completion_tokens": 50,
+                "prompt_cache_hit_tokens": 880,
+                "prompt_cache_miss_tokens": 120
+            }
+        });
+        let u = parse_usage(ProviderKind::Openai, &deepseek);
+        assert_eq!(u.cache_read, 880, "DeepSeek cache hits must be credited");
+        assert_eq!(u.input_tokens, 120);
+
+        // Moonshot/Kimi mirrors the count at the top level too (verified live).
+        let kimi = serde_json::json!({
+            "usage": { "prompt_tokens": 2922, "completion_tokens": 20, "cached_tokens": 2816 }
+        });
+        let u = parse_usage(ProviderKind::Openai, &kimi);
+        assert_eq!(
+            u.cache_read, 2816,
+            "Kimi top-level cached_tokens must be credited"
+        );
+        assert_eq!(u.input_tokens, 106);
     }
 
     #[test]
