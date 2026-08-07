@@ -87,9 +87,10 @@ Kestrel Motion supports four kinds; each should pick suitable components.
 > Smart Business Book."** Walk through four steps inside a browser window with a
 > cursor moving to each control and a callout naming the action. End on a success
 > checkmark.
-- **Success:** uses `browser-frame` (with a URL), `cursor`, and `callout`
-  components; four step-scenes; 1920×1080; the cursor and callouts land inside
-  the frame; verifies clean.
+- **Success:** uses `browser-frame` (with `url: "smartbusinessbook.io"`),
+  `cursor`, and `callout` components; four step-scenes; 1920×1080; the cursor and
+  callouts land inside the frame; ends on the `smartbusinessbook.io` CTA; verifies
+  clean.
 
 ### 2.3 Social short *(fast, punchy, vertical)*
 > A 20-second vertical social short with a strong hook, three fast stat cards,
@@ -286,13 +287,19 @@ a *real, relatable* business pain, shows the SBB fix as the turn, and ends on
 consistent SBB brand kit across the set (warm gold on near-black, a "Smart
 Business Book" watermark) so they read as one campaign.
 
+**CTA convention (all sections):** every CTA ends on the site —
+**`smartbusinessbook.io`** — as the final on-screen line (a `cta` component),
+spoken in the last narration line, and set as the `browser-frame` `url` wherever
+the app appears. Keep it short: an action + the domain, e.g. *"Know your stock —
+smartbusinessbook.io."*
+
 ### 8.1 Stock — never run out, never overstock
 > 30-second vertical sketch explainer: **"Stop guessing your stock."** Hook: a
 > shop owner staring at half-empty shelves, a customer walking out because the
 > item's gone. Problem: ordering by memory means dead stock on some shelves and
 > empty gaps on others — money frozen or money lost. Turn: SBB tracks every item
 > in and out and flags what to reorder and when. Close on a shelf that's just
-> right, with a checkmark. **CTA: "Know your stock — get Smart Business Book."**
+> right, with a checkmark. **CTA: "Know your stock — smartbusinessbook.io."**
 
 ### 8.2 Debtors — who owes you money?
 > 30-second vertical sketch explainer: **"Your money is in other people's
@@ -300,70 +307,164 @@ Business Book" watermark) so they read as one campaign.
 > full of scribbled IOUs. Problem: credit sales you can't track become sales you
 > never collect. Turn: SBB records every credit sale and shows exactly who owes
 > what, so you can follow up. Close on a paid-up ledger with a green checkmark.
-> **CTA: "Get paid what you're owed — Smart Business Book."**
+> **CTA: "Get paid what you're owed — smartbusinessbook.io."**
 
 ### 8.3 Cash flow — are you actually making a profit?
 > 30-second vertical sketch explainer: **"Busy isn't the same as profitable."**
 > Hook: a packed shop, a smiling owner — then an empty cash box. Problem: strong
 > sales can still hide a loss when you don't know your real costs. Turn: SBB puts
 > sales, costs, and profit on one screen so you see what you actually keep. Close
-> on a clear "profit up" line chart. **CTA: "See your real profit — start with
-> Smart Business Book."**
+> on a clear "profit up" line chart. **CTA: "See your real profit — smartbusinessbook.io."**
 
 ### 8.4 Expenses — where did the money go?
 > 25-second vertical sketch explainer: **"Small leaks sink the boat."** Hook:
 > coins slipping through a hand — a little here, a little there. Problem:
 > untracked small expenses quietly eat the month's profit. Turn: SBB logs every
 > expense and shows where the money really goes, in a quick bar chart. Close on a
-> plugged leak with a checkmark. **CTA: "Plug the leaks — Smart Business Book."**
+> plugged leak with a checkmark. **CTA: "Plug the leaks — smartbusinessbook.io."**
 
 ### 8.5 Getting paid — send invoices, get paid faster
 > 30-second vertical sketch explainer: **"Chasing payments all day?"** Hook: an
 > owner on the phone, again, asking for money owed. Problem: handwritten bills and
 > "I'll pay later" stretch a quick sale into a month-long chase. Turn: SBB creates
 > a clean invoice in seconds and tracks who's paid. Close on a "PAID" stamp with a
-> checkmark. **CTA: "Invoice in seconds — get Smart Business Book."**
+> checkmark. **CTA: "Invoice in seconds — smartbusinessbook.io."**
 
 ### 8.6 Records — ready for tax season in minutes
 > 30-second vertical sketch explainer: **"Tax season shouldn't be a nightmare."**
 > Hook: a shoebox exploding with crumpled receipts. Problem: a year of loose paper
 > means days of stress and guesswork. Turn: SBB keeps every sale and expense in
 > one place, so your records are ready when you need them. Close on a tidy report
-> with a checkmark. **CTA: "Stay ready — Smart Business Book."**
+> with a checkmark. **CTA: "Stay ready — smartbusinessbook.io."**
 
 ### 8.7 Knowing your numbers — your whole business at a glance
 > 30-second vertical sketch explainer: **"Do you know your numbers?"** Hook: an
 > owner asked "how's business?" — and shrugging. Problem: running on gut feel
 > means missing what's working and what's bleeding. Turn: SBB shows today's sales,
 > top products, and profit on one dashboard. Close on a confident owner reading a
-> clear chart. **CTA: "Know your numbers — open Smart Business Book."**
+> clear chart. **CTA: "Know your numbers — smartbusinessbook.io."**
 
 ### 8.8 From paper to app — ditch the exercise book
 > 25-second vertical sketch explainer: **"Still running your business in an
 > exercise book?"** Hook: a worn paper ledger, smudged and torn, a cross over it.
 > Problem: paper gets lost, adds up wrong, and tells you nothing. Turn: SBB is the
 > business book that adds up for you and remembers everything. Close on the paper
-> book replaced by a phone, checkmark. **CTA: "Upgrade your book — Smart Business
-> Book."**
+> book replaced by a phone, checkmark. **CTA: "Upgrade your book — smartbusinessbook.io."**
 
 ### 8.9 Multiple staff / branches — know what everyone's doing
 > 30-second vertical sketch explainer: **"Who sold what, where?"** Hook: two shop
 > branches, an owner who can't be in both. Problem: without a shared record, sales
 > and stock across staff and branches are a black box. Turn: SBB gives every branch
 > one book the owner can see from anywhere. Close on both branches ticking green.
-> **CTA: "See every branch — Smart Business Book."**
+> **CTA: "See every branch — smartbusinessbook.io."**
 
 ### 8.10 Reorder timing — restock at the right moment
 > 25-second vertical sketch explainer: **"Order too late, lose the sale. Too
 > early, freeze your cash."** Hook: a "SOLD OUT" sign next to a shelf overflowing
 > with the wrong thing. Problem: reordering by guesswork costs you either way.
 > Turn: SBB watches your stock levels and tells you what to reorder, and when.
-> Close on a perfectly-timed delivery, checkmark. **CTA: "Reorder at the right
-> time — Smart Business Book."**
+> Close on a perfectly-timed delivery, checkmark. **CTA: "Reorder at the right time — smartbusinessbook.io."**
 
 > **Campaign tip:** run 8.1–8.10 with the *same* SBB `brand_motion` kit and a
 > shared CTA style, then `render_motion` each to a 1080×1920 MP4 — that's a
 > ready-to-post set of shorts, one per objection, all on brand.
+
+---
+
+## 9. Business tips — make owners smarter (value-first)
+
+Sell nothing; teach something. These vertical sketch explainers give small
+business owners a genuinely useful lesson — pricing, cash flow, margins,
+customers — **without pitching an SBB feature**. Value-first content builds
+trust and an audience; the brand is a light sign-off, not the message.
+
+Same **§2.1 sketch-explainer** style (hand-drawn kinds, verifies clean,
+25–35s, 1080×1920) with these differences: the video's job is to make the
+viewer *think differently* by the end; use a `chart` or a couple of big numbers
+to make the lesson land; and close on a **soft** sign-off — a short line like
+*"Run a smarter business — smartbusinessbook.io"* rather than a feature CTA.
+Keep the SBB watermark on for brand recall.
+
+### 9.1 A discount is bigger than it looks
+> Sketch explainer: **"A 10% discount isn't 10% off."** Draw it: an item costs
+> you 800, you sell at 1000 — profit is 200. Now knock 10% off the price (100
+> off) — your profit drops from 200 to 100. A **10% discount just halved your
+> profit.** Lesson: discount your *margin*, not your price, and know the number
+> before you say yes. Soft close: *"Know your numbers — smartbusinessbook.io."*
+
+### 9.2 Profit is not cash
+> Sketch explainer: **"Profitable on paper, broke in the till."** A shop sells
+> 500,000 this month — but half is on credit and rent is due today. Profit and
+> cash are two different clocks. Lesson: watch the *timing* of money in and out,
+> not just the totals; a profitable business can still run out of cash. Soft
+> close: *"Run a smarter business — smartbusinessbook.io."*
+
+### 9.3 The 80/20 rule
+> Sketch explainer: **"Most of your profit hides in a few places."** A simple
+> bar chart: roughly **80% of profit comes from 20% of your customers (and
+> products).** Lesson: find your vital few — your best customers and best-margin
+> lines — and protect and grow them, instead of spreading yourself thin. Soft
+> close: *"Grow what works — smartbusinessbook.io."*
+
+### 9.4 Two wallets, not one
+> Sketch explainer: **"Your money and the business's money are not the same
+> money."** One pocket for both = you never know if you're winning. Draw the
+> split: a business account, a personal account, and you paying yourself a fixed
+> wage from it. Lesson: separate the two and pay yourself deliberately. Soft
+> close: *"See your business clearly — smartbusinessbook.io."*
+
+### 9.5 Know your break-even
+> Sketch explainer: **"How many sales before you earn a single shilling?"** Draw
+> it: fixed costs 300,000 a month, 200 profit per sale → you must sell **1,500
+> just to break even**; sale 1,501 is your first real profit. Lesson: know that
+> number, and every day is a race to pass it — not a guess. Soft close: *"Know
+> your break-even — smartbusinessbook.io."*
+
+### 9.6 Your profit is made when you buy
+> Sketch explainer: **"You don't make money when you sell — you make it when you
+> buy."** Two owners buy the same goods; one negotiates 10% off and buys the
+> right quantity. Lesson: a good purchase price and smart reordering set your
+> profit before a customer ever walks in. Soft close: *"Buy smarter, keep more —
+> smartbusinessbook.io."*
+
+### 9.7 Keep a rainy-day buffer
+> Sketch explainer: **"Every business has a slow season — plan for it."** Draw a
+> line chart dipping in the lean months. Lesson: set aside a buffer (aim for ~3
+> months of costs) while times are good, so a slow month is an inconvenience, not
+> a crisis. Soft close: *"Build a safety net — smartbusinessbook.io."*
+
+### 9.8 Keeping a customer beats finding one
+> Sketch explainer: **"A repeat customer is cheaper than a new one."** It costs
+> far more to win a stranger than to bring back someone who already trusts you.
+> Draw a happy customer returning three times. Lesson: chase loyalty — service,
+> follow-up, a reason to come back — not just the next new face. Soft close:
+> *"Keep them coming back — smartbusinessbook.io."*
+
+### 9.9 Don't compete on price alone
+> Sketch explainer: **"There's always someone cheaper — don't race them to the
+> bottom."** A price war ends with everyone broke. Draw the alternative: win on
+> trust, speed, quality, and service. Lesson: give people a reason to choose you
+> that isn't the lowest number. Soft close: *"Stand out, don't sell out —
+> smartbusinessbook.io."*
+
+### 9.10 Track one number every week
+> Sketch explainer: **"You can't improve what you don't measure."** One owner
+> checks a fancy report once a year; another tracks a single number every week —
+> sales, or cash, or top product. Draw the second owner's line climbing. Lesson:
+> a small weekly habit beats a big annual guess. Soft close: *"Track it weekly —
+> smartbusinessbook.io."*
+
+### 9.11 Reinvest before you upgrade your lifestyle
+> Sketch explainer: **"Grow the tree before you eat the fruit."** First profit
+> comes in — one owner buys a bigger car, another restocks and reinvests. Draw
+> the second business branching and growing. Lesson: feed the business first;
+> lifestyle can wait until the tree is strong. Soft close: *"Grow on purpose —
+> smartbusinessbook.io."*
+
+> **Series tip:** these make an evergreen "smart business tips" playlist. Run
+> them with the SBB brand kit but a lighter, teacher-y tone; each is a standalone
+> 1080×1920 short. Because they teach rather than pitch, they earn the follow —
+> and the soft `smartbusinessbook.io` sign-off does the quiet selling.
 
 ---
 
